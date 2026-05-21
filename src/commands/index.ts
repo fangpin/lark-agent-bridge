@@ -357,6 +357,10 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
   const limit = Number.isFinite(n) && n > 0 && n <= 20 ? n : 5;
 
   const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  if (ctx.agent.id !== 'claude') {
+    await reply(ctx, '当前 agent 暂不支持历史会话列表；已有 bridge session 会自动续上，可用 `/new` 开新会话。');
+    return;
+  }
   const sessions = await listRecentSessions(cwd, limit);
   const currentSession = ctx.sessions.getRaw(ctx.scope);
   const entries = sessions.map((s) => ({
