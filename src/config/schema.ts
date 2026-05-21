@@ -89,7 +89,10 @@ export interface AppAccess {
   admins?: string[];
 }
 
+export type AgentBackend = 'claude' | 'cursor';
+
 export interface AgentCommandConfig {
+  backend?: AgentBackend;
   command?: string;
   args?: string[];
   claudeArgsOption?: string;
@@ -138,7 +141,7 @@ export interface AppPreferences {
   requireMentionInGroup?: boolean;
   /** Access control — user/chat allowlists + admin gating. See AppAccess. */
   access?: AppAccess;
-  /** Claude Code-compatible command prefix. Default: `claude`. */
+  /** Coding-agent command configuration. Default backend/command: `claude`. */
   agentCommand?: AgentCommandConfig;
   /**
    * Grace period (ms) between SIGTERM and SIGKILL when killing the claude
@@ -233,18 +236,21 @@ export function getRequireMentionInGroup(cfg: AppConfig): boolean {
 
 export function getAgentCommand(
   cfg: AppConfig,
-): { command: string; args: string[]; claudeArgsOption?: string } {
+): { backend: AgentBackend; command: string; args: string[]; claudeArgsOption?: string } {
   const raw = cfg.preferences?.agentCommand;
+  const backend = raw?.backend === 'cursor' ? 'cursor' : 'claude';
   const command = typeof raw?.command === 'string' && raw.command.trim()
     ? raw.command.trim()
-    : 'claude';
+    : backend === 'cursor'
+      ? 'agent'
+      : 'claude';
   const args = Array.isArray(raw?.args)
     ? raw.args.filter((arg): arg is string => typeof arg === 'string')
     : [];
-  const claudeArgsOption = typeof raw?.claudeArgsOption === 'string' && raw.claudeArgsOption.trim()
+  const claudeArgsOption = backend === 'claude' && typeof raw?.claudeArgsOption === 'string' && raw.claudeArgsOption.trim()
     ? raw.claudeArgsOption.trim()
     : undefined;
-  return { command, args, ...(claudeArgsOption ? { claudeArgsOption } : {}) };
+  return { backend, command, args, ...(claudeArgsOption ? { claudeArgsOption } : {}) };
 }
 
 /**

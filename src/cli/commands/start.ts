@@ -1,14 +1,14 @@
 import dns from 'node:dns';
 import { createInterface } from 'node:readline';
 import pkg from '../../../package.json';
-import { ClaudeAdapter } from '../../agent/claude/adapter';
+import { createAgentAdapter } from '../../agent/factory';
 import { startChannel, type BridgeChannel } from '../../bot/channel';
 import { runRegistrationWizard } from '../../bot/wizard';
 import type { Controls } from '../../commands';
 import { setSecret } from '../../config/keystore';
 import { paths } from '../../config/paths';
 import type { AppConfig } from '../../config/schema';
-import { getAgentCommand, isComplete, secretKeyForApp } from '../../config/schema';
+import { isComplete, secretKeyForApp } from '../../config/schema';
 import {
   buildEncryptedAccountConfig,
   ensureSecretsGetterWrapper,
@@ -73,9 +73,9 @@ export async function runStart(opts: StartOptions): Promise<void> {
     printScopeReminder();
   }
 
-  let agent = new ClaudeAdapter(getAgentCommand(cfg));
+  let agent = createAgentAdapter(cfg);
   if (!(await agent.isAvailable())) {
-    console.error(`✗ 未找到或无法运行 Claude Code 命令: ${agent.commandLabel}`);
+    console.error(`✗ 未找到或无法运行 agent 命令: ${agent.commandLabel}`);
     console.error('  请确认已安装并可执行该命令，或在 ~/.lark-channel/config.json 中配置 preferences.agentCommand。');
     process.exit(1);
   }
@@ -145,9 +145,9 @@ export async function runStart(opts: StartOptions): Promise<void> {
       try {
         const next = await loadConfig(configPath);
         if (!isComplete(next)) throw new Error('config incomplete after change');
-        const nextAgent = new ClaudeAdapter(getAgentCommand(next));
+        const nextAgent = createAgentAdapter(next);
         if (!(await nextAgent.isAvailable())) {
-          throw new Error(`configured Claude Code command is not runnable: ${nextAgent.commandLabel}`);
+          throw new Error(`configured agent command is not runnable: ${nextAgent.commandLabel}`);
         }
         console.log('[restart] disconnecting old bridge...');
         try {

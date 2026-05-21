@@ -1,10 +1,11 @@
 {
-  "name": "lark-channel-bridge",
-  "version": "0.1.29",
+  "name": "@byted/ttadk-channel-bridge",
+  "version": "0.1.30",
   "description": "Bridge Feishu/Lark messenger with local CLI coding agents (Claude Code, ...)",
   "type": "module",
   "bin": {
-    "lark-channel-bridge": "./bin/lark-channel-bridge.mjs"
+    "ttadk-channel-bridge": "bin/lark-channel-bridge.mjs",
+    "lark-channel-bridge": "bin/lark-channel-bridge.mjs"
   },
   "exports": {
     ".": {
@@ -24,7 +25,7 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "prepublishOnly": "pnpm typecheck && pnpm build"
+    "prepublishOnly": "npm run typecheck && npm run build"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.64.0",
@@ -43,13 +44,18 @@
     "node": ">=20.0.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "protobufjs"]
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "protobufjs"
+    ]
   },
   "keywords": [
     "feishu",
     "lark",
     "claude",
     "claude-code",
+    "cursor",
+    "agent",
     "cli",
     "channel",
     "bridge"

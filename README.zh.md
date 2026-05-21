@@ -1,37 +1,43 @@
-# lark-channel-bridge
+# ttadk-channel-bridge
 
-把飞书 / Lark 消息和本地 Claude Code CLI 打通的轻量 bot，用一条命令起服务，扫码绑应用，在飞书里和 Claude 对话、让它读图 / 改代码。
+把飞书 / Lark 消息和本地 coding-agent CLI（Claude Code、TTADK 包装后的 Claude、Cursor Agent 等）打通的轻量 bot，用一条命令起服务，扫码绑应用，在飞书里和 agent 对话、让它读图 / 改代码。
 
 [English README](./README.md)
 
 ## 能干什么
 
-- 在飞书（私聊直接发；群里 `@bot`）把消息转给本地的 `claude` CLI，Claude 在你指定的工作目录里工作
-- **流式卡片**：Claude 的文本和工具调用实时出现在同一张卡片上，不用傻等
+- 在飞书（私聊直接发；群里 `@bot`）把消息转给本地 agent，agent 在你指定的工作目录里工作
+- **流式卡片**：agent 的文本和工具调用实时出现在同一张卡片上，不用傻等
 - **会话延续**：每个 chat 独立 session，对话能接着上次说
 - **抢占 + 批处理**：中途发新消息会打断旧任务；快速连发几条会合并成一次请求
 - **多工作空间**：`/ws` 切换不同项目，session 自己重置
-- **图片 / 文件**：直接发给 bot，Claude 会读本地下载的文件路径
+- **图片 / 文件**：直接发给 bot，agent 会读本地下载的文件路径
 - **卡片按钮**：`/help` `/ws list` `/status` 返回交互卡片，点按钮直接操作
 
 ## 前置条件
 
 - Node.js **≥ 20**
-- 已安装并登录一个兼容 Claude Code 参数的命令。默认运行 `claude`；如果你用的是 `ttadk code -t claude` 这类包装命令，见下方配置。
+- 已安装并登录一个受支持的 coding-agent 命令。默认运行 `claude`；也可以使用 `ttadk code -t claude` 这类包装命令，或 Cursor CLI 的 `agent` 命令。
 - 一个飞书 / Lark PersonalAgent 应用（首次启动的扫码向导能帮你创建）
 
 ## 安装
 
 ```bash
-npm i -g lark-channel-bridge
+NPM_CONFIG_REGISTRY=http://bnpm.byted.org npm i -g @byted/ttadk-channel-bridge
 # 或
-pnpm add -g lark-channel-bridge
+NPM_CONFIG_REGISTRY=http://bnpm.byted.org pnpm add -g @byted/ttadk-channel-bridge
+```
+
+也可以直接从字节 npm 运行：
+
+```bash
+NPM_CONFIG_REGISTRY=http://bnpm.byted.org npx -y @byted/ttadk-channel-bridge@latest start
 ```
 
 ## 首次启动
 
 ```bash
-lark-channel-bridge start
+ttadk-channel-bridge start
 ```
 
 第一次跑会检测到没配置应用，**自动进入扫码向导**：
@@ -56,17 +62,17 @@ lark-channel-bridge start
 - `im.message.reaction.created_v1` / `deleted_v1`（可选）
 - `im.chat.member.bot.added_v1`（可选）
 
-启用以后再次 `lark-channel-bridge start`，看到 `✓ 已连接` 就可以在飞书里找 bot 对话了。
+启用以后再次 `ttadk-channel-bridge start`，看到 `✓ 已连接` 就可以在飞书里找 bot 对话了。
 
 ## 命令速查
 
 ### 宿主 CLI
 
 ```
-lark-channel-bridge start [-c <config>]   启动 bot
-lark-channel-bridge ps                    列出本机所有正在跑的 start 进程
-lark-channel-bridge stop <id|#>           终止指定 start 进程（SIGTERM，2s 后 SIGKILL）
-lark-channel-bridge --help                列所有命令
+ttadk-channel-bridge start [-c <config>]   启动 bot
+ttadk-channel-bridge ps                    列出本机所有正在跑的 start 进程
+ttadk-channel-bridge stop <id|#>           终止指定 start 进程（SIGTERM，2s 后 SIGKILL）
+ttadk-channel-bridge --help                列所有命令
 ```
 
 > 多开同一个 app 时，开放平台会把事件随机推到其中一个长连接。`start` 启动前会检测同 app 已有的进程，TTY 下提示 `[c]ontinue / [k]ill old / [a]bort` 三选；非 TTY 只 warn 并继续。
@@ -90,9 +96,9 @@ lark-channel-bridge --help                列所有命令
 | `/ps` | 列出本机所有 start 进程，标识当前回复的是哪个 |
 | `/exit <id\|#>` | 终止指定 start 进程（自己 = graceful 退出；他人 = SIGTERM） |
 | `/reconnect` | 强制重连 WebSocket（网络抖动后 bot 没反应时用） |
-| `/doctor [描述]` | 把最近运行日志和你的描述喂给 Claude，自助诊断卡住 / 异常的原因 |
+| `/doctor [描述]` | 把最近运行日志和你的描述喂给 agent，自助诊断卡住 / 异常的原因 |
 | `/help` | 帮助卡片 |
-| 其它 `/xxx` | 原样交给 Claude |
+| 其它 `/xxx` | 原样交给 agent |
 
 **消息策略**：私聊 = 不需要 @，任何消息都回；**群（含话题群）= 默认要 @bot 才回**（0.1.22 起的新默认），不 @ 时 bot 完全沉默；@全员永远不响应；云文档评论必须 @bot。要恢复"群里也不强制 @"的老行为：`/config` → "群里需要 @ bot" → 选"否"。
 
@@ -101,22 +107,23 @@ lark-channel-bridge --help                列所有命令
 | 路径 | 内容 |
 |---|---|
 | `~/.lark-channel/config.json` | 应用凭据（App ID / Secret），权限 600 |
-| `~/.lark-channel/sessions.json` | 每个 chat / 话题 的 Claude session id + cwd（+ 可选的 `/timeout` 覆盖） |
+| `~/.lark-channel/sessions.json` | 每个 chat / 话题 的 agent session id + cwd（+ 可选的 `/timeout` 覆盖） |
 | `~/.lark-channel/workspaces.json` | 工作空间映射 |
 | `~/.lark-channel/processes.json` | 当前在跑的 start 进程注册中心（`ps`/`stop` 用），死进程会被自动清理 |
 | `~/.lark-channel/media/<chatId>/` | 下载的图片 / 文件，24h 自动清理 |
 | `~/.lark-channel/logs/YYYY-MM-DD.log` | 结构化运行日志（JSON line），按天滚动；启动时清理超过 7 天的老文件（`LARK_CHANNEL_LOG_DAYS` 环境变量可改）；`/doctor` 命令读它做诊断 |
 
-> 升级自 0.1.11 之前的版本？跑一次 `lark-channel-bridge migrate` —— 自动把 `~/.config/lark-channel-bridge/` 和 `~/.cache/lark-channel-bridge/` 下的内容搬到新位置，并把 `config.json` 升级到新结构。
+> 升级自 0.1.11 之前的版本？跑一次 `ttadk-channel-bridge migrate` —— 自动把旧路径 `~/.config/lark-channel-bridge/` 和 `~/.cache/lark-channel-bridge/` 下的内容搬到新位置，并把 `config.json` 升级到新结构。
 
-### 自定义 Claude Code 命令
+### 自定义 agent 命令
 
-默认情况下 bridge 会把 Claude Code 参数追加到 `claude` 后面。要使用兼容包装命令，可以在 `~/.lark-channel/config.json` 里加入 `preferences.agentCommand`：
+默认情况下 bridge 使用 Claude backend，并把 Claude Code 参数追加到 `claude` 后面。要使用 TTADK 这类兼容包装命令，可以在 `~/.lark-channel/config.json` 里加入 `preferences.agentCommand`：
 
 ```json
 {
   "preferences": {
     "agentCommand": {
+      "backend": "claude",
       "command": "ttadk",
       "args": ["code", "-t", "claude", "-m", "gpt-5.5"],
       "claudeArgsOption": "-a"
@@ -126,6 +133,21 @@ lark-channel-bridge --help                列所有命令
 ```
 
 配置 `claudeArgsOption` 后，bridge 会把 Claude Code 参数安全拼成一个字符串，运行类似 `ttadk code -t claude -a "-p ... --output-format stream-json --verbose ..."` 的命令。不配置 `claudeArgsOption` 时会把 Claude 参数作为普通 argv 追加；不配置 `agentCommand` 时仍然使用默认的 `claude`。
+
+要使用 Cursor CLI，先确认 `agent` 命令已安装、已登录，并且在 `PATH` 中可用，然后配置 Cursor backend：
+
+```json
+{
+  "preferences": {
+    "agentCommand": {
+      "backend": "cursor",
+      "command": "agent"
+    }
+  }
+}
+```
+
+Cursor 模式下，bridge 会把运行约定注入到 prompt 里，因为 Cursor CLI 没有 Claude 的 `--append-system-prompt` 参数。bridge 会用类似 `agent -p --output-format stream-json --trust --workspace <cwd> ...` 的方式运行；如果你明确希望 Cursor 自动允许命令，可以把 `"-f"` 或 `"--force"` 加到 `agentCommand.args`。
 
 ## 访问控制（可选）
 
