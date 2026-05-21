@@ -8,7 +8,7 @@ import type { Controls } from '../../commands';
 import { setSecret } from '../../config/keystore';
 import { paths } from '../../config/paths';
 import type { AppConfig } from '../../config/schema';
-import { isComplete, secretKeyForApp } from '../../config/schema';
+import { getAgentCommand, isComplete, secretKeyForApp } from '../../config/schema';
 import {
   buildEncryptedAccountConfig,
   ensureSecretsGetterWrapper,
@@ -73,10 +73,10 @@ export async function runStart(opts: StartOptions): Promise<void> {
     printScopeReminder();
   }
 
-  const agent = new ClaudeAdapter();
+  let agent = new ClaudeAdapter(getAgentCommand(cfg));
   if (!(await agent.isAvailable())) {
-    console.error('✗ 未找到 claude CLI。请先安装 Claude Code：');
-    console.error('  https://docs.anthropic.com/en/docs/claude-code/quickstart');
+    console.error(`✗ 未找到或无法运行 Claude Code 命令: ${agent.commandLabel}`);
+    console.error('  请确认已安装并可执行该命令，或在 ~/.lark-channel/config.json 中配置 preferences.agentCommand。');
     process.exit(1);
   }
 
@@ -143,15 +143,20 @@ export async function runStart(opts: StartOptions): Promise<void> {
       if (restarting) return;
       restarting = true;
       try {
+        const next = await loadConfig(configPath);
+        if (!isComplete(next)) throw new Error('config incomplete after change');
+        const nextAgent = new ClaudeAdapter(getAgentCommand(next));
+        if (!(await nextAgent.isAvailable())) {
+          throw new Error(`configured Claude Code command is not runnable: ${nextAgent.commandLabel}`);
+        }
         console.log('[restart] disconnecting old bridge...');
         try {
           await bridge.disconnect();
         } catch (err) {
           console.warn('[restart] disconnect failed:', err);
         }
-        const next = await loadConfig(configPath);
-        if (!isComplete(next)) throw new Error('config incomplete after change');
         controls.cfg = next;
+        agent = nextAgent;
         // Keep the registry in sync so /ps reflects the new app after an
         // /account change. Same process id, new app fields. botName is
         // refreshed below once the new channel is up.

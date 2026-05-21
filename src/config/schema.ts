@@ -89,6 +89,12 @@ export interface AppAccess {
   admins?: string[];
 }
 
+export interface AgentCommandConfig {
+  command?: string;
+  args?: string[];
+  claudeArgsOption?: string;
+}
+
 export interface AppPreferences {
   /** Reply rendering mode for IM (group/p2p) messages. Default 'card'. */
   messageReply?: MessageReplyMode;
@@ -132,6 +138,8 @@ export interface AppPreferences {
   requireMentionInGroup?: boolean;
   /** Access control — user/chat allowlists + admin gating. See AppAccess. */
   access?: AppAccess;
+  /** Claude Code-compatible command prefix. Default: `claude`. */
+  agentCommand?: AgentCommandConfig;
   /**
    * Grace period (ms) between SIGTERM and SIGKILL when killing the claude
    * subprocess. Bumped from a hardcoded 500ms because claude often has its
@@ -221,6 +229,22 @@ export function getMaxConcurrentRuns(cfg: AppConfig): number {
  */
 export function getRequireMentionInGroup(cfg: AppConfig): boolean {
   return cfg.preferences?.requireMentionInGroup !== false;
+}
+
+export function getAgentCommand(
+  cfg: AppConfig,
+): { command: string; args: string[]; claudeArgsOption?: string } {
+  const raw = cfg.preferences?.agentCommand;
+  const command = typeof raw?.command === 'string' && raw.command.trim()
+    ? raw.command.trim()
+    : 'claude';
+  const args = Array.isArray(raw?.args)
+    ? raw.args.filter((arg): arg is string => typeof arg === 'string')
+    : [];
+  const claudeArgsOption = typeof raw?.claudeArgsOption === 'string' && raw.claudeArgsOption.trim()
+    ? raw.claudeArgsOption.trim()
+    : undefined;
+  return { command, args, ...(claudeArgsOption ? { claudeArgsOption } : {}) };
 }
 
 /**

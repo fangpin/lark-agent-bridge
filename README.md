@@ -17,7 +17,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 ## Prerequisites
 
 - Node.js **>= 20**
-- `claude` CLI installed and logged in — see https://docs.anthropic.com/en/docs/claude-code/quickstart
+- A Claude Code-compatible command installed and logged in. By default the bridge runs `claude`; see below if you use a wrapper such as `ttadk code -t claude`.
 - A Lark / Feishu **PersonalAgent** app (the QR-code wizard on first launch can create one for you).
 
 ## Install
@@ -108,6 +108,24 @@ lark-channel-bridge --help                List all commands
 | `~/.lark-channel/logs/YYYY-MM-DD.log` | Structured run logs (JSONL), rotated daily; older than 7 days are pruned at startup (`LARK_CHANNEL_LOG_DAYS` env var overrides). `/doctor` reads these. |
 
 > Upgrading from before 0.1.11? Run `lark-channel-bridge migrate` once — it moves anything under `~/.config/lark-channel-bridge/` and `~/.cache/lark-channel-bridge/` to the new location and upgrades `config.json` to the new schema.
+
+### Custom Claude Code command
+
+By default the bridge appends Claude Code arguments to `claude`. To use a compatible wrapper, add `preferences.agentCommand` to `~/.lark-channel/config.json`:
+
+```json
+{
+  "preferences": {
+    "agentCommand": {
+      "command": "ttadk",
+      "args": ["code", "-t", "claude", "-m", "gpt-5.5"],
+      "claudeArgsOption": "-a"
+    }
+  }
+}
+```
+
+With `claudeArgsOption`, the bridge safely joins Claude Code arguments and runs commands like `ttadk code -t claude -a "-p ... --output-format stream-json --verbose ..."`. Without `claudeArgsOption`, it appends Claude args as normal argv entries. If `agentCommand` is omitted, it keeps using plain `claude`.
 
 ## Access control (optional)
 

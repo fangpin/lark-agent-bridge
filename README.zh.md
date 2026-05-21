@@ -17,7 +17,7 @@
 ## 前置条件
 
 - Node.js **≥ 20**
-- `claude` CLI 已安装并登录：https://docs.anthropic.com/en/docs/claude-code/quickstart
+- 已安装并登录一个兼容 Claude Code 参数的命令。默认运行 `claude`；如果你用的是 `ttadk code -t claude` 这类包装命令，见下方配置。
 - 一个飞书 / Lark PersonalAgent 应用（首次启动的扫码向导能帮你创建）
 
 ## 安装
@@ -108,6 +108,24 @@ lark-channel-bridge --help                列所有命令
 | `~/.lark-channel/logs/YYYY-MM-DD.log` | 结构化运行日志（JSON line），按天滚动；启动时清理超过 7 天的老文件（`LARK_CHANNEL_LOG_DAYS` 环境变量可改）；`/doctor` 命令读它做诊断 |
 
 > 升级自 0.1.11 之前的版本？跑一次 `lark-channel-bridge migrate` —— 自动把 `~/.config/lark-channel-bridge/` 和 `~/.cache/lark-channel-bridge/` 下的内容搬到新位置，并把 `config.json` 升级到新结构。
+
+### 自定义 Claude Code 命令
+
+默认情况下 bridge 会把 Claude Code 参数追加到 `claude` 后面。要使用兼容包装命令，可以在 `~/.lark-channel/config.json` 里加入 `preferences.agentCommand`：
+
+```json
+{
+  "preferences": {
+    "agentCommand": {
+      "command": "ttadk",
+      "args": ["code", "-t", "claude", "-m", "gpt-5.5"],
+      "claudeArgsOption": "-a"
+    }
+  }
+}
+```
+
+配置 `claudeArgsOption` 后，bridge 会把 Claude Code 参数安全拼成一个字符串，运行类似 `ttadk code -t claude -a "-p ... --output-format stream-json --verbose ..."` 的命令。不配置 `claudeArgsOption` 时会把 Claude 参数作为普通 argv 追加；不配置 `agentCommand` 时仍然使用默认的 `claude`。
 
 ## 访问控制（可选）
 

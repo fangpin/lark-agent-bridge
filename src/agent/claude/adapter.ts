@@ -8,9 +8,22 @@ import { translateEvent } from './stream-json';
 
 export interface ClaudeAdapterOptions {
   binary?: string;
+  command?: string;
+  args?: string[];
+  claudeArgsOption?: string;
 }
 
 type ClaudeChild = ChildProcessByStdio<null, Readable, Readable>;
+
+function quoteShellArg(arg: string): string {
+  if (arg.length === 0) return "''";
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(arg)) return arg;
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+function joinShellArgs(args: string[]): string {
+  return args.map(quoteShellArg).join(' ');
+}
 
 const BRIDGE_SYSTEM_PROMPT = `# lark-channel-bridge 运行约定
 
@@ -88,22 +101,35 @@ export class ClaudeAdapter implements AgentAdapter {
   readonly id = 'claude';
   readonly displayName = 'Claude Code';
 
-  private readonly binary: string;
+  private readonly command: string;
+  private readonly prefixArgs: string[];
+  private readonly claudeArgsOption?: string;
 
   constructor(opts: ClaudeAdapterOptions = {}) {
-    this.binary = opts.binary ?? 'claude';
+    this.command = opts.command ?? opts.binary ?? 'claude';
+    this.prefixArgs = opts.args ?? [];
+    this.claudeArgsOption = opts.claudeArgsOption;
+  }
+
+  get commandLabel(): string {
+    return [this.command, ...this.prefixArgs].join(' ');
   }
 
   async isAvailable(): Promise<boolean> {
     return new Promise((resolve) => {
-      const child = spawn(this.binary, ['--version'], { stdio: 'ignore' });
+      const child = spawn(this.command, this.buildProcessArgs(['--version']), { stdio: 'ignore' });
       child.on('error', () => resolve(false));
       child.on('exit', (code) => resolve(code === 0));
     });
   }
 
+  private buildProcessArgs(claudeArgs: string[]): string[] {
+    if (!this.claudeArgsOption) return [...this.prefixArgs, ...claudeArgs];
+    return [...this.prefixArgs, this.claudeArgsOption, joinShellArgs(claudeArgs)];
+  }
+
   run(opts: AgentRunOptions): AgentRun {
-    const args = [
+    const claudeArgs = [
       '-p',
       opts.prompt,
       '--output-format',
@@ -114,10 +140,10 @@ export class ClaudeAdapter implements AgentAdapter {
       '--append-system-prompt',
       BRIDGE_SYSTEM_PROMPT,
     ];
-    if (opts.sessionId) args.push('--resume', opts.sessionId);
-    if (opts.model) args.push('--model', opts.model);
+    if (opts.sessionId) claudeArgs.push('--resume', opts.sessionId);
+    if (opts.model) claudeArgs.push('--model', opts.model);
 
-    const child = spawn(this.binary, args, {
+    const child = spawn(this.command, this.buildProcessArgs(claudeArgs), {
       cwd: opts.cwd,
       env: { ...process.env, LARK_CHANNEL: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -125,6 +151,7 @@ export class ClaudeAdapter implements AgentAdapter {
 
     log.info('agent', 'spawn', {
       pid: child.pid ?? null,
+      command: this.commandLabel,
       cwd: opts.cwd ?? process.cwd(),
       hasSession: Boolean(opts.sessionId),
       promptChars: opts.prompt.length,
@@ -165,7 +192,7 @@ export class ClaudeAdapter implements AgentAdapter {
     const stopGraceMs = opts.stopGraceMs ?? 5000;
 
     return {
-      events: createEventStream(child, stderrChunks, () => runtimeError),
+      events: createEventStream(child, stderrChunks, () => runtimeError, this.commandLabel),
       async stop() {
         if (child.exitCode !== null || child.signalCode !== null) return;
         log.info('agent', 'stop-sigterm', { pid: child.pid ?? null, graceMs: stopGraceMs });
@@ -212,6 +239,7 @@ async function* createEventStream(
   child: ClaudeChild,
   stderrChunks: Buffer[],
   getError: () => Error | null,
+  commandLabel: string,
 ): AsyncGenerator<AgentEvent> {
   // If fork itself failed synchronously, child.pid is undefined. The 'error'
   // event (ENOENT etc.) fires in the next tick, so also check getError().
@@ -219,7 +247,7 @@ async function* createEventStream(
     const err = getError();
     yield {
       type: 'error',
-      message: err ? `failed to spawn claude: ${err.message}` : 'spawn returned no pid',
+      message: err ? `failed to spawn ${commandLabel}: ${err.message}` : 'spawn returned no pid',
     };
     return;
   }
