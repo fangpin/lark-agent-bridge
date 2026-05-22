@@ -1,5 +1,6 @@
 import type { ChildProcessByStdio } from 'node:child_process';
 import { spawn } from 'node:child_process';
+import { statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import type { Readable } from 'node:stream';
 import { log } from '../../core/logger';
@@ -39,6 +40,11 @@ export class CursorAdapter implements AgentAdapter {
   }
 
   run(opts: AgentRunOptions): AgentRun {
+    if (opts.cwd) {
+      const cwdError = validateWorkingDirectory(opts.cwd);
+      if (cwdError) return errorRun(cwdError);
+    }
+
     const agentArgs = [
       ...this.prefixArgs,
       '-p',
@@ -131,6 +137,32 @@ export class CursorAdapter implements AgentAdapter {
       },
     };
   }
+}
+
+function validateWorkingDirectory(cwd: string): string | undefined {
+  try {
+    if (!statSync(cwd).isDirectory()) {
+      return `working directory is not a directory: ${cwd}. Use /cd to switch this chat to a valid path.`;
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return `working directory does not exist: ${cwd}. Use /cd to switch this chat to a valid path.`;
+    }
+    return `working directory is not accessible: ${cwd}: ${(err as Error).message}`;
+  }
+  return undefined;
+}
+
+function errorRun(message: string): AgentRun {
+  return {
+    events: (async function* (): AsyncGenerator<AgentEvent> {
+      yield { type: 'error', message };
+    })(),
+    async stop() {},
+    async waitForExit() {
+      return true;
+    },
+  };
 }
 
 function buildPrompt(prompt: string): string {
