@@ -1,6 +1,6 @@
 {
   "name": "@byted/ttadk-channel-bridge",
-  "version": "0.1.30",
+  "version": "0.1.33",
   "description": "Bridge Feishu/Lark messenger with local CLI coding agents (Claude Code, ...)",
   "type": "module",
   "bin": {
