@@ -44,7 +44,7 @@ import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, renderQuotedBlock, type QuotedContext } from './quote';
 import { addWorkingReaction, removeReaction } from './reaction';
 
-const DEBOUNCE_MS = 600;
+const PENDING_FLUSH_DELAY_MS = 0;
 
 // Lark SDK logs API errors at error level even when the caller catches them.
 // These specific codes are EXPECTED in our flow (wiki-node lookup that
@@ -149,7 +149,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       respondToMentionAll: false,
     },
     // Disable per-chat serialization so we can implement our own
-    // debounce + run-chain policy (see pending-queue + runChain below).
+    // pending-queue + run-chain policy below.
     safety: {
       chatQueue: { enabled: false },
     },
@@ -177,10 +177,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
 
   // Pending → run handoff: while a run is active on a chat, block its pending
   // queue so messages keep accumulating without flushing. When the run ends,
-  // unblock arms a fresh quiet-window timer. Net effect: at most one run per
-  // chat in flight, and everything sent during a run merges into the next
-  // batch (only flushed once 600ms of silence has passed *after* the run).
-  const pending = new PendingQueue(DEBOUNCE_MS, (scope, batch) => {
+  // unblock immediately flushes anything queued. Net effect: at most one run
+  // per chat in flight, no artificial delay before an idle scope starts work.
+  const pending = new PendingQueue(PENDING_FLUSH_DELAY_MS, (scope, batch) => {
     const firstMsg = batch[0];
     if (!firstMsg) return;
     pending.block(scope);
@@ -423,7 +422,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 
   const size = pending.push(scope, msg);
-  log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
+  log.info('intake', 'queued', { scope, queueSize: size, flushDelayMs: PENDING_FLUSH_DELAY_MS });
 }
 
 interface RunBatchDeps {
