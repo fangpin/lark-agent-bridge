@@ -26,6 +26,8 @@ export function renderText(state: RunState): string {
     parts.push(`_⏱ ${mins} 分钟无响应,已自动终止_`);
   } else if (state.terminal === 'error' && state.errorMsg) {
     parts.push(`⚠️ agent 失败:${state.errorMsg}`);
+  } else if (state.terminal === 'done') {
+    parts.push('_✅ 已完成_');
   } else if (state.terminal === 'running' && state.footer) {
     parts.push(footerLine(state.footer));
   }

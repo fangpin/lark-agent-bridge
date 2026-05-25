@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
+import { fromPortablePath, toPortablePath, type PortablePathOptions } from '../utils/portable-path';
 
 interface WorkspaceData {
   chats: Record<string, { cwd: string }>;
@@ -12,9 +13,11 @@ export class WorkspaceStore {
   private data: WorkspaceData = { chats: {}, named: {} };
   private saving: Promise<void> = Promise.resolve();
   private readonly path: string;
+  private readonly pathOptions: PortablePathOptions;
 
-  constructor(path: string = paths.workspacesFile) {
+  constructor(path: string = paths.workspacesFile, pathOptions: PortablePathOptions = {}) {
     this.path = path;
+    this.pathOptions = pathOptions;
   }
 
   async load(): Promise<void> {
@@ -32,24 +35,31 @@ export class WorkspaceStore {
   }
 
   cwdFor(chatId: string): string | undefined {
-    return this.data.chats[chatId]?.cwd;
+    const cwd = this.data.chats[chatId]?.cwd;
+    return cwd ? fromPortablePath(cwd, this.pathOptions) : undefined;
   }
 
   setCwd(chatId: string, cwd: string): void {
-    this.data.chats[chatId] = { cwd };
+    this.data.chats[chatId] = { cwd: toPortablePath(cwd, this.pathOptions) };
     this.schedulePersist();
   }
 
   listNamed(): Record<string, string> {
-    return { ...this.data.named };
+    return Object.fromEntries(
+      Object.entries(this.data.named).map(([name, cwd]) => [
+        name,
+        fromPortablePath(cwd, this.pathOptions),
+      ]),
+    );
   }
 
   getNamed(name: string): string | undefined {
-    return this.data.named[name];
+    const cwd = this.data.named[name];
+    return cwd ? fromPortablePath(cwd, this.pathOptions) : undefined;
   }
 
   saveNamed(name: string, cwd: string): void {
-    this.data.named[name] = cwd;
+    this.data.named[name] = toPortablePath(cwd, this.pathOptions);
     this.schedulePersist();
   }
 
