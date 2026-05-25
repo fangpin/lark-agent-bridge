@@ -185,11 +185,13 @@ function stopButton(): object {
 
 function footerStatus(status: Exclude<FooterStatus, null>): object {
   const text =
-    status === 'thinking'
-      ? '🧠 正在思考'
-      : status === 'tool_running'
-        ? '🧰 正在调用工具'
-        : '✍️ 正在输出';
+    status === 'starting'
+      ? '🚀 正在启动 Agent'
+      : status === 'thinking'
+        ? '🧠 正在思考'
+        : status === 'tool_running'
+          ? '🧰 正在调用工具'
+          : '✍️ 正在输出';
   return noteMd(text);
 }
 
@@ -198,6 +200,7 @@ function summaryText(state: RunState): string {
   if (state.terminal === 'idle_timeout') return '已超时';
   if (state.terminal === 'error') return '出错';
   if (state.terminal === 'done') return '已完成';
+  if (state.footer === 'starting') return '正在启动';
   if (state.footer === 'tool_running') return '正在调用工具';
   if (state.footer === 'streaming') return '正在输出';
   return '思考中';

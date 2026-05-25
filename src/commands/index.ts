@@ -36,6 +36,7 @@ import {
   type RunState,
 } from '../card/run-state';
 import { formatRelTime, listRecentSessions } from '../session/history';
+import { ensureResumeSession } from '../session/ensure-resume';
 import { isAlive, readAndPrune, resolveTarget } from '../runtime/registry';
 import type { SessionStore } from '../session/store';
 import { validateAppCredentials } from '../utils/feishu-auth';
@@ -211,6 +212,8 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
 
   const wasRunning = ctx.activeRuns.interrupt(ctx.scope);
   ctx.sessions.clear(ctx.scope);
+  const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, cwd);
   await reply(ctx, wasRunning ? '已中断当前任务并开始新会话。' : '已开始新会话。');
 }
 
@@ -273,6 +276,7 @@ async function handleCd(args: string, ctx: CommandContext): Promise<void> {
   ctx.activeRuns.interrupt(ctx.scope);
   ctx.workspaces.setCwd(ctx.scope, absolute);
   ctx.sessions.clear(ctx.scope);
+  await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, absolute);
   await reply(ctx, `✓ 已切换 cwd 到 \`${absolute}\`\n（session 已重置）`);
 }
 
@@ -330,6 +334,7 @@ async function handleWsUse(name: string, ctx: CommandContext): Promise<void> {
   ctx.activeRuns.interrupt(ctx.scope);
   ctx.workspaces.setCwd(ctx.scope, cwd);
   ctx.sessions.clear(ctx.scope);
+  await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, cwd);
   await reply(ctx, `✓ 已切换到 \`${name}\` (${cwd})\n（session 已重置）`);
 }
 

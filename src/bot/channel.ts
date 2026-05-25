@@ -11,6 +11,7 @@ import { renderCard } from '../card/run-renderer';
 import {
   finalizeIfRunning,
   initialState,
+  markAgentReady,
   markIdleTimeout,
   markInterrupted,
   reduce,
@@ -33,6 +34,7 @@ import { resolveAppSecret } from '../config/secret-resolver';
 import { log, withTrace } from '../core/logger';
 import { MediaCache, type LocalAttachment } from '../media/cache';
 import type { SessionStore } from '../session/store';
+import { ensureResumeSession } from '../session/ensure-resume';
 import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
@@ -495,7 +497,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   log.info('prompt', 'built', { promptChars: prompt.length, quotes: quotes.length });
 
   const cwd = workspaces.cwdFor(scope) ?? homedir();
-  const resumeFrom = sessions.resumeFor(scope, cwd);
+  let resumeFrom = sessions.resumeFor(scope, cwd);
   if (resumeFrom) {
     log.info('session', 'resume', { sessionId: resumeFrom, cwd });
   } else {
@@ -505,6 +507,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       sessions.clear(scope);
     } else {
       log.info('session', 'fresh', { cwd });
+    }
+    resumeFrom = await ensureResumeSession(agent, sessions, scope, cwd);
+    if (resumeFrom) {
+      log.info('session', 'resume-precreate', { sessionId: resumeFrom, cwd });
     }
   }
 
@@ -548,13 +554,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
   };
 
-  // For non-card modes Claude's output doesn't surface visually until either
-  // a first streamed token (markdown mode) or the whole run ends (text mode).
-  // Add a "Typing" reaction to the triggering message as an instant ack;
-  // remove it in finally. Card mode has a visible "正在思考…" footer the
-  // moment the initial card lands, so the extra reaction would be redundant.
-  const reactionId =
-    replyMode === 'card' ? undefined : await addWorkingReaction(channel, lastMsg.messageId);
+  // Add a "Typing" reaction as an instant ack while the agent CLI is still
+  // starting up (card footer shows the same phase in more detail).
+  const reactionId = await addWorkingReaction(channel, lastMsg.messageId);
 
   try {
     if (replyMode === 'card') {
@@ -704,6 +706,12 @@ export async function processAgentStream(
           const effectiveCwd = evt.cwd ?? cwd;
           sessions.set(scope, evt.sessionId, effectiveCwd);
           log.info('session', 'set', { sessionId: evt.sessionId });
+        }
+        const prevFooter = state.footer;
+        state = markAgentReady(state);
+        if (state.footer !== prevFooter) {
+          log.info('card', 'transition', { footer: state.footer, terminal: state.terminal });
+          await flush(state);
         }
         continue;
       }

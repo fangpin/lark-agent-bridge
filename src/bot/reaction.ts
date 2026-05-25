@@ -2,11 +2,11 @@ import type { LarkChannel } from '@larksuiteoapi/node-sdk';
 import { log } from '../core/logger';
 
 /**
- * Add a "Typing" reaction (敲键盘) to a message to give text-mode users an
- * instant "I got your message and I'm responding" cue while Claude is still
- * thinking. Matches the conventional Feishu UX for "the other side is
- * replying". Card mode doesn't need this — the streaming card already
- * shows a "正在思考…" footer the moment it's posted.
+ * Add a "Typing" reaction (敲键盘) to a message to give users an instant
+ * "I got your message and I'm responding" cue while the agent CLI is still
+ * starting up. Matches the conventional Feishu UX for "the other side is
+ * replying". Card mode also shows a "正在启动 Agent…" footer once the
+ * streaming card lands; the reaction arrives slightly earlier.
  *
  * Returns the reaction id on success, undefined on any failure. Failures
  * are logged but never thrown — losing a decoration must not break the
