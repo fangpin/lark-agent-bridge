@@ -588,6 +588,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         chatId,
         {
           markdown: async (ctrl) => {
+            await ctrl.setContent(renderText(filterForPrefs(initialState)));
             await processAgentStream(
               handle,
               sessions,

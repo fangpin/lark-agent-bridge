@@ -147,7 +147,7 @@ export interface AppPreferences {
    * Cursor backend runtime when `agentCommand.backend` is `cursor`:
    *   - `sdk`: reuse persistent `@cursor/sdk` local agents (LRU pool)
    *   - `cli`: spawn `cursor-agent -p` per message (legacy)
-   * Default: `sdk` when the SDK is installed, otherwise `cli`.
+   * Default: `sdk` for cursor backend; set `cli` to force per-message spawn.
    */
   agentCursorRuntime?: 'sdk' | 'cli';
   /**
