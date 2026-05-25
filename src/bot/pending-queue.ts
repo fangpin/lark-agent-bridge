@@ -9,10 +9,10 @@ interface PendingEntry {
 export type FlushHandler = (scope: string, batch: NormalizedMessage[]) => void;
 
 /**
- * Per-scope debounce queue. `scope` is the session scope string (typically
+ * Per-scope pending queue. `scope` is the session scope string (typically
  * `chatId` for p2p / regular group, `chatId:threadId` for topic groups).
- * Accumulates messages within the same scope inside a quiet window, then
- * flushes as a single batch.
+ * When `delayMs` is positive, it accumulates messages within a quiet window;
+ * when `delayMs` is zero, it flushes immediately.
  *
  * `block(scope)` pauses the debounce timer while an agent run is active on
  * that scope — pushed messages still accumulate but no flush fires until
@@ -36,14 +36,13 @@ export class PendingQueue {
     if (existing) {
       if (existing.timer) clearTimeout(existing.timer);
       existing.messages.push(msg);
-      existing.timer = this.blocked.has(scope) ? undefined : this.armTimer(scope);
+      existing.timer = this.blocked.has(scope) ? undefined : this.scheduleFlush(scope);
       return existing.messages.length;
     }
-    this.map.set(scope, {
-      messages: [msg],
-      timer: this.blocked.has(scope) ? undefined : this.armTimer(scope),
-    });
-    return 1;
+    const entry: PendingEntry = { messages: [msg] };
+    this.map.set(scope, entry);
+    entry.timer = this.blocked.has(scope) ? undefined : this.scheduleFlush(scope);
+    return entry.messages.length;
   }
 
   cancel(scope: string): NormalizedMessage[] {
@@ -82,10 +81,14 @@ export class PendingQueue {
     log.info('queue', 'unblocked', { scope, queued: entry?.messages.length ?? 0 });
     if (!entry || entry.messages.length === 0) return;
     if (entry.timer) clearTimeout(entry.timer);
-    entry.timer = this.armTimer(scope);
+    entry.timer = this.scheduleFlush(scope);
   }
 
-  private armTimer(scope: string): NodeJS.Timeout {
+  private scheduleFlush(scope: string): NodeJS.Timeout | undefined {
+    if (this.delayMs <= 0) {
+      this.flush(scope);
+      return undefined;
+    }
     return setTimeout(() => this.flush(scope), this.delayMs);
   }
 
