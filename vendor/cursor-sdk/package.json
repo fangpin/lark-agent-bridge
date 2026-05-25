@@ -1,0 +1,77 @@
+{
+  "name": "@cursor/sdk",
+  "version": "1.0.13",
+  "description": "TypeScript SDK for Cursor agents.",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cursor/cursor"
+  },
+  "homepage": "https://cursor.com",
+  "engines": {
+    "node": ">=18"
+  },
+  "type": "module",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "files": [
+    "dist/**/*",
+    "LICENSE.md",
+    "package.json",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "require": {
+        "default": "./dist/cjs/index.js"
+      },
+      "import": {
+        "default": "./dist/esm/index.js"
+      }
+    },
+    "./agent": {
+      "require": {
+        "default": "./dist/cjs/index.js"
+      },
+      "import": {
+        "default": "./dist/esm/index.js"
+      }
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "echo noop",
+    "build:internal": "node --import tsx scripts/build-agent.ts --mode dev",
+    "prepare:rg": "node scripts/download-rg.js",
+    "fetch:sandbox-helper-artifacts": "node scripts/fetch-sandbox-helper-artifacts.cjs",
+    "stage:sandbox-helper": "node scripts/stage-sandbox-helper.cjs",
+    "generate-platform-packages": "node --import tsx scripts/generate-platform-packages.ts",
+    "build:prod": "pnpm prepare:rg && node --import tsx scripts/build-agent.ts --mode prod && pnpm stage:sandbox-helper && pnpm generate-platform-packages",
+    "build:publish": "scripts/build.sh",
+    "verify:publish-artifacts": "node scripts/verify-publish-artifacts.cjs",
+    "smoke:publish-artifact": "node scripts/smoke-publish-artifact.cjs",
+    "publish:built": "scripts/publish.sh",
+    "prepublishOnly": "node scripts/verify-publish-artifacts.cjs",
+    "check": "biome check && tsc --noEmit",
+    "fix": "biome check --write --unsafe",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
+    "prettier:changed": "git diff -z --name-only --diff-filter=ACMRTUXB --relative HEAD -- . | xargs -0 npx prettier --ignore-unknown --write",
+    "prettier:branch": "UPSTREAM=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main); BASE=$(git merge-base HEAD \"$UPSTREAM\"); git diff -z --name-only --diff-filter=ACMRTUXB --relative \"$BASE\" -- . | xargs -0 -n1 -I{} npx prettier --ignore-unknown --write \"{}\"",
+    "type-check": "tsc --noEmit",
+    "build-types": "tsc -p tsconfig.dts.json"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "1.10.0",
+    "@connectrpc/connect": "^1.6.1",
+    "@connectrpc/connect-node": "^1.6.1",
+    "@statsig/js-client": "3.31.0",
+    "sqlite3": "^5.1.7",
+    "zod": "^3.25.0"
+  }
+}

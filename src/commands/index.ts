@@ -211,6 +211,7 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
   }
 
   const wasRunning = ctx.activeRuns.interrupt(ctx.scope);
+  await ctx.agent.evictScope?.(ctx.scope, ctx.workspaces.cwdFor(ctx.scope) ?? undefined);
   ctx.sessions.clear(ctx.scope);
   const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
   await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, cwd);
@@ -274,6 +275,7 @@ async function handleCd(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
   ctx.activeRuns.interrupt(ctx.scope);
+  await ctx.agent.evictScope?.(ctx.scope, ctx.workspaces.cwdFor(ctx.scope) ?? undefined);
   ctx.workspaces.setCwd(ctx.scope, absolute);
   ctx.sessions.clear(ctx.scope);
   await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, absolute);
@@ -332,6 +334,7 @@ async function handleWsUse(name: string, ctx: CommandContext): Promise<void> {
     return;
   }
   ctx.activeRuns.interrupt(ctx.scope);
+  await ctx.agent.evictScope?.(ctx.scope, ctx.workspaces.cwdFor(ctx.scope) ?? undefined);
   ctx.workspaces.setCwd(ctx.scope, cwd);
   ctx.sessions.clear(ctx.scope);
   await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, cwd);

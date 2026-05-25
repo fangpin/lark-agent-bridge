@@ -3,6 +3,7 @@ dist/
 coverage/
 *.log
 *.tsbuildinfo
+cursor-sdk-*.tgz
 
 .env
 .env.local

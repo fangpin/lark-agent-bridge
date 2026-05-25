@@ -123,6 +123,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
     stopping = true;
     console.log(`\n收到 ${sig}，正在关闭...`);
     try {
+      await agent.shutdown?.();
       await bridge.disconnect();
     } catch (err) {
       console.error('[disconnect-failed]', err);
@@ -151,6 +152,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
         }
         console.log('[restart] disconnecting old bridge...');
         try {
+          await agent.shutdown?.();
           await bridge.disconnect();
         } catch (err) {
           console.warn('[restart] disconnect failed:', err);

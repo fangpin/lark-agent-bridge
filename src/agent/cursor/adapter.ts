@@ -1,20 +1,19 @@
-import type { ChildProcessByStdio } from 'node:child_process';
 import { spawn } from 'node:child_process';
-import { statSync } from 'node:fs';
-import { createInterface } from 'node:readline';
-import type { Readable } from 'node:stream';
 import { log } from '../../core/logger';
-import { BRIDGE_SYSTEM_PROMPT } from '../claude/adapter';
 import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../types';
 import { spawnCreateChat } from './create-chat';
-import { translateEvent } from './stream-json';
+import { CursorSdkPool } from './sdk-pool';
+import { spawnCursorRun } from './spawn-run';
+import type { SdkWorkerConfig } from './sdk-worker';
 
 export interface CursorAdapterOptions {
   command?: string;
   args?: string[];
+  runtime?: 'sdk' | 'cli';
+  sessionPoolSize?: number;
+  defaultModel?: string;
+  apiKey?: string;
 }
-
-type CursorChild = ChildProcessByStdio<null, Readable, Readable>;
 
 export class CursorAdapter implements AgentAdapter {
   readonly id = 'cursor';
@@ -22,17 +21,44 @@ export class CursorAdapter implements AgentAdapter {
 
   private readonly command: string;
   private readonly prefixArgs: string[];
+  private readonly runtime: 'sdk' | 'cli';
+  private readonly sdkPool: CursorSdkPool | undefined;
+  private readonly spawnOpts: { command: string; prefixArgs: string[]; commandLabel: string };
 
   constructor(opts: CursorAdapterOptions = {}) {
     this.command = opts.command ?? 'agent';
     this.prefixArgs = opts.args ?? [];
+    this.runtime = opts.runtime ?? 'cli';
+    this.spawnOpts = {
+      command: this.command,
+      prefixArgs: this.prefixArgs,
+      commandLabel: this.commandLabel,
+    };
+    const poolSize = opts.sessionPoolSize ?? 0;
+    if (this.runtime === 'sdk' && poolSize > 0) {
+      const sdkConfig: SdkWorkerConfig = {
+        defaultModel: opts.defaultModel ?? 'composer-2.5-fast',
+        ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
+      };
+      this.sdkPool = new CursorSdkPool(this.spawnOpts, sdkConfig, poolSize);
+    }
   }
 
   get commandLabel(): string {
-    return [this.command, ...this.prefixArgs].join(' ');
+    return this.runtime === 'sdk'
+      ? `@cursor/sdk (${this.command})`
+      : [this.command, ...this.prefixArgs].join(' ');
   }
 
   async isAvailable(): Promise<boolean> {
+    if (this.runtime === 'sdk') {
+      try {
+        await import('@cursor/sdk');
+        return true;
+      } catch {
+        return false;
+      }
+    }
     return new Promise((resolve) => {
       const child = spawn(this.command, [...this.prefixArgs, '--version'], { stdio: 'ignore' });
       child.on('error', () => resolve(false));
@@ -40,186 +66,45 @@ export class CursorAdapter implements AgentAdapter {
     });
   }
 
-  async prepareSession(_cwd: string): Promise<string | undefined> {
+  async prepareSession(cwd: string, scope?: string): Promise<string | undefined> {
+    if (this.sdkPool && scope) {
+      return this.sdkPool.ensureAgent(scope, cwd);
+    }
     return spawnCreateChat({ command: this.command, prefixArgs: this.prefixArgs });
   }
 
   run(opts: AgentRunOptions): AgentRun {
-    if (opts.cwd) {
-      const cwdError = validateWorkingDirectory(opts.cwd);
-      if (cwdError) return errorRun(cwdError);
+    if (this.sdkPool && opts.poolKey) {
+      const run = this.sdkPool.run(opts);
+      return {
+        events: this.trackSessionEvents(run.events, opts),
+        stop: () => run.stop(),
+        waitForExit: (timeoutMs) => run.waitForExit(timeoutMs),
+      };
     }
+    return spawnCursorRun(this.spawnOpts, opts);
+  }
 
-    const agentArgs = [
-      ...this.prefixArgs,
-      '-p',
-      '--output-format',
-      'stream-json',
-      '--trust',
-    ];
-    if (opts.cwd) agentArgs.push('--workspace', opts.cwd);
-    if (opts.sessionId) agentArgs.push('--resume', opts.sessionId);
-    if (opts.model) agentArgs.push('--model', opts.model);
-    if (opts.permissionMode === 'plan') agentArgs.push('--mode', 'plan');
-    agentArgs.push(buildPrompt(opts.prompt));
+  async evictScope(scope: string, cwd?: string): Promise<void> {
+    await this.sdkPool?.evictScope(scope, cwd);
+  }
 
-    const child = spawn(this.command, agentArgs, {
-      cwd: opts.cwd,
-      env: { ...process.env, LARK_CHANNEL: '1' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+  async shutdown(): Promise<void> {
+    await this.sdkPool?.shutdown();
+  }
 
-    log.info('agent', 'spawn', {
-      pid: child.pid ?? null,
-      command: this.commandLabel,
-      cwd: opts.cwd ?? process.cwd(),
-      hasSession: Boolean(opts.sessionId),
-      promptChars: opts.prompt.length,
-      model: opts.model,
-    });
-
-    const stderrChunks: Buffer[] = [];
-    let stderrBuffer = '';
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderrChunks.push(chunk);
-      stderrBuffer += chunk.toString('utf8');
-      let nl = stderrBuffer.indexOf('\n');
-      while (nl !== -1) {
-        const line = stderrBuffer.slice(0, nl);
-        stderrBuffer = stderrBuffer.slice(nl + 1);
-        if (line.trim()) log.warn('agent', 'stderr', { line });
-        nl = stderrBuffer.indexOf('\n');
+  private async *trackSessionEvents(
+    events: AsyncIterable<AgentEvent>,
+    opts: AgentRunOptions,
+  ): AsyncGenerator<AgentEvent> {
+    for await (const event of events) {
+      if (event.type === 'system' && event.sessionId && this.sdkPool) {
+        this.sdkPool.noteSessionId(opts, event.sessionId);
       }
-    });
-
-    let runtimeError: Error | null = null;
-    child.on('error', (err) => {
-      runtimeError = err;
-    });
-    child.on('exit', (code, signal) => {
-      log.info('agent', 'exit', { pid: child.pid ?? null, code, signal });
-    });
-
-    const stopGraceMs = opts.stopGraceMs ?? 5000;
-
-    return {
-      events: createEventStream(child, stderrChunks, () => runtimeError, this.commandLabel),
-      async stop() {
-        if (child.exitCode !== null || child.signalCode !== null) return;
-        log.info('agent', 'stop-sigterm', { pid: child.pid ?? null, graceMs: stopGraceMs });
-        child.kill('SIGTERM');
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(() => {
-            if (child.exitCode === null && child.signalCode === null) {
-              log.warn('agent', 'stop-sigkill', {
-                pid: child.pid ?? null,
-                graceMs: stopGraceMs,
-                reason: 'grace-period-expired',
-              });
-              child.kill('SIGKILL');
-            }
-            resolve();
-          }, stopGraceMs);
-          child.once('exit', () => {
-            clearTimeout(timer);
-            resolve();
-          });
-        });
-      },
-      waitForExit(timeoutMs: number): Promise<boolean> {
-        if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
-        return new Promise<boolean>((resolve) => {
-          const onExit = (): void => {
-            clearTimeout(timer);
-            resolve(true);
-          };
-          const timer = setTimeout(() => {
-            child.removeListener('exit', onExit);
-            resolve(false);
-          }, timeoutMs);
-          child.once('exit', onExit);
-        });
-      },
-    };
-  }
-}
-
-function validateWorkingDirectory(cwd: string): string | undefined {
-  try {
-    if (!statSync(cwd).isDirectory()) {
-      return `working directory is not a directory: ${cwd}. Use /cd to switch this chat to a valid path.`;
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return `working directory does not exist: ${cwd}. Use /cd to switch this chat to a valid path.`;
-    }
-    return `working directory is not accessible: ${cwd}: ${(err as Error).message}`;
-  }
-  return undefined;
-}
-
-function errorRun(message: string): AgentRun {
-  return {
-    events: (async function* (): AsyncGenerator<AgentEvent> {
-      yield { type: 'error', message };
-    })(),
-    async stop() {},
-    async waitForExit() {
-      return true;
-    },
-  };
-}
-
-function buildPrompt(prompt: string): string {
-  return `<bridge_system_prompt>\n${BRIDGE_SYSTEM_PROMPT}\n</bridge_system_prompt>\n\n<user_prompt>\n${prompt}\n</user_prompt>`;
-}
-
-async function* createEventStream(
-  child: CursorChild,
-  stderrChunks: Buffer[],
-  getError: () => Error | null,
-  commandLabel: string,
-): AsyncGenerator<AgentEvent> {
-  if (!child.pid) {
-    const err = getError();
-    yield {
-      type: 'error',
-      message: err ? `failed to spawn ${commandLabel}: ${err.message}` : 'spawn returned no pid',
-    };
-    return;
-  }
-
-  const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
-  try {
-    for await (const line of rl) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(trimmed);
-      } catch {
-        continue;
+      if (event.type === 'done' && event.sessionId && this.sdkPool) {
+        this.sdkPool.noteSessionId(opts, event.sessionId);
       }
-      yield* translateEvent(parsed);
+      yield event;
     }
-  } finally {
-    rl.close();
-  }
-
-  const exitCode = await new Promise<number | null>((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      resolve(child.exitCode);
-    } else {
-      child.once('exit', (code) => resolve(code));
-    }
-  });
-
-  const runtimeError = getError();
-  if (exitCode !== 0 && exitCode !== null) {
-    const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
-    const detail = stderr ? `: ${stderr.slice(0, 500)}` : '';
-    yield { type: 'error', message: `cursor agent exited with code ${exitCode}${detail}` };
-  } else if (runtimeError) {
-    yield { type: 'error', message: `cursor agent runtime error: ${runtimeError.message}` };
   }
 }

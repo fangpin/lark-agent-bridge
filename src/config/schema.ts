@@ -144,6 +144,19 @@ export interface AppPreferences {
   /** Coding-agent command configuration. Default backend/command: `claude`. */
   agentCommand?: AgentCommandConfig;
   /**
+   * Cursor backend runtime when `agentCommand.backend` is `cursor`:
+   *   - `sdk`: reuse persistent `@cursor/sdk` local agents (LRU pool)
+   *   - `cli`: spawn `cursor-agent -p` per message (legacy)
+   * Default: `sdk` when the SDK is installed, otherwise `cli`.
+   */
+  agentCursorRuntime?: 'sdk' | 'cli';
+  /**
+   * Max persistent Cursor SDK session workers kept alive between runs. Each
+   * worker holds one local `Agent.create()` instance. 0 disables pooling.
+   * Default: 10 when runtime is `sdk`.
+   */
+  agentSessionPoolSize?: number;
+  /**
    * Grace period (ms) between SIGTERM and SIGKILL when killing the claude
    * subprocess. Bumped from a hardcoded 500ms because claude often has its
    * own subprocesses (e.g. lark-cli mid-OAuth) that need a moment to clean
@@ -232,6 +245,22 @@ export function getMaxConcurrentRuns(cfg: AppConfig): number {
  */
 export function getRequireMentionInGroup(cfg: AppConfig): boolean {
   return cfg.preferences?.requireMentionInGroup !== false;
+}
+
+export function getAgentCursorRuntime(cfg: AppConfig): 'sdk' | 'cli' {
+  if (getAgentCommand(cfg).backend !== 'cursor') return 'cli';
+  return cfg.preferences?.agentCursorRuntime === 'cli' ? 'cli' : 'sdk';
+}
+
+export function getAgentSessionPoolSize(cfg: AppConfig): number {
+  const backend = getAgentCommand(cfg).backend;
+  const runtime = getAgentCursorRuntime(cfg);
+  const raw = cfg.preferences?.agentSessionPoolSize;
+  if (raw === 0) return 0;
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return Math.min(20, Math.max(1, Math.floor(raw)));
+  }
+  return backend === 'cursor' && runtime === 'sdk' ? 10 : 0;
 }
 
 export function getAgentCommand(

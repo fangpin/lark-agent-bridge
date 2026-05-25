@@ -1,0 +1,25 @@
+{
+  "name": "@cursor/sdk-linux-x64",
+  "version": "1.0.13",
+  "description": "Platform binaries for linux-x64, bundled for @cursor/sdk.",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cursor/cursor"
+  },
+  "homepage": "https://cursor.com",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/**/*",
+    "package.json",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

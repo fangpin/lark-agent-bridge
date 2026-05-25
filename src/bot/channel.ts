@@ -519,6 +519,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     prompt,
     sessionId: resumeFrom,
     cwd,
+    poolKey: scope,
     stopGraceMs: agentStopGraceMs,
   });
   const handle = activeRuns.register(scope, run);

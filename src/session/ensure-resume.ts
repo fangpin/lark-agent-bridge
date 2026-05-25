@@ -16,7 +16,7 @@ export async function ensureResumeSession(
   if (existing) return existing;
   if (!agent.prepareSession) return undefined;
 
-  const sessionId = await agent.prepareSession(cwd);
+  const sessionId = await agent.prepareSession(cwd, scope);
   if (!sessionId) {
     log.warn('session', 'precreate-failed', { scope, cwd });
     return undefined;
