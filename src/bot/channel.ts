@@ -509,11 +509,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   }
 
+  const agentStopGraceMs = getAgentStopGraceMs(controls.cfg);
   const run = agent.run({
     prompt,
     sessionId: resumeFrom,
     cwd,
-    stopGraceMs: getAgentStopGraceMs(controls.cfg),
+    stopGraceMs: agentStopGraceMs,
   });
   const handle = activeRuns.register(scope, run);
 
@@ -564,9 +565,17 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           card: {
             initial: renderCard(initialState),
             producer: async (ctrl) => {
-              await processAgentStream(handle, sessions, scope, cwd, idleTimeoutMs, async (state) => {
-                await ctrl.update(renderCard(filterForPrefs(state)));
-              });
+              await processAgentStream(
+                handle,
+                sessions,
+                scope,
+                cwd,
+                idleTimeoutMs,
+                async (state) => {
+                  await ctrl.update(renderCard(filterForPrefs(state)));
+                },
+                agentStopGraceMs,
+              );
             },
           },
         },
@@ -577,9 +586,17 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         chatId,
         {
           markdown: async (ctrl) => {
-            await processAgentStream(handle, sessions, scope, cwd, idleTimeoutMs, async (state) => {
-              await ctrl.setContent(renderText(filterForPrefs(state)));
-            });
+            await processAgentStream(
+              handle,
+              sessions,
+              scope,
+              cwd,
+              idleTimeoutMs,
+              async (state) => {
+                await ctrl.setContent(renderText(filterForPrefs(state)));
+              },
+              agentStopGraceMs,
+            );
           },
         },
         sendOpts,
@@ -589,9 +606,17 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       // the run, then post the final rendered text once as a plain markdown
       // (msg_type=post) message — no card, no streaming, no typewriter.
       let finalState: RunState = initialState;
-      await processAgentStream(handle, sessions, scope, cwd, idleTimeoutMs, async (state) => {
-        finalState = state;
-      });
+      await processAgentStream(
+        handle,
+        sessions,
+        scope,
+        cwd,
+        idleTimeoutMs,
+        async (state) => {
+          finalState = state;
+        },
+        agentStopGraceMs,
+      );
       const body = renderText(filterForPrefs(finalState));
       if (body.trim()) {
         await channel.send(chatId, { markdown: body }, sendOpts);
@@ -612,13 +637,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
  * on every state transition. Used by both card and markdown reply modes —
  * the only difference between the two is what `flush` does with the state.
  */
-async function processAgentStream(
+export async function processAgentStream(
   handle: RunHandle,
   sessions: SessionStore,
   scope: string,
   cwd: string,
   idleTimeoutMs: number | undefined,
   flush: (state: RunState) => Promise<void>,
+  postDoneExitGraceMs = POST_DONE_EXIT_GRACE_MS,
 ): Promise<void> {
   let state: RunState = initialState;
 
@@ -729,19 +755,18 @@ async function processAgentStream(
   if (handle.interrupted) {
     await handle.run.stop();
   } else {
-    const exited = await handle.run.waitForExit(POST_DONE_EXIT_GRACE_MS);
+    const exited = await handle.run.waitForExit(postDoneExitGraceMs);
     if (!exited) {
-      log.warn('agent', 'post-done-timeout', { graceMs: POST_DONE_EXIT_GRACE_MS });
+      log.warn('agent', 'post-done-timeout', { graceMs: postDoneExitGraceMs });
       await handle.run.stop();
     }
   }
 }
 
 /**
- * How long to wait for claude to close stdout after a terminal event before
- * forcing a SIGTERM. Empirically claude's post-`result` tail is well under a
- * second; 2s leaves headroom for slow flushes without making the user notice
- * a stall (the card has already rendered terminal state by this point).
+ * Fallback wait for an agent to close stdout after a terminal event before
+ * forcing a SIGTERM. Runtime calls use the configured agent stop grace so
+ * slower Cursor cleanup is not killed by this legacy 2s default.
  */
 const POST_DONE_EXIT_GRACE_MS = 2000;
 
