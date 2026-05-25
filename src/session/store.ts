@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
+import { fromPortablePath, toPortablePath, type PortablePathOptions } from '../utils/portable-path';
 
 export interface SessionEntry {
   /** May be absent if the entry was created by /timeout before any run
@@ -22,9 +23,11 @@ export class SessionStore {
   private data: SessionMap = {};
   private saving: Promise<void> = Promise.resolve();
   private readonly path: string;
+  private readonly pathOptions: PortablePathOptions;
 
-  constructor(path: string = paths.sessionsFile) {
+  constructor(path: string = paths.sessionsFile, pathOptions: PortablePathOptions = {}) {
     this.path = path;
+    this.pathOptions = pathOptions;
   }
 
   async load(): Promise<void> {
@@ -66,12 +69,19 @@ export class SessionStore {
   resumeFor(chatId: string, cwd: string): string | undefined {
     const entry = this.data[chatId];
     if (!entry) return undefined;
-    if (entry.cwd !== cwd) return undefined;
+    if (!entry.cwd || fromPortablePath(entry.cwd, this.pathOptions) !== cwd) return undefined;
     return entry.sessionId;
   }
 
   getRaw(chatId: string): SessionEntry | undefined {
-    return this.data[chatId];
+    const entry = this.data[chatId];
+    if (!entry) return undefined;
+    return {
+      ...entry,
+      ...(entry.cwd !== undefined
+        ? { cwd: fromPortablePath(entry.cwd, this.pathOptions) }
+        : {}),
+    };
   }
 
   set(chatId: string, sessionId: string, cwd: string): void {
@@ -80,7 +90,7 @@ export class SessionStore {
     const prev = this.data[chatId];
     this.data[chatId] = {
       sessionId,
-      cwd,
+      cwd: toPortablePath(cwd, this.pathOptions),
       updatedAt: Date.now(),
       ...(prev?.idleTimeoutMinutes !== undefined
         ? { idleTimeoutMinutes: prev.idleTimeoutMinutes }

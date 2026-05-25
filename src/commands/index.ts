@@ -1,5 +1,6 @@
 import { stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { resolve } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
@@ -194,6 +195,11 @@ function expandTilde(p: string): string {
   return p;
 }
 
+function resolveCdInput(input: string, baseCwd: string): string {
+  if (input.startsWith('/') || input.startsWith('~')) return expandTilde(input);
+  return resolve(baseCwd, input);
+}
+
 async function handleNew(args: string, ctx: CommandContext): Promise<void> {
   const trimmed = args.trim();
 
@@ -250,14 +256,10 @@ async function handleNewChat(rawName: string, ctx: CommandContext): Promise<void
 async function handleCd(args: string, ctx: CommandContext): Promise<void> {
   const input = args.trim();
   if (!input) {
-    await reply(ctx, '用法：`/cd <绝对路径>` 或 `/cd ~/xxx`');
+    await reply(ctx, '用法：`/cd <路径>`，支持绝对路径、`~/xxx` 或相对当前 cwd 的路径。');
     return;
   }
-  if (!input.startsWith('/') && !input.startsWith('~')) {
-    await reply(ctx, '请使用绝对路径，或 `~/xxx` 表示 home 下的子路径。');
-    return;
-  }
-  const absolute = expandTilde(input);
+  const absolute = resolveCdInput(input, ctx.workspaces.cwdFor(ctx.scope) ?? homedir());
   try {
     const st = await stat(absolute);
     if (!st.isDirectory()) {

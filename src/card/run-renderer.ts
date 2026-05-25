@@ -38,8 +38,9 @@ export function renderCard(state: RunState): object {
     elements.push(noteMd(`_⏱ ${mins} 分钟无响应,已自动终止_`));
   } else if (state.terminal === 'error' && state.errorMsg) {
     elements.push(noteMd(`⚠️ agent 失败：${state.errorMsg}`));
-  } else if (state.terminal === 'done' && elements.length === 0) {
-    elements.push(noteMd('_（未返回内容）_'));
+  } else if (state.terminal === 'done') {
+    if (elements.length === 0) elements.push(noteMd('_（未返回内容）_'));
+    elements.push(noteMd('_✅ 已完成_'));
   }
 
   if (state.terminal === 'running') {
