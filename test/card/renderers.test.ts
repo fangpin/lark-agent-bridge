@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { renderCard } from '../../src/card/run-renderer';
-import type { RunState } from '../../src/card/run-state';
+import { initialState, type RunState } from '../../src/card/run-state';
 import { renderText } from '../../src/card/text-renderer';
 
 function doneState(): RunState {
@@ -13,6 +13,10 @@ function doneState(): RunState {
 }
 
 describe('run renderers', () => {
+  test('shows a starting footer before the agent is ready', () => {
+    expect(renderText({ ...initialState })).toBe('_🚀 正在启动 Agent…_');
+  });
+
   test('keeps a completed footer in markdown reply mode', () => {
     expect(renderText(doneState())).toBe('任务结果\n\n_✅ 已完成_');
   });

@@ -14,7 +14,7 @@ export type Block =
   | { kind: 'text'; content: string; streaming: boolean }
   | { kind: 'tool'; tool: ToolEntry };
 
-export type FooterStatus = 'thinking' | 'tool_running' | 'streaming' | null;
+export type FooterStatus = 'starting' | 'thinking' | 'tool_running' | 'streaming' | null;
 export type Terminal = 'running' | 'done' | 'interrupted' | 'error' | 'idle_timeout';
 
 export interface RunState {
@@ -31,9 +31,14 @@ export interface RunState {
 export const initialState: RunState = {
   blocks: [],
   reasoning: { content: '', active: false },
-  footer: 'thinking',
+  footer: 'starting',
   terminal: 'running',
 };
+
+export function markAgentReady(state: RunState): RunState {
+  if (state.footer !== 'starting') return state;
+  return { ...state, footer: 'thinking' };
+}
 
 function closeStreamingText(blocks: Block[]): Block[] {
   return blocks.map((b) =>

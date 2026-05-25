@@ -47,4 +47,6 @@ export interface AgentAdapter {
   readonly commandLabel: string;
   isAvailable(): Promise<boolean>;
   run(opts: AgentRunOptions): AgentRun;
+  /** Optional: pre-create a backend session id for --resume (Cursor only). */
+  prepareSession?(cwd: string): Promise<string | undefined>;
 }

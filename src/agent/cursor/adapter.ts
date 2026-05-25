@@ -6,6 +6,7 @@ import type { Readable } from 'node:stream';
 import { log } from '../../core/logger';
 import { BRIDGE_SYSTEM_PROMPT } from '../claude/adapter';
 import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../types';
+import { spawnCreateChat } from './create-chat';
 import { translateEvent } from './stream-json';
 
 export interface CursorAdapterOptions {
@@ -37,6 +38,10 @@ export class CursorAdapter implements AgentAdapter {
       child.on('error', () => resolve(false));
       child.on('exit', (code) => resolve(code === 0));
     });
+  }
+
+  async prepareSession(_cwd: string): Promise<string | undefined> {
+    return spawnCreateChat({ command: this.command, prefixArgs: this.prefixArgs });
   }
 
   run(opts: AgentRunOptions): AgentRun {
