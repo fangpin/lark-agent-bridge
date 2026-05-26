@@ -135,7 +135,11 @@ async function handleRun(id: string, prompt: string): Promise<void> {
 
     const result = await run.wait();
     if (result.status === 'error') {
-      send({ type: 'error', id, message: result.result ?? 'sdk run failed' });
+      send({
+        type: 'error',
+        id,
+        message: result.result ?? `sdk run failed (runId=${result.id}, status=${result.status})`,
+      });
       return;
     }
     send({ type: 'done', id, agentId: agent.agentId });

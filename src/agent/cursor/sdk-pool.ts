@@ -60,6 +60,10 @@ function ephemeralPoolKey(prefix = 'ephemeral'): string {
   return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
 }
 
+export function doneEventForAgent(agentId?: string): AgentEvent {
+  return agentId ? { type: 'done', sessionId: agentId } : { type: 'done' };
+}
+
 export class CursorSdkPool {
   private readonly entries = new Map<string, PoolEntry>();
   private readonly spawnOpts: CursorSpawnOptions;
@@ -391,7 +395,8 @@ function createWorker(
           queue.push(event);
           notify?.();
         };
-        finish = () => {
+        finish = (agentId) => {
+          queue.push(doneEventForAgent(agentId));
           done = true;
           notify?.();
         };

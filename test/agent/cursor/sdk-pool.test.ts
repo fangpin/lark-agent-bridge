@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { poolKeyFor } from '../../../src/agent/cursor/sdk-pool';
+import { doneEventForAgent, poolKeyFor } from '../../../src/agent/cursor/sdk-pool';
 
 describe('poolKeyFor', () => {
   test('uses only session id for reusable workers', () => {
@@ -35,5 +35,10 @@ describe('poolKeyFor', () => {
   test('generates ephemeral key when neither session nor scope is set', () => {
     const key = poolKeyFor({ prompt: 'hi', cwd: '/tmp/ws' });
     expect(key.startsWith('ephemeral:')).toBe(true);
+  });
+
+  test('preserves worker done agent id as a session event', () => {
+    expect(doneEventForAgent('agent-123')).toEqual({ type: 'done', sessionId: 'agent-123' });
+    expect(doneEventForAgent()).toEqual({ type: 'done' });
   });
 });
