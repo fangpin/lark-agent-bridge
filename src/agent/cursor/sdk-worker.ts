@@ -1,6 +1,10 @@
 import { Agent } from '@cursor/sdk';
 import type { SDKAgent } from '@cursor/sdk';
-import { formatSdkErrorForIpc, formatSdkErrorForStderr } from './sdk-error';
+import {
+  formatSdkErrorForIpc,
+  formatSdkErrorForStderr,
+  isCursorAgentNotFoundError,
+} from './sdk-error';
 import { buildCursorPrompt } from './spawn-run';
 import { translateSdkMessage, type SdkMessageLike } from './sdk-translate';
 import type { AgentEvent } from '../types';
@@ -86,7 +90,19 @@ async function ensureAgent(id: string, cwd: string, agentId?: string): Promise<v
   };
 
   try {
-    agent = agentId ? await Agent.resume(agentId, opts) : await Agent.create(opts);
+    if (agentId) {
+      try {
+        agent = await Agent.resume(agentId, opts);
+      } catch (err) {
+        if (!isCursorAgentNotFoundError(err, agentId)) throw err;
+        process.stderr.write(
+          `[sdk-worker] stale SDK agent ${agentId}; creating a replacement session\n`,
+        );
+        agent = await Agent.create(opts);
+      }
+    } else {
+      agent = await Agent.create(opts);
+    }
     send({ type: 'agent', id, agentId: agent.agentId });
   } catch (err) {
     reportWorkerError('sdk agent init failed', err, id);
