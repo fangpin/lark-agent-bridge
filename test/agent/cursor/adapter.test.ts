@@ -23,4 +23,12 @@ describe('CursorAdapter', () => {
       `working directory does not exist: ${missingCwd}. Use /cd to switch this chat to a valid path.`,
     ]);
   });
+
+  test('rejects legacy CLI session ids when using the SDK runtime', () => {
+    const adapter = new CursorAdapter({ runtime: 'sdk', sessionPoolSize: 1 });
+
+    expect(adapter.canResumeSession('agent-17def2a7-16a4-45c0-9560-16576b6d3688')).toBe(true);
+    expect(adapter.canResumeSession('bc-example')).toBe(true);
+    expect(adapter.canResumeSession('555e5524-3d1e-4efb-9b95-569bb697768f')).toBe(false);
+  });
 });

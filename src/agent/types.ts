@@ -51,6 +51,8 @@ export interface AgentAdapter {
   run(opts: AgentRunOptions): AgentRun;
   /** Optional: pre-create a backend session id (Cursor CLI create-chat or SDK agent). */
   prepareSession?(cwd: string, scope?: string): Promise<string | undefined>;
+  /** Optional: reject persisted session ids from another runtime/version before resume. */
+  canResumeSession?(sessionId: string): boolean;
   /** Optional: drop a pooled SDK worker for a bridge scope (/new, /cd). */
   evictScope?(scope: string, cwd?: string): Promise<void>;
   /** Optional: release pooled SDK workers on bridge shutdown. */

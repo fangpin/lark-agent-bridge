@@ -87,6 +87,11 @@ export class CursorAdapter implements AgentAdapter {
     return spawnCreateChat({ command: this.command, prefixArgs: this.prefixArgs });
   }
 
+  canResumeSession(sessionId: string): boolean {
+    if (!this.sdkPool) return true;
+    return isCursorSdkSessionId(sessionId);
+  }
+
   run(opts: AgentRunOptions): AgentRun {
     const runOpts = { ...opts, model: opts.model ?? this.defaultCliModel };
     if (this.sdkPool && opts.poolKey) {
@@ -122,4 +127,8 @@ export class CursorAdapter implements AgentAdapter {
       yield event;
     }
   }
+}
+
+export function isCursorSdkSessionId(sessionId: string): boolean {
+  return sessionId.startsWith('agent-') || sessionId.startsWith('bc-');
 }
