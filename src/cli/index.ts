@@ -64,10 +64,15 @@ secrets
 
 secrets
   .command('set')
-  .description('Encrypt and store an App Secret. Prompts for the secret without echoing.')
-  .requiredOption('--app-id <id>', 'App ID (e.g. cli_xxxxxxxxxxxx)')
-  .action(async (opts: { appId: string }) => {
-    await runSecretsSet(opts.appId);
+  .description('Encrypt and store a secret. Prompts without echoing.')
+  .option('--app-id <id>', 'App ID → keystore id app-<id> (Feishu App Secret)')
+  .option('--id <id>', 'Keystore id (e.g. cursor-api-key for Cursor API Key)')
+  .action(async (opts: { appId?: string; id?: string }) => {
+    if (!opts.appId && !opts.id) {
+      console.error('需要 --app-id 或 --id');
+      process.exit(1);
+    }
+    await runSecretsSet(opts.appId, opts.id);
   });
 
 secrets
@@ -80,9 +85,14 @@ secrets
 secrets
   .command('remove')
   .description('Delete an entry from the encrypted keystore')
-  .requiredOption('--app-id <id>', 'App ID to remove')
-  .action(async (opts: { appId: string }) => {
-    await runSecretsRemove(opts.appId);
+  .option('--app-id <id>', 'App ID → keystore id app-<id>')
+  .option('--id <id>', 'Keystore id (e.g. cursor-api-key)')
+  .action(async (opts: { appId?: string; id?: string }) => {
+    if (!opts.appId && !opts.id) {
+      console.error('需要 --app-id 或 --id');
+      process.exit(1);
+    }
+    await runSecretsRemove(opts.appId, opts.id);
   });
 
 program

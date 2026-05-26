@@ -157,6 +157,27 @@ export interface AppPreferences {
    */
   agentSessionPoolSize?: number;
   /**
+   * Default Cursor model for CLI `--model` (e.g. `gpt-5.5-extra-high-fast`).
+   * See `agent --list-models`. SDK mode maps known CLI variants to base id +
+   * params automatically; override with `agentCursorSdkModel`.
+   */
+  agentCursorModel?: string;
+  /**
+   * SDK `@cursor/sdk` model selection: base id + optional params (e.g.
+   * `{ "id": "gpt-5.5", "params": [{ "id": "reasoning", "value": "extra-high" }] }`).
+   * When omitted, derived from `agentCursorModel`.
+   */
+  agentCursorSdkModel?: {
+    id: string;
+    params?: Array<{ id: string; value: string }>;
+  };
+  /**
+   * Cursor API key for `@cursor/sdk` and CLI (`CURSOR_API_KEY`). Same
+   * `SecretInput` forms as `accounts.app.secret`: plain string, `"${VAR}"`,
+   * or `{ source: "exec", id: "cursor-api-key", ... }` in the keystore.
+   */
+  agentCursorApiKey?: SecretInput;
+  /**
    * Grace period (ms) between SIGTERM and SIGKILL when killing the claude
    * subprocess. Bumped from a hardcoded 500ms because claude often has its
    * own subprocesses (e.g. lark-cli mid-OAuth) that need a moment to clean
@@ -205,6 +226,11 @@ export function secretKeyForApp(appId: string): string {
   return `app-${appId}`;
 }
 
+/** Keystore id for `preferences.agentCursorApiKey` exec refs. */
+export function secretKeyForCursorApiKey(): string {
+  return 'cursor-api-key';
+}
+
 /**
  * Resolve the message-reply preference with default fallback + legacy coerce.
  *
@@ -250,6 +276,15 @@ export function getRequireMentionInGroup(cfg: AppConfig): boolean {
 export function getAgentCursorRuntime(cfg: AppConfig): 'sdk' | 'cli' {
   if (getAgentCommand(cfg).backend !== 'cursor') return 'cli';
   return cfg.preferences?.agentCursorRuntime === 'cli' ? 'cli' : 'sdk';
+}
+
+/** @deprecated Use getAgentCursorCliModel from agent/cursor/model-selection. */
+export const DEFAULT_AGENT_CURSOR_MODEL = 'gpt-5.5-extra-high-fast';
+
+/** @deprecated Use getAgentCursorCliModel from agent/cursor/model-selection. */
+export function getAgentCursorModel(cfg: AppConfig): string {
+  const raw = cfg.preferences?.agentCursorModel?.trim();
+  return raw || DEFAULT_AGENT_CURSOR_MODEL;
 }
 
 export function getAgentSessionPoolSize(cfg: AppConfig): number {

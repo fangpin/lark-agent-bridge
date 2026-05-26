@@ -73,7 +73,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
     printScopeReminder();
   }
 
-  let agent = createAgentAdapter(cfg);
+  let agent = await createAgentAdapter(cfg);
   if (!(await agent.isAvailable())) {
     console.error(`✗ 未找到或无法运行 agent 命令: ${agent.commandLabel}`);
     console.error('  请确认已安装并可执行该命令，或在 ~/.lark-channel/config.json 中配置 preferences.agentCommand。');
@@ -146,7 +146,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
       try {
         const next = await loadConfig(configPath);
         if (!isComplete(next)) throw new Error('config incomplete after change');
-        const nextAgent = createAgentAdapter(next);
+        const nextAgent = await createAgentAdapter(next);
         if (!(await nextAgent.isAvailable())) {
           throw new Error(`configured agent command is not runnable: ${nextAgent.commandLabel}`);
         }

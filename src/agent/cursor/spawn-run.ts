@@ -12,6 +12,7 @@ export interface CursorSpawnOptions {
   command: string;
   prefixArgs: string[];
   commandLabel: string;
+  apiKey?: string;
 }
 
 type CursorChild = ChildProcessByStdio<null, Readable, Readable>;
@@ -58,7 +59,11 @@ export function spawnCursorRun(
 
   const child = spawn(spawnOpts.command, agentArgs, {
     cwd: opts.cwd,
-    env: { ...process.env, LARK_CHANNEL: '1' },
+    env: {
+      ...process.env,
+      LARK_CHANNEL: '1',
+      ...(spawnOpts.apiKey ? { CURSOR_API_KEY: spawnOpts.apiKey } : {}),
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 

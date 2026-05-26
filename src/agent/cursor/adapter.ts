@@ -3,15 +3,23 @@ import { log } from '../../core/logger';
 import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../types';
 import { spawnCreateChat } from './create-chat';
 import { CursorSdkPool } from './sdk-pool';
-import { spawnCursorRun } from './spawn-run';
+import { spawnCursorRun, type CursorSpawnOptions } from './spawn-run';
 import type { SdkWorkerConfig } from './sdk-worker';
+import type { CursorSdkModelSelection } from './model-selection';
+import {
+  DEFAULT_AGENT_CURSOR_CLI_MODEL,
+  DEFAULT_AGENT_CURSOR_SDK_MODEL,
+} from './model-selection';
 
 export interface CursorAdapterOptions {
   command?: string;
   args?: string[];
   runtime?: 'sdk' | 'cli';
   sessionPoolSize?: number;
-  defaultModel?: string;
+  /** CLI `--model` id (e.g. `gpt-5.5-extra-high-fast`). */
+  defaultCliModel?: string;
+  /** SDK `ModelSelection` (e.g. `gpt-5.5` + reasoning/fast params). */
+  defaultSdkModel?: CursorSdkModelSelection;
   apiKey?: string;
 }
 
@@ -22,22 +30,27 @@ export class CursorAdapter implements AgentAdapter {
   private readonly command: string;
   private readonly prefixArgs: string[];
   private readonly runtime: 'sdk' | 'cli';
+  private readonly defaultCliModel: string;
+  private readonly defaultSdkModel: CursorSdkModelSelection;
   private readonly sdkPool: CursorSdkPool | undefined;
-  private readonly spawnOpts: { command: string; prefixArgs: string[]; commandLabel: string };
+  private readonly spawnOpts: CursorSpawnOptions;
 
   constructor(opts: CursorAdapterOptions = {}) {
     this.command = opts.command ?? 'agent';
     this.prefixArgs = opts.args ?? [];
     this.runtime = opts.runtime ?? 'cli';
+    this.defaultCliModel = opts.defaultCliModel ?? DEFAULT_AGENT_CURSOR_CLI_MODEL;
+    this.defaultSdkModel = opts.defaultSdkModel ?? DEFAULT_AGENT_CURSOR_SDK_MODEL;
     this.spawnOpts = {
       command: this.command,
       prefixArgs: this.prefixArgs,
       commandLabel: this.commandLabel,
+      apiKey: opts.apiKey,
     };
     const poolSize = opts.sessionPoolSize ?? 0;
     if (this.runtime === 'sdk' && poolSize > 0) {
       const sdkConfig: SdkWorkerConfig = {
-        defaultModel: opts.defaultModel ?? 'composer-2.5-fast',
+        model: this.defaultSdkModel,
         ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
       };
       this.sdkPool = new CursorSdkPool(this.spawnOpts, sdkConfig, poolSize);
@@ -74,15 +87,16 @@ export class CursorAdapter implements AgentAdapter {
   }
 
   run(opts: AgentRunOptions): AgentRun {
+    const runOpts = { ...opts, model: opts.model ?? this.defaultCliModel };
     if (this.sdkPool && opts.poolKey) {
-      const run = this.sdkPool.run(opts);
+      const run = this.sdkPool.run(runOpts);
       return {
-        events: this.trackSessionEvents(run.events, opts),
+        events: this.trackSessionEvents(run.events, runOpts),
         stop: () => run.stop(),
         waitForExit: (timeoutMs) => run.waitForExit(timeoutMs),
       };
     }
-    return spawnCursorRun(this.spawnOpts, opts);
+    return spawnCursorRun(this.spawnOpts, runOpts);
   }
 
   async evictScope(scope: string, cwd?: string): Promise<void> {

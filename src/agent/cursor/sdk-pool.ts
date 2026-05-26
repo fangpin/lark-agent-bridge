@@ -1,4 +1,5 @@
 import { fork, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { log } from '../../core/logger';
@@ -160,8 +161,14 @@ export class CursorSdkPool {
       return existing;
     }
     void this.evictIfNeeded();
-    const worker = createWorker(this.workerScript, this.sdkConfig);
-    const entry: PoolEntry = {
+    let entry!: PoolEntry;
+    const worker = createWorker(this.workerScript, this.sdkConfig, () => {
+      if (this.entries.get(key) === entry) {
+        this.entries.delete(key);
+        log.warn('agent', 'sdk-pool-worker-died', { key, pid: worker.pid });
+      }
+    });
+    entry = {
       key,
       worker,
       agentId: opts.sessionId,
@@ -208,18 +215,64 @@ export class CursorSdkPool {
   }
 }
 
-function resolveWorkerScript(): string {
-  return join(dirname(fileURLToPath(import.meta.url)), 'cursor-sdk-worker.js');
+/** Package root (directory containing package.json). */
+function resolvePackageRoot(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  while (dir !== dirname(dir)) {
+    if (existsSync(join(dir, 'package.json'))) return dir;
+    dir = dirname(dir);
+  }
+  return dirname(fileURLToPath(import.meta.url));
 }
 
-function createWorker(script: string, sdkConfig: SdkWorkerConfig): WorkerHandle {
+/**
+ * Worker is built as a separate entry at dist/agent/cursor/. When sdk-pool is
+ * bundled into dist/cli.js, import.meta.url points at dist/cli.js — not the
+ * worker directory — so we probe known layouts instead of a single sibling path.
+ */
+function resolveWorkerScript(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(here, 'agent', 'cursor', 'cursor-sdk-worker.js'),
+    join(here, 'cursor-sdk-worker.js'),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return join(here, 'agent', 'cursor', 'cursor-sdk-worker.js');
+}
+
+function ipcSend(child: ChildProcess, msg: WorkerRequest): boolean {
+  if (!child.connected) return false;
+  try {
+    return child.send(msg);
+  } catch (err) {
+    log.warn('agent', 'sdk-ipc-send-failed', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
+function createWorker(
+  script: string,
+  sdkConfig: SdkWorkerConfig,
+  onDead?: () => void,
+): WorkerHandle {
+  const packageRoot = resolvePackageRoot();
   const child = fork(script, [], {
+    cwd: packageRoot,
     env: {
       ...process.env,
       LARK_CURSOR_SDK_WORKER: '1',
       LARK_CURSOR_SDK_CONFIG: JSON.stringify(sdkConfig),
     },
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+  });
+
+  child.stderr?.on('data', (chunk: Buffer | string) => {
+    const text = String(chunk).trimEnd();
+    if (text) log.warn('agent', 'sdk-worker-stderr', { text });
   });
 
   const pendingRuns = new Map<
@@ -253,6 +306,10 @@ function createWorker(script: string, sdkConfig: SdkWorkerConfig): WorkerHandle 
       return;
     }
     if (msg.type === 'error') {
+      log.warn('agent', 'sdk-worker-error', {
+        runId: msg.id ?? null,
+        message: msg.message,
+      });
       if (msg.id && pendingRuns.has(msg.id)) {
         pendingRuns.get(msg.id)?.fail(msg.message);
         pendingRuns.delete(msg.id);
@@ -265,12 +322,15 @@ function createWorker(script: string, sdkConfig: SdkWorkerConfig): WorkerHandle 
 
   child.on('exit', (code, signal) => {
     log.warn('agent', 'sdk-worker-exit', { pid: child.pid ?? null, code, signal });
+    onDead?.();
+    const exitMsg = `sdk worker exited (${code ?? signal ?? 'unknown'})`;
+    log.warn('agent', 'sdk-worker-error', { message: exitMsg });
     for (const [id, handlers] of pendingRuns) {
-      handlers.fail(`sdk worker exited (${code ?? signal ?? 'unknown'})`);
+      handlers.fail(exitMsg);
       pendingRuns.delete(id);
     }
     for (const [id, handlers] of pendingEnsures) {
-      handlers.reject('sdk worker exited');
+      handlers.reject(exitMsg);
       pendingEnsures.delete(id);
     }
   });
@@ -286,7 +346,9 @@ function createWorker(script: string, sdkConfig: SdkWorkerConfig): WorkerHandle 
             resolve(undefined);
           },
         });
-        child.send?.({ type: 'ensure', id: reqId, cwd, agentId } satisfies WorkerRequest);
+        if (!ipcSend(child, { type: 'ensure', id: reqId, cwd, agentId } satisfies WorkerRequest)) {
+          reject('sdk worker ipc closed');
+        }
         setTimeout(() => {
           if (!pendingEnsures.has(reqId)) return;
           pendingEnsures.delete(reqId);
@@ -327,12 +389,17 @@ function createWorker(script: string, sdkConfig: SdkWorkerConfig): WorkerHandle 
 
         const cwd = opts.cwd ?? process.cwd();
         const ensureId = `ensure-${runId}`;
-        child.send?.({
-          type: 'ensure',
-          id: ensureId,
-          cwd,
-          agentId: opts.sessionId,
-        } satisfies WorkerRequest);
+        if (
+          !ipcSend(child, {
+            type: 'ensure',
+            id: ensureId,
+            cwd,
+            agentId: opts.sessionId,
+          } satisfies WorkerRequest)
+        ) {
+          errorMsg = 'sdk worker ipc closed';
+          done = true;
+        }
 
         await new Promise<void>((resolve) => {
           const onAgent = (msg: WorkerResponse): void => {
@@ -359,7 +426,10 @@ function createWorker(script: string, sdkConfig: SdkWorkerConfig): WorkerHandle 
         });
 
         if (!errorMsg) {
-          child.send?.({ type: 'run', id: runId, prompt: opts.prompt } satisfies WorkerRequest);
+          if (!ipcSend(child, { type: 'run', id: runId, prompt: opts.prompt } satisfies WorkerRequest)) {
+            errorMsg = 'sdk worker ipc closed';
+            done = true;
+          }
         }
 
         while (!done || queue.length > 0) {
@@ -380,7 +450,7 @@ function createWorker(script: string, sdkConfig: SdkWorkerConfig): WorkerHandle 
       return {
         events,
         async stop() {
-          child.send?.({ type: 'stop', id: runId } satisfies WorkerRequest);
+          ipcSend(child, { type: 'stop', id: runId } satisfies WorkerRequest);
         },
         async waitForExit() {
           return true;
@@ -388,10 +458,10 @@ function createWorker(script: string, sdkConfig: SdkWorkerConfig): WorkerHandle 
       };
     },
     stopRun(runId) {
-      child.send?.({ type: 'stop', id: runId } satisfies WorkerRequest);
+      ipcSend(child, { type: 'stop', id: runId } satisfies WorkerRequest);
     },
     async shutdown() {
-      child.send?.({ type: 'shutdown' } satisfies WorkerRequest);
+      ipcSend(child, { type: 'shutdown' } satisfies WorkerRequest);
       await new Promise<void>((resolve) => {
         if (child.exitCode !== null || child.signalCode !== null) {
           resolve();

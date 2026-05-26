@@ -1,11 +1,12 @@
-import { Agent, CursorAgentError } from '@cursor/sdk';
+import { Agent } from '@cursor/sdk';
 import type { SDKAgent } from '@cursor/sdk';
+import { formatSdkErrorForIpc, formatSdkErrorForStderr } from './sdk-error';
 import { buildCursorPrompt } from './spawn-run';
 import { translateSdkMessage, type SdkMessageLike } from './sdk-translate';
 import type { AgentEvent } from '../types';
 
 export interface SdkWorkerConfig {
-  defaultModel: string;
+  model: { id: string; params?: Array<{ id: string; value: string }> };
   apiKey?: string;
 }
 
@@ -36,9 +37,21 @@ const config = readConfig();
 let agent: SDKAgent | undefined;
 let activeRunId: string | undefined;
 let activeAbort: (() => void) | undefined;
+let ensureQueue: Promise<void> = Promise.resolve();
 
 function send(msg: WorkerResponse): void {
   if (typeof process.send === 'function') process.send(msg);
+}
+
+function reportWorkerError(phase: string, err: unknown, runId?: string): void {
+  process.stderr.write(`${formatSdkErrorForStderr(phase, err)}\n`);
+  send({ type: 'error', id: runId, message: formatSdkErrorForIpc(phase, err) });
+}
+
+function queueEnsure(task: () => Promise<void>): void {
+  ensureQueue = ensureQueue.then(task).catch((err) => {
+    reportWorkerError('sdk ensure failed', err);
+  });
 }
 
 async function ensureAgent(id: string, cwd: string, agentId?: string): Promise<void> {
@@ -61,7 +74,7 @@ async function ensureAgent(id: string, cwd: string, agentId?: string): Promise<v
 
   const opts = {
     ...(config.apiKey ? { apiKey: config.apiKey } : {}),
-    model: { id: config.defaultModel },
+    model: config.model,
     local: { cwd },
   };
 
@@ -69,13 +82,7 @@ async function ensureAgent(id: string, cwd: string, agentId?: string): Promise<v
     agent = agentId ? await Agent.resume(agentId, opts) : await Agent.create(opts);
     send({ type: 'agent', id, agentId: agent.agentId });
   } catch (err) {
-    const message =
-      err instanceof CursorAgentError
-        ? `sdk agent init failed: ${err.message}`
-        : err instanceof Error
-          ? err.message
-          : String(err);
-    send({ type: 'error', id, message });
+    reportWorkerError('sdk agent init failed', err, id);
   }
 }
 
@@ -102,11 +109,16 @@ async function handleRun(id: string, prompt: string): Promise<void> {
       void run.cancel().catch(() => {});
     };
 
-    for await (const msg of run.stream()) {
-      if (cancelled) break;
-      for (const event of translateSdkMessage(msg as SdkMessageLike)) {
-        send({ type: 'event', id, event });
+    try {
+      for await (const msg of run.stream()) {
+        if (cancelled) break;
+        for (const event of translateSdkMessage(msg as SdkMessageLike)) {
+          send({ type: 'event', id, event });
+        }
       }
+    } catch (streamErr) {
+      reportWorkerError('sdk run stream failed', streamErr, id);
+      return;
     }
 
     if (cancelled) {
@@ -121,24 +133,30 @@ async function handleRun(id: string, prompt: string): Promise<void> {
     }
     send({ type: 'done', id, agentId: agent.agentId });
   } catch (err) {
-    const message =
-      err instanceof CursorAgentError
-        ? `sdk run failed: ${err.message}`
-        : err instanceof Error
-          ? err.message
-          : String(err);
-    send({ type: 'error', id, message });
+    reportWorkerError('sdk run failed', err, id);
   } finally {
     activeRunId = undefined;
     activeAbort = undefined;
   }
 }
 
+process.on('uncaughtException', (err) => {
+  reportWorkerError('uncaughtException', err, activeRunId);
+  activeRunId = undefined;
+  activeAbort = undefined;
+});
+
+process.on('unhandledRejection', (reason) => {
+  reportWorkerError('unhandledRejection', reason, activeRunId);
+  activeRunId = undefined;
+  activeAbort = undefined;
+});
+
 process.on('message', (msg: WorkerRequest) => {
   if (!msg || typeof msg !== 'object') return;
   switch (msg.type) {
     case 'ensure':
-      void ensureAgent(msg.id, msg.cwd, msg.agentId);
+      queueEnsure(() => ensureAgent(msg.id, msg.cwd, msg.agentId));
       return;
     case 'run':
       void handleRun(msg.id, msg.prompt);
