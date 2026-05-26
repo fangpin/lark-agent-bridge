@@ -12,6 +12,8 @@ export interface AgentRunOptions {
   prompt: string;
   cwd?: string;
   sessionId?: string;
+  /** Bridge scope key (chat / topic). Enables SDK session worker reuse when pooling. */
+  poolKey?: string;
   model?: string;
   permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
   /**
@@ -47,6 +49,10 @@ export interface AgentAdapter {
   readonly commandLabel: string;
   isAvailable(): Promise<boolean>;
   run(opts: AgentRunOptions): AgentRun;
-  /** Optional: pre-create a backend session id for --resume (Cursor only). */
-  prepareSession?(cwd: string): Promise<string | undefined>;
+  /** Optional: pre-create a backend session id (Cursor CLI create-chat or SDK agent). */
+  prepareSession?(cwd: string, scope?: string): Promise<string | undefined>;
+  /** Optional: drop a pooled SDK worker for a bridge scope (/new, /cd). */
+  evictScope?(scope: string, cwd?: string): Promise<void>;
+  /** Optional: release pooled SDK workers on bridge shutdown. */
+  shutdown?(): Promise<void>;
 }

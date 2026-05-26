@@ -15,6 +15,7 @@
   },
   "files": [
     "dist",
+    "vendor",
     "bin",
     "README.md",
     "README.zh.md",
@@ -28,10 +29,18 @@
     "prepublishOnly": "npm run typecheck && npm run build"
   },
   "dependencies": {
+    "@bufbuild/protobuf": "1.10.0",
+    "@connectrpc/connect": "^1.6.1",
+    "@connectrpc/connect-node": "^1.6.1",
+    "@cursor/sdk": "file:vendor/cursor-sdk",
+    "@cursor/sdk-linux-x64": "file:vendor/cursor-sdk-linux-x64",
     "@larksuiteoapi/node-sdk": "^1.64.0",
+    "@statsig/js-client": "3.31.0",
     "commander": "^12.1.0",
     "https-proxy-agent": "^9.0.0",
-    "qrcode-terminal": "^0.12.0"
+    "qrcode-terminal": "^0.12.0",
+    "sqlite3": "^5.1.7",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

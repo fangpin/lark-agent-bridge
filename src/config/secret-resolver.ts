@@ -36,6 +36,14 @@ export async function resolveAppSecret(cfg: AppConfig): Promise<string> {
   return resolveSecretInput(secret, cfg.secrets, appId);
 }
 
+/** Resolve Cursor API key when configured; undefined if omitted. */
+export async function resolveAgentCursorApiKey(cfg: AppConfig): Promise<string | undefined> {
+  const input = cfg.preferences?.agentCursorApiKey;
+  if (!input) return undefined;
+  if (typeof input === 'string' && !input.trim()) return undefined;
+  return resolveSecretInput(input, cfg.secrets, cfg.accounts.app.id);
+}
+
 async function resolveSecretInput(
   input: SecretInput,
   secretsCfg: AppConfig['secrets'],

@@ -13,6 +13,17 @@ export default defineConfig([
     dts: false,
   },
   {
+    entry: { 'agent/cursor/cursor-sdk-worker': 'src/agent/cursor/sdk-worker.ts' },
+    outDir: 'dist',
+    format: ['esm'],
+    target: 'node20',
+    platform: 'node',
+    sourcemap: false,
+    splitting: false,
+    dts: false,
+    external: ['@cursor/sdk', '@cursor/sdk-linux-x64'],
+  },
+  {
     entry: { index: 'src/index.ts' },
     outDir: 'dist',
     format: ['esm'],

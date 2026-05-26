@@ -72,19 +72,29 @@ export async function runSecretsGet(): Promise<void> {
   process.stdout.write(`${JSON.stringify(resp)}\n`);
 }
 
-export async function runSecretsSet(appId: string | undefined): Promise<void> {
-  if (!appId) {
+export async function runSecretsSet(
+  appId: string | undefined,
+  secretId: string | undefined,
+): Promise<void> {
+  const id = secretId?.trim() || (appId ? `app-${appId}` : undefined);
+  if (!id) {
     console.error('用法: lark-channel-bridge secrets set --app-id <id>');
+    console.error('  或: lark-channel-bridge secrets set --id cursor-api-key');
     process.exit(1);
   }
-  const id = `app-${appId}`;
-  const plaintext = await promptPassword(`输入 ${appId} 的 App Secret: `);
+  const label =
+    id === 'cursor-api-key'
+      ? 'Cursor API Key (cursor_...)'
+      : appId
+        ? `${appId} 的 App Secret`
+        : id;
+  const plaintext = await promptPassword(`输入 ${label}: `);
   if (!plaintext) {
     console.error('✗ 取消(secret 为空)');
     process.exit(1);
   }
   await setSecret(id, plaintext);
-  console.log(`✓ 已加密存到 ~/.lark-channel/secrets.enc`);
+  console.log(`✓ 已加密存到 ~/.lark-channel/secrets.enc (id=${id})`);
 }
 
 export async function runSecretsList(): Promise<void> {
@@ -99,12 +109,16 @@ export async function runSecretsList(): Promise<void> {
   }
 }
 
-export async function runSecretsRemove(appId: string | undefined): Promise<void> {
-  if (!appId) {
+export async function runSecretsRemove(
+  appId: string | undefined,
+  secretId: string | undefined,
+): Promise<void> {
+  const id = secretId?.trim() || (appId ? `app-${appId}` : undefined);
+  if (!id) {
     console.error('用法: lark-channel-bridge secrets remove --app-id <id>');
+    console.error('  或: lark-channel-bridge secrets remove --id cursor-api-key');
     process.exit(1);
   }
-  const id = `app-${appId}`;
   const removed = await removeSecret(id);
   if (!removed) {
     console.error(`✗ 没找到 secret: ${id}`);
