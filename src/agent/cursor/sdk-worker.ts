@@ -38,6 +38,7 @@ let agent: SDKAgent | undefined;
 let activeRunId: string | undefined;
 let activeAbort: (() => void) | undefined;
 let ensureQueue: Promise<void> = Promise.resolve();
+let runQueue: Promise<void> = Promise.resolve();
 
 function send(msg: WorkerResponse): void {
   if (typeof process.send === 'function') process.send(msg);
@@ -51,6 +52,12 @@ function reportWorkerError(phase: string, err: unknown, runId?: string): void {
 function queueEnsure(task: () => Promise<void>): void {
   ensureQueue = ensureQueue.then(task).catch((err) => {
     reportWorkerError('sdk ensure failed', err);
+  });
+}
+
+function queueRun(id: string, task: () => Promise<void>): void {
+  runQueue = runQueue.then(task).catch((err) => {
+    reportWorkerError('sdk run queue failed', err, id);
   });
 }
 
@@ -156,10 +163,14 @@ process.on('message', (msg: WorkerRequest) => {
   if (!msg || typeof msg !== 'object') return;
   switch (msg.type) {
     case 'ensure':
+      if (agent && msg.agentId !== undefined && agent.agentId === msg.agentId) {
+        send({ type: 'agent', id: msg.id, agentId: agent.agentId });
+        return;
+      }
       queueEnsure(() => ensureAgent(msg.id, msg.cwd, msg.agentId));
       return;
     case 'run':
-      void handleRun(msg.id, msg.prompt);
+      queueRun(msg.id, () => handleRun(msg.id, msg.prompt));
       return;
     case 'stop':
       if (activeRunId === msg.id) activeAbort?.();

@@ -80,8 +80,9 @@ export class CursorAdapter implements AgentAdapter {
   }
 
   async prepareSession(cwd: string, scope?: string): Promise<string | undefined> {
-    if (this.sdkPool && scope) {
-      return this.sdkPool.ensureAgent(scope, cwd);
+    void scope;
+    if (this.sdkPool) {
+      return this.sdkPool.ensureAgent(cwd);
     }
     return spawnCreateChat({ command: this.command, prefixArgs: this.prefixArgs });
   }

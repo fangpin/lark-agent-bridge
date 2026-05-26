@@ -27,24 +27,37 @@ interface PoolEntry {
   worker: WorkerHandle;
   agentId?: string;
   cwd?: string;
-  scopeKey?: string;
   lastUsed: number;
   busy: boolean;
+  pendingRuns: number;
 }
 
 interface WorkerHandle {
   pid: number | null;
   ensure(cwd: string, agentId: string | undefined, reqId: string): Promise<string | undefined>;
-  run(opts: AgentRunOptions, runId: string): AgentRun;
+  run(opts: AgentRunOptions, runId: string, skipEnsure?: boolean): AgentRun;
   stopRun(runId: string): void;
   shutdown(): Promise<void>;
 }
 
+/** True when the pooled worker already holds the target Cursor agent session. */
+function isPoolEntryReady(entry: PoolEntry, opts: AgentRunOptions): boolean {
+  if (!entry.agentId) return false;
+  if (!opts.sessionId) return true;
+  return entry.agentId === opts.sessionId;
+}
+
 export function poolKeyFor(opts: AgentRunOptions): string {
-  const cwd = opts.cwd ?? process.cwd();
-  if (opts.sessionId) return `${cwd}::session:${opts.sessionId}`;
-  if (opts.poolKey) return `${cwd}::scope:${opts.poolKey}`;
-  return `${cwd}::ephemeral:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+  if (opts.sessionId) return sessionPoolKey(opts.sessionId);
+  return ephemeralPoolKey();
+}
+
+function sessionPoolKey(sessionId: string): string {
+  return `session:${sessionId}`;
+}
+
+function ephemeralPoolKey(prefix = 'ephemeral'): string {
+  return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export class CursorSdkPool {
@@ -67,20 +80,26 @@ export class CursorSdkPool {
     this.workerScript = resolveWorkerScript();
   }
 
-  async ensureAgent(scope: string, cwd: string, agentId?: string): Promise<string | undefined> {
-    const key = `${cwd}::scope:${scope}`;
-    const entry = await this.acquireEntry(key, { prompt: '', cwd, poolKey: scope, sessionId: agentId });
+  async ensureAgent(cwd: string, agentId?: string): Promise<string | undefined> {
+    const key = agentId ? sessionPoolKey(agentId) : ephemeralPoolKey('precreate');
+    const entry = this.acquireEntrySync(key, { prompt: '', cwd, sessionId: agentId });
     if (!entry) return undefined;
     const reqId = String(this.nextReqId++);
     const id = await entry.worker.ensure(cwd, agentId, reqId);
     if (id) {
       entry.agentId = id;
-      if (agentId !== id) {
-        const sessionKey = `${cwd}::session:${id}`;
-        entry.key = sessionKey;
-        this.entries.delete(key);
-        this.entries.set(sessionKey, entry);
+      const sessionKey = sessionPoolKey(id);
+      if (entry.key !== sessionKey) {
+        if (this.entries.has(sessionKey)) {
+          await this.removeEntry(entry.key);
+        } else {
+          this.entries.delete(entry.key);
+          entry.key = sessionKey;
+          this.entries.set(sessionKey, entry);
+        }
       }
+    } else {
+      await this.removeEntry(entry.key);
     }
     return id;
   }
@@ -93,15 +112,18 @@ export class CursorSdkPool {
       return spawnCursorRun(this.spawnOpts, opts);
     }
     const runId = String(this.nextRunId++);
+    entry.pendingRuns += 1;
     entry.busy = true;
     entry.lastUsed = Date.now();
+    const skipEnsure = isPoolEntryReady(entry, opts);
     log.info('agent', 'sdk-pool-run', {
       key: entry.key,
       sessionId: opts.sessionId ?? null,
       poolKey: opts.poolKey ?? null,
       pid: entry.worker.pid,
+      skipEnsure,
     });
-    const inner = entry.worker.run(opts, runId);
+    const inner = entry.worker.run(opts, runId, skipEnsure);
     return {
       events: this.releaseWhenDone(entry, inner.events),
       stop: () => inner.stop(),
@@ -113,7 +135,7 @@ export class CursorSdkPool {
     const currentKey = poolKeyFor(opts);
     const entry = this.entries.get(currentKey);
     if (!entry || entry.agentId === sessionId) return;
-    const nextKey = `${opts.cwd ?? process.cwd()}::session:${sessionId}`;
+    const nextKey = sessionPoolKey(sessionId);
     if (this.entries.has(nextKey)) {
       void this.removeEntry(currentKey);
       return;
@@ -126,13 +148,10 @@ export class CursorSdkPool {
   }
 
   async evictScope(scope: string, cwd?: string): Promise<void> {
-    const suffix = `::scope:${scope}`;
-    const keys = [...this.entries.keys()].filter((key) => {
-      if (!key.endsWith(suffix)) return false;
-      if (!cwd) return true;
-      return key.startsWith(`${cwd}::`);
-    });
-    await Promise.all(keys.map((key) => this.removeEntry(key)));
+    // SDK workers are keyed only by Cursor session id. Chat/topic scope is not
+    // a reuse boundary, so scope eviction cannot identify a specific worker.
+    void scope;
+    void cwd;
   }
 
   async shutdown(): Promise<void> {
@@ -146,7 +165,8 @@ export class CursorSdkPool {
     try {
       for await (const event of events) yield event;
     } finally {
-      entry.busy = false;
+      entry.pendingRuns = Math.max(0, entry.pendingRuns - 1);
+      entry.busy = entry.pendingRuns > 0;
       entry.lastUsed = Date.now();
       this.touch(entry);
     }
@@ -154,7 +174,6 @@ export class CursorSdkPool {
 
   private acquireEntrySync(key: string, opts: AgentRunOptions): PoolEntry | undefined {
     const existing = this.entries.get(key);
-    if (existing?.busy) return undefined;
     if (existing) {
       existing.lastUsed = Date.now();
       this.touch(existing);
@@ -163,19 +182,19 @@ export class CursorSdkPool {
     void this.evictIfNeeded();
     let entry!: PoolEntry;
     const worker = createWorker(this.workerScript, this.sdkConfig, () => {
-      if (this.entries.get(key) === entry) {
-        this.entries.delete(key);
-        log.warn('agent', 'sdk-pool-worker-died', { key, pid: worker.pid });
+      if (this.entries.get(entry.key) === entry) {
+        this.entries.delete(entry.key);
+        log.warn('agent', 'sdk-pool-worker-died', { key: entry.key, pid: worker.pid });
       }
     });
     entry = {
       key,
       worker,
-      agentId: opts.sessionId,
+      agentId: undefined,
       cwd: opts.cwd,
-      scopeKey: opts.poolKey,
       lastUsed: Date.now(),
       busy: false,
+      pendingRuns: 0,
     };
     this.entries.set(key, entry);
     this.touch(entry);
@@ -352,11 +371,12 @@ function createWorker(
         setTimeout(() => {
           if (!pendingEnsures.has(reqId)) return;
           pendingEnsures.delete(reqId);
+          log.warn('agent', 'sdk-ensure-timeout', { reqId });
           resolve(undefined);
-        }, 60_000);
+        }, 120_000);
       });
     },
-    run(opts, runId) {
+    run(opts, runId, skipEnsure = false) {
       let pushEvent: ((event: AgentEvent) => void) | undefined;
       let finish: ((agentId?: string) => void) | undefined;
       let fail: ((message: string) => void) | undefined;
@@ -387,43 +407,41 @@ function createWorker(
           fail: fail!,
         });
 
-        const cwd = opts.cwd ?? process.cwd();
-        const ensureId = `ensure-${runId}`;
-        if (
-          !ipcSend(child, {
-            type: 'ensure',
-            id: ensureId,
-            cwd,
-            agentId: opts.sessionId,
-          } satisfies WorkerRequest)
-        ) {
-          errorMsg = 'sdk worker ipc closed';
-          done = true;
-        }
-
-        await new Promise<void>((resolve) => {
-          const onAgent = (msg: WorkerResponse): void => {
-            if (msg.type === 'agent' && msg.id === ensureId) {
-              child.off('message', onAgent);
-              resolve();
-            }
-            if (msg.type === 'error' && msg.id === ensureId) {
-              child.off('message', onAgent);
-              errorMsg = msg.message;
+        if (!skipEnsure) {
+          const cwd = opts.cwd ?? process.cwd();
+          const ensureId = `ensure-${runId}`;
+          await new Promise<string | undefined>((resolve) => {
+            pendingEnsures.set(ensureId, {
+              resolve: (id) => resolve(id),
+              reject: (msg) => {
+                errorMsg = msg;
+                done = true;
+                resolve(undefined);
+              },
+            });
+            if (
+              !ipcSend(child, {
+                type: 'ensure',
+                id: ensureId,
+                cwd,
+                agentId: opts.sessionId,
+              } satisfies WorkerRequest)
+            ) {
+              pendingEnsures.delete(ensureId);
+              errorMsg = 'sdk worker ipc closed';
               done = true;
-              resolve();
+              resolve(undefined);
+              return;
             }
-          };
-          child.on('message', onAgent);
-          setTimeout(() => {
-            child.off('message', onAgent);
-            if (!done) {
+            setTimeout(() => {
+              if (!pendingEnsures.has(ensureId)) return;
+              pendingEnsures.delete(ensureId);
               errorMsg = 'sdk worker ensure timed out';
               done = true;
-            }
-            resolve();
-          }, 60_000);
-        });
+              resolve(undefined);
+            }, 120_000);
+          });
+        }
 
         if (!errorMsg) {
           if (!ipcSend(child, { type: 'run', id: runId, prompt: opts.prompt } satisfies WorkerRequest)) {
