@@ -1,6 +1,11 @@
 import { describe, expect, test, vi } from 'vitest';
-import { CursorSdkPool, doneEventForAgent, poolKeyFor } from '../../../src/agent/cursor/sdk-pool';
-import type { AgentRun } from '../../../src/agent/types';
+import {
+  cachedSessionReadyEvent,
+  CursorSdkPool,
+  doneEventForAgent,
+  poolKeyFor,
+} from '../../../src/agent/cursor/sdk-pool';
+import type { AgentEvent, AgentRun } from '../../../src/agent/types';
 
 describe('poolKeyFor', () => {
   test('uses only session id for reusable workers', () => {
@@ -43,6 +48,14 @@ describe('poolKeyFor', () => {
     expect(doneEventForAgent()).toEqual({ type: 'done' });
   });
 
+  test('emits a cached-session ready event for reused workers', () => {
+    expect(cachedSessionReadyEvent('agent-123')).toEqual({
+      type: 'system',
+      sessionId: 'agent-123',
+    });
+    expect(cachedSessionReadyEvent()).toBeUndefined();
+  });
+
   test('records agent id without evicting an entry already keyed by that session', () => {
     const pool = new CursorSdkPool(
       { command: 'agent', prefixArgs: [], commandLabel: 'agent' },
@@ -82,5 +95,57 @@ describe('poolKeyFor', () => {
     expect(entries.get('session:agent-123')).toBe(entry);
     expect(entry.agentId).toBe('agent-123');
     expect(shutdown).not.toHaveBeenCalled();
+  });
+
+  test('prefixes reused worker output with a ready system event', async () => {
+    const pool = new CursorSdkPool(
+      { command: 'agent', prefixArgs: [], commandLabel: 'agent' },
+      { model: { id: 'gpt-5.5' } },
+      1,
+    );
+    const run = vi.fn((_, __, skipEnsure: boolean) => {
+      expect(skipEnsure).toBe(true);
+      return {
+        events: (async function* () {
+          yield { type: 'text', delta: 'hello' } as const;
+          yield { type: 'done' } as const;
+        })(),
+        stop: async () => {},
+        waitForExit: async () => true,
+      } satisfies AgentRun;
+    });
+    const entry = {
+      key: 'session:agent-123',
+      agentId: 'agent-123',
+      worker: {
+        pid: 123,
+        ensure: async () => 'agent-123',
+        run,
+        stopRun: () => {},
+        shutdown: async () => {},
+      },
+      cwd: '/tmp/ws',
+      lastUsed: Date.now(),
+      busy: false,
+      pendingRuns: 0,
+    };
+    const entries = (
+      pool as unknown as {
+        entries: Map<string, typeof entry>;
+      }
+    ).entries;
+    entries.set(entry.key, entry);
+
+    const result = pool.run({ prompt: 'hi', cwd: '/tmp/ws', sessionId: 'agent-123' });
+    const seen: AgentEvent[] = [];
+    for await (const event of result.events) {
+      seen.push(event);
+    }
+
+    expect(seen).toEqual([
+      { type: 'system', sessionId: 'agent-123' },
+      { type: 'text', delta: 'hello' },
+      { type: 'done' },
+    ]);
   });
 });

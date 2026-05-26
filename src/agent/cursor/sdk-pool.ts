@@ -64,6 +64,10 @@ export function doneEventForAgent(agentId?: string): AgentEvent {
   return agentId ? { type: 'done', sessionId: agentId } : { type: 'done' };
 }
 
+export function cachedSessionReadyEvent(agentId?: string): AgentEvent | undefined {
+  return agentId ? { type: 'system', sessionId: agentId } : undefined;
+}
+
 export class CursorSdkPool {
   private readonly entries = new Map<string, PoolEntry>();
   private readonly spawnOpts: CursorSpawnOptions;
@@ -128,8 +132,11 @@ export class CursorSdkPool {
       skipEnsure,
     });
     const inner = entry.worker.run(opts, runId, skipEnsure);
+    const events = skipEnsure
+      ? this.withInitialEvent(cachedSessionReadyEvent(entry.agentId), inner.events)
+      : inner.events;
     return {
-      events: this.releaseWhenDone(entry, inner.events),
+      events: this.releaseWhenDone(entry, events),
       stop: () => inner.stop(),
       waitForExit: (timeoutMs) => inner.waitForExit(timeoutMs),
     };
@@ -179,6 +186,14 @@ export class CursorSdkPool {
       entry.lastUsed = Date.now();
       this.touch(entry);
     }
+  }
+
+  private async *withInitialEvent(
+    event: AgentEvent | undefined,
+    events: AsyncIterable<AgentEvent>,
+  ): AsyncGenerator<AgentEvent> {
+    if (event) yield event;
+    yield* events;
   }
 
   private acquireEntrySync(key: string, opts: AgentRunOptions): PoolEntry | undefined {
@@ -386,37 +401,33 @@ function createWorker(
       });
     },
     run(opts, runId, skipEnsure = false) {
-      let pushEvent: ((event: AgentEvent) => void) | undefined;
-      let finish: ((agentId?: string) => void) | undefined;
-      let fail: ((message: string) => void) | undefined;
+      const queue: AgentEvent[] = [];
+      let done = false;
+      let errorMsg: string | undefined;
+      let notify: (() => void) | undefined;
 
-      const events = (async function* (): AsyncGenerator<AgentEvent> {
-        const queue: AgentEvent[] = [];
-        let done = false;
-        let errorMsg: string | undefined;
-        let notify: (() => void) | undefined;
+      const pushEvent = (event: AgentEvent) => {
+        queue.push(event);
+        notify?.();
+      };
+      const finish = (agentId?: string) => {
+        queue.push(doneEventForAgent(agentId));
+        done = true;
+        notify?.();
+      };
+      const fail = (message: string) => {
+        errorMsg = message;
+        done = true;
+        notify?.();
+      };
 
-        pushEvent = (event) => {
-          queue.push(event);
-          notify?.();
-        };
-        finish = (agentId) => {
-          queue.push(doneEventForAgent(agentId));
-          done = true;
-          notify?.();
-        };
-        fail = (message) => {
-          errorMsg = message;
-          done = true;
-          notify?.();
-        };
+      pendingRuns.set(runId, {
+        pushEvent,
+        finish,
+        fail,
+      });
 
-        pendingRuns.set(runId, {
-          pushEvent: pushEvent!,
-          finish: finish!,
-          fail: fail!,
-        });
-
+      const start = async () => {
         if (!skipEnsure) {
           const cwd = opts.cwd ?? process.cwd();
           const ensureId = `ensure-${runId}`;
@@ -424,8 +435,7 @@ function createWorker(
             pendingEnsures.set(ensureId, {
               resolve: (id) => resolve(id),
               reject: (msg) => {
-                errorMsg = msg;
-                done = true;
+                fail(msg);
                 resolve(undefined);
               },
             });
@@ -438,16 +448,14 @@ function createWorker(
               } satisfies WorkerRequest)
             ) {
               pendingEnsures.delete(ensureId);
-              errorMsg = 'sdk worker ipc closed';
-              done = true;
+              fail('sdk worker ipc closed');
               resolve(undefined);
               return;
             }
             setTimeout(() => {
               if (!pendingEnsures.has(ensureId)) return;
               pendingEnsures.delete(ensureId);
-              errorMsg = 'sdk worker ensure timed out';
-              done = true;
+              fail('sdk worker ensure timed out');
               resolve(undefined);
             }, 120_000);
           });
@@ -455,11 +463,13 @@ function createWorker(
 
         if (!errorMsg) {
           if (!ipcSend(child, { type: 'run', id: runId, prompt: opts.prompt } satisfies WorkerRequest)) {
-            errorMsg = 'sdk worker ipc closed';
-            done = true;
+            fail('sdk worker ipc closed');
           }
         }
+      };
+      void start();
 
+      const events = (async function* (): AsyncGenerator<AgentEvent> {
         while (!done || queue.length > 0) {
           if (queue.length === 0) {
             await new Promise<void>((resolve) => {
