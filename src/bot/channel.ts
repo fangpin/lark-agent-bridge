@@ -18,7 +18,7 @@ import {
   type RunState,
 } from '../card/run-state';
 import { renderText } from '../card/text-renderer';
-import { tryHandleCommand, type Controls } from '../commands';
+import { isStopCommandText, tryHandleCommand, type Controls } from '../commands';
 import type { AppConfig } from '../config/schema';
 import {
   getAgentStopGraceMs,
@@ -420,6 +420,16 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
+  if (isStopCommandText(msg.content)) {
+    const result = interruptScopeNow(activeRuns, pending, scope);
+    log.info('intake', 'immediate-stop', {
+      scope,
+      interrupted: result.interrupted,
+      droppedPending: result.droppedPending,
+    });
+    return;
+  }
+
   const handled = await tryHandleCommand({
     channel,
     msg,
@@ -441,6 +451,16 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
 
   const size = pending.push(scope, msg);
   log.info('intake', 'queued', { scope, queueSize: size, flushDelayMs: PENDING_FLUSH_DELAY_MS });
+}
+
+export function interruptScopeNow(
+  activeRuns: ActiveRuns,
+  pending: PendingQueue,
+  scope: string,
+): { interrupted: boolean; droppedPending: number } {
+  const interrupted = activeRuns.interrupt(scope);
+  const dropped = pending.cancel(scope);
+  return { interrupted, droppedPending: dropped.length };
 }
 
 interface RunBatchDeps {
@@ -617,7 +637,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // effect immediately. Cheap object lookups, no allocation when on.
   const filterForPrefs = (state: RunState): RunState => {
     if (getShowToolCalls(controls.cfg)) return state;
-    return { ...state, blocks: state.blocks.filter((b) => b.kind !== 'tool') };
+    const activity =
+      state.activity?.kind === 'tool'
+        ? state.footer
+          ? ({ kind: 'phase', phase: state.footer } as const)
+          : undefined
+        : state.activity;
+    return { ...state, blocks: state.blocks.filter((b) => b.kind !== 'tool'), activity };
   };
 
   // For topic groups: thread the reply so it lands in the same topic as the

@@ -1,4 +1,5 @@
 import type { Block, RunState, ToolEntry } from './run-state';
+import { activityText } from './activity-render';
 import { renderTodoMarkdown, todoSummaryText } from './todo-board-render';
 import { isLowSignalTool, toolHeaderText } from './tool-render';
 
@@ -51,7 +52,8 @@ export function renderText(state: RunState): string {
   } else if (state.terminal === 'done') {
     parts.push('_✅ 已完成_');
   } else if (state.terminal === 'running' && state.footer) {
-    parts.push(footerLine(state.footer));
+    const activity = activityText(state.activity, state.footer);
+    if (activity) parts.push(`_${activity}_`);
   }
 
   return truncateRendered(parts.join('\n\n'));
@@ -74,13 +76,6 @@ function renderBlock(block: Block, includeTool: boolean): string {
  */
 function toolLine(tool: ToolEntry): string {
   return `> ${toolHeaderText(tool)}`;
-}
-
-function footerLine(status: 'starting' | 'thinking' | 'tool_running' | 'streaming'): string {
-  if (status === 'starting') return '_🚀 正在启动 Agent…_';
-  if (status === 'thinking') return '_🧠 正在思考…_';
-  if (status === 'tool_running') return '_🧰 正在调用工具…_';
-  return '_✍️ 正在输出…_';
 }
 
 function ageText(ms: number): string {

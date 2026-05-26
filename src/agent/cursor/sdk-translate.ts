@@ -33,6 +33,23 @@ export function* translateSdkMessage(msg: SdkMessageLike): Generator<AgentEvent>
     return;
   }
 
+  if (msg.type === 'status' && typeof msg.status === 'string') {
+    yield {
+      type: 'progress',
+      phase: phaseForSdkStatus(msg.status),
+      label: labelForSdkStatus(msg.status, msg.text),
+    };
+    return;
+  }
+
+  if (msg.type === 'task') {
+    const label = typeof msg.text === 'string' && msg.text.trim() ? msg.text : msg.status;
+    if (typeof label === 'string' && label.trim()) {
+      yield { type: 'progress', phase: 'thinking', label };
+    }
+    return;
+  }
+
   if (msg.type === 'assistant' && msg.message?.content) {
     for (const block of msg.message.content) {
       if (block.type === 'text' && typeof block.text === 'string' && block.text) {
@@ -56,6 +73,41 @@ export function* translateSdkMessage(msg: SdkMessageLike): Generator<AgentEvent>
         isError: msg.status === 'error' || isErrorResult(msg.result),
       };
     }
+  }
+}
+
+function phaseForSdkStatus(status: string): 'starting' | 'thinking' | 'tool_running' | 'streaming' {
+  switch (status) {
+    case 'CREATING':
+      return 'starting';
+    case 'FINISHED':
+      return 'streaming';
+    case 'RUNNING':
+    case 'ERROR':
+    case 'CANCELLED':
+    case 'EXPIRED':
+    default:
+      return 'thinking';
+  }
+}
+
+function labelForSdkStatus(status: string, message: unknown): string {
+  if (typeof message === 'string' && message.trim()) return message;
+  switch (status) {
+    case 'CREATING':
+      return '正在创建 Agent';
+    case 'RUNNING':
+      return 'Agent 正在运行';
+    case 'FINISHED':
+      return 'Agent 正在收尾';
+    case 'ERROR':
+      return 'Agent 状态异常';
+    case 'CANCELLED':
+      return 'Agent 已取消';
+    case 'EXPIRED':
+      return 'Agent 已过期';
+    default:
+      return `Agent 状态: ${status}`;
   }
 }
 
