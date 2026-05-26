@@ -140,7 +140,12 @@ export class CursorSdkPool {
     const entry = this.entries.get(currentKey);
     if (!entry || entry.agentId === sessionId) return;
     const nextKey = sessionPoolKey(sessionId);
-    if (this.entries.has(nextKey)) {
+    if (entry.key === nextKey) {
+      entry.agentId = sessionId;
+      return;
+    }
+    const existing = this.entries.get(nextKey);
+    if (existing && existing !== entry) {
       void this.removeEntry(currentKey);
       return;
     }
