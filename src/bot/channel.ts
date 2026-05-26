@@ -728,6 +728,10 @@ export async function processAgentStream(
         }
         continue;
       }
+      if (evt.type === 'done' && evt.sessionId) {
+        sessions.set(scope, evt.sessionId, cwd);
+        log.info('session', 'set', { sessionId: evt.sessionId });
+      }
 
       const prevTerminal = state.terminal;
       const prevFooter = state.footer;

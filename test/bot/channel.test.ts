@@ -52,4 +52,35 @@ describe('processAgentStream', () => {
     expect(stopCalls()).toBe(0);
     expect(flushed).toContain('done');
   });
+
+  test('persists a replacement session id from a done event', async () => {
+    const setCalls: Array<{ scope: string; sessionId: string; cwd: string }> = [];
+    const run: AgentRun = {
+      events: (async function* (): AsyncGenerator<AgentEvent> {
+        yield { type: 'done', sessionId: 'agent-new' };
+      })(),
+      async stop() {},
+      async waitForExit() {
+        return true;
+      },
+    };
+
+    await processAgentStream(
+      { run, interrupted: false },
+      {
+        set(scope: string, sessionId: string, cwd: string) {
+          setCalls.push({ scope, sessionId, cwd });
+        },
+      } as SessionStore,
+      'chat-1',
+      '/tmp/project',
+      undefined,
+      async () => {},
+      5000,
+    );
+
+    expect(setCalls).toEqual([
+      { scope: 'chat-1', sessionId: 'agent-new', cwd: '/tmp/project' },
+    ]);
+  });
 });

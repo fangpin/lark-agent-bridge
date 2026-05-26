@@ -431,7 +431,7 @@ function createWorker(
         if (!skipEnsure) {
           const cwd = opts.cwd ?? process.cwd();
           const ensureId = `ensure-${runId}`;
-          await new Promise<string | undefined>((resolve) => {
+          const ensuredAgentId = await new Promise<string | undefined>((resolve) => {
             pendingEnsures.set(ensureId, {
               resolve: (id) => resolve(id),
               reject: (msg) => {
@@ -459,6 +459,9 @@ function createWorker(
               resolve(undefined);
             }, 120_000);
           });
+          if (ensuredAgentId && ensuredAgentId !== opts.sessionId) {
+            pushEvent({ type: 'system', sessionId: ensuredAgentId });
+          }
         }
 
         if (!errorMsg) {

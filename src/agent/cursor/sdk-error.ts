@@ -147,6 +147,22 @@ export function describeSdkError(err: unknown): SdkErrorDescription {
   return { kind, headline, detail, hint };
 }
 
+export function isCursorAgentNotFoundError(err: unknown, agentId: string): boolean {
+  const msg = errorMessage(err);
+  if (!msg.includes(`Agent ${agentId} not found`)) return false;
+  if (errorName(err) !== 'ConfigurationError') return false;
+  if (err instanceof CursorAgentError && err.operation !== 'Agent.resume') return false;
+  if (
+    err &&
+    typeof err === 'object' &&
+    'operation' in err &&
+    (err as { operation?: unknown }).operation !== 'Agent.resume'
+  ) {
+    return false;
+  }
+  return true;
+}
+
 /** Message sent over IPC to the bridge and shown on failure cards. */
 export function formatSdkErrorForIpc(phase: string, err: unknown): string {
   const d = describeSdkError(err);
