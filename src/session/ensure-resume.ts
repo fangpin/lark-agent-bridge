@@ -13,7 +13,14 @@ export async function ensureResumeSession(
   cwd: string,
 ): Promise<string | undefined> {
   const existing = sessions.resumeFor(scope, cwd);
-  if (existing) return existing;
+  if (existing) {
+    if (agent.canResumeSession?.(existing) === false) {
+      log.warn('session', 'resume-incompatible', { scope, cwd, sessionId: existing });
+      sessions.clear(scope);
+    } else {
+      return existing;
+    }
+  }
   if (!agent.prepareSession) return undefined;
 
   const sessionId = await agent.prepareSession(cwd, scope);

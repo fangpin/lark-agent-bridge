@@ -69,7 +69,10 @@ export class SessionStore {
   resumeFor(chatId: string, cwd: string): string | undefined {
     const entry = this.data[chatId];
     if (!entry) return undefined;
-    if (!entry.cwd || fromPortablePath(entry.cwd, this.pathOptions) !== cwd) return undefined;
+    if (!entry.cwd) return undefined;
+    const storedCwd = fromPortablePath(entry.cwd, this.pathOptions);
+    const requestedCwd = fromPortablePath(cwd, this.pathOptions);
+    if (storedCwd !== requestedCwd) return undefined;
     return entry.sessionId;
   }
 

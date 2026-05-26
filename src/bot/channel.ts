@@ -498,6 +498,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const cwd = workspaces.cwdFor(scope) ?? homedir();
   let resumeFrom = sessions.resumeFor(scope, cwd);
+  if (resumeFrom && agent.canResumeSession?.(resumeFrom) === false) {
+    log.warn('session', 'resume-incompatible', { sessionId: resumeFrom, cwd });
+    sessions.clear(scope);
+    resumeFrom = undefined;
+  }
   if (resumeFrom) {
     log.info('session', 'resume', { sessionId: resumeFrom, cwd });
   } else {

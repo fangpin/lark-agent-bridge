@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import type { CommentEvent, LarkChannel } from '@larksuiteoapi/node-sdk';
 import type { AgentAdapter } from '../agent/types';
 import { log } from '../core/logger';
+import { ensureResumeSession } from '../session/ensure-resume';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { addCommentReaction, removeCommentReaction } from './reaction';
@@ -112,7 +113,7 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
   // default in case it does.
   const synthChatId = `doc:${evt.fileToken}`;
   const cwd = workspaces.cwdFor(synthChatId) ?? homedir();
-  const resumeFrom = sessions.resumeFor(synthChatId, cwd);
+  const resumeFrom = await ensureResumeSession(agent, sessions, synthChatId, cwd);
   log.info('comment', 'session', { synthChatId, resumeFrom: resumeFrom ?? null, cwd });
 
   // Cloud-doc comments have no streaming UI — the user just sees their
