@@ -18,10 +18,10 @@ export function toPortablePath(path: string, options: PortablePathOptions = {}):
 
 export function fromPortablePath(path: string, options: PortablePathOptions = {}): string {
   const home = resolve(options.homeDir ?? homedir());
-  if (path === '~') return home;
-  if (path.startsWith('~/')) return resolve(home, path.slice(2));
-  if (isAbsolute(path)) return resolve(path);
-  return resolve(home, path);
+  if (path === '~') return normalizeExisting(home);
+  if (path.startsWith('~/')) return normalizeExisting(resolve(home, path.slice(2)));
+  if (isAbsolute(path)) return normalizeExisting(resolve(path));
+  return normalizeExisting(resolve(home, path));
 }
 
 function normalizeExisting(path: string): string {
