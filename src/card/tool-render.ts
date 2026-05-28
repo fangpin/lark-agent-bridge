@@ -15,7 +15,16 @@ const BODY_TOTAL_MAX = 2500;
 export function toolHeaderText(tool: ToolEntry): string {
   const icon = tool.status === 'done' ? '✅' : tool.status === 'error' ? '❌' : '⏳';
   const summary = summarizeInput(tool.name, tool.input);
-  return summary ? `${icon} **${tool.name}** — ${summary}` : `${icon} **${tool.name}**`;
+  const name = displayName(tool.name);
+  return summary ? `${icon} **${name}** — ${summary}` : `${icon} **${name}**`;
+}
+
+export function isLowSignalTool(tool: ToolEntry): boolean {
+  if (tool.status === 'error') return false;
+  const name = canonicalToolName(tool.name);
+  if (name === 'read' || name === 'glob' || name === 'grep') return true;
+  if (name === 'shell') return isContextCommand(tool.input);
+  return false;
 }
 
 export function toolBodyMd(tool: ToolEntry): string {
@@ -50,30 +59,31 @@ function summarizeInput(name: string, input: unknown): string {
     const oneLine = v.replace(/\s+/g, ' ').trim();
     return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
   };
-  switch (name) {
-    case 'Bash':
+  const path = (): string => pick('file_path') || pick('path');
+  switch (canonicalToolName(name)) {
+    case 'shell':
       return pick('command');
-    case 'Read':
-    case 'Edit':
-    case 'Write':
-    case 'NotebookEdit':
-      return shortenPath(pick('file_path'));
-    case 'Grep': {
+    case 'read':
+    case 'edit':
+    case 'write':
+    case 'notebook_edit':
+      return shortenPath(path());
+    case 'grep': {
       const pat = pick('pattern', 40);
-      const path = pick('path', 30);
-      return path ? `${pat} in ${shortenPath(path)}` : pat;
+      const where = pick('path', 30);
+      return where ? `${pat} in ${shortenPath(where)}` : pat;
     }
-    case 'Glob':
-      return pick('pattern');
-    case 'WebFetch':
+    case 'glob':
+      return pick('pattern') || pick('glob_pattern');
+    case 'web_fetch':
       return pick('url');
-    case 'WebSearch':
-      return pick('query', 60);
-    case 'Agent':
-    case 'Task':
+    case 'web_search':
+      return pick('query', 60) || pick('search_term', 60);
+    case 'agent':
+    case 'task':
       return pick('description') || pick('subagent_type');
     default:
-      return pick('command') || pick('file_path') || pick('path') || pick('query');
+      return pick('command') || path() || pick('query') || pick('search_term');
   }
 }
 
@@ -83,28 +93,30 @@ function renderInput(tool: ToolEntry): string {
   const rec = input as Record<string, unknown>;
   const str = (k: string): string => (typeof rec[k] === 'string' ? (rec[k] as string) : '');
 
-  switch (tool.name) {
-    case 'Bash': {
+  switch (canonicalToolName(tool.name)) {
+    case 'shell': {
       const cmd = str('command');
       return cmd ? `**Command**\n\`\`\`bash\n${truncate(cmd, BODY_FIELD_MAX)}\n\`\`\`` : '';
     }
-    case 'Read':
-    case 'Edit':
-    case 'Write':
-    case 'NotebookEdit': {
-      const fp = str('file_path');
+    case 'read':
+    case 'edit':
+    case 'write':
+    case 'notebook_edit': {
+      const fp = str('file_path') || str('path');
       return fp ? `**File** \`${fp}\`` : '';
     }
-    case 'Grep': {
+    case 'grep': {
       const lines: string[] = [];
       if (str('pattern')) lines.push(`**Pattern** \`${str('pattern')}\``);
       if (str('path')) lines.push(`**Path** \`${str('path')}\``);
       return lines.join('\n');
     }
-    case 'WebFetch':
+    case 'web_fetch':
       return str('url') ? `**URL** ${str('url')}` : '';
-    case 'WebSearch':
-      return str('query') ? `**Query** \`${truncate(str('query'), BODY_FIELD_MAX)}\`` : '';
+    case 'web_search': {
+      const query = str('query') || str('search_term');
+      return query ? `**Query** \`${truncate(query, BODY_FIELD_MAX)}\`` : '';
+    }
     default:
       return '';
   }
@@ -121,6 +133,52 @@ function shortenPath(p: string): string {
   const home = process.env.HOME || '';
   if (home && p.startsWith(home)) return `~${p.slice(home.length)}`;
   return p;
+}
+
+function displayName(name: string): string {
+  switch (canonicalToolName(name)) {
+    case 'shell':
+      return '终端';
+    case 'read':
+      return '读取文件';
+    case 'grep':
+      return '搜索';
+    case 'glob':
+      return '查找文件';
+    case 'edit':
+      return '编辑文件';
+    case 'write':
+      return '写入文件';
+    case 'web_search':
+      return '网页搜索';
+    case 'web_fetch':
+      return '读取网页';
+    default:
+      return name;
+  }
+}
+
+function canonicalToolName(name: string): string {
+  const n = name.replace(/^functions\./, '').replace(/[_\s-]/g, '').toLowerCase();
+  if (n === 'bash' || n === 'shell') return 'shell';
+  if (n === 'read' || n === 'readfile') return 'read';
+  if (n === 'grep' || n === 'rg' || n === 'ripgrep') return 'grep';
+  if (n === 'glob') return 'glob';
+  if (n === 'edit' || n === 'applypatch') return 'edit';
+  if (n === 'write') return 'write';
+  if (n === 'notebookedit' || n === 'editnotebook') return 'notebook_edit';
+  if (n === 'websearch') return 'web_search';
+  if (n === 'webfetch') return 'web_fetch';
+  if (n === 'agent' || n === 'task' || n === 'subagent') return 'agent';
+  return name.toLowerCase();
+}
+
+function isContextCommand(input: unknown): boolean {
+  if (!input || typeof input !== 'object') return false;
+  const command = (input as Record<string, unknown>).command;
+  if (typeof command !== 'string') return false;
+  const normalized = command.trim().replace(/\s+/g, ' ');
+  return /^(git (status|log|diff|show)|ls\b|pwd\b|rg\b|npm (run )?typecheck\b)/.test(normalized);
 }
 
 function truncate(s: string, max: number): string {

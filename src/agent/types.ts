@@ -43,6 +43,19 @@ export interface AgentRun {
   waitForExit(timeoutMs: number): Promise<boolean>;
 }
 
+export interface WorkerSnapshot {
+  key: string;
+  pid: number | null;
+  status: 'idle' | 'running' | 'stopping' | 'stuck' | 'disposed';
+  agentId?: string;
+  cwd?: string;
+  pendingRuns: number;
+  currentRunId?: string;
+  startedAt?: number;
+  lastEventAt?: number;
+  lastError?: string;
+}
+
 export interface AgentAdapter {
   readonly id: string;
   readonly displayName: string;
@@ -55,6 +68,8 @@ export interface AgentAdapter {
   canResumeSession?(sessionId: string): boolean;
   /** Optional: drop a pooled SDK worker for a bridge scope (/new, /cd). */
   evictScope?(scope: string, cwd?: string): Promise<void>;
+  /** Optional: inspect pooled worker health for diagnostics. */
+  workerSnapshots?(): WorkerSnapshot[];
   /** Optional: release pooled SDK workers on bridge shutdown. */
   shutdown?(): Promise<void>;
 }

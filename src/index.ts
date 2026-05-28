@@ -4,6 +4,7 @@ export { renderCard } from './card/run-renderer';
 export { renderText } from './card/text-renderer';
 export {
   initialState,
+  createInitialState,
   reduce,
   finalizeIfRunning,
   markInterrupted,

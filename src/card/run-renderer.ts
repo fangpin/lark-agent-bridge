@@ -1,6 +1,6 @@
 import type { Block, FooterStatus, RunState, ToolEntry } from './run-state';
 import { renderTodoBoard, todoSummaryText } from './todo-board-render';
-import { toolBodyMd, toolHeaderText } from './tool-render';
+import { isLowSignalTool, toolBodyMd, toolHeaderText } from './tool-render';
 
 const REASONING_MAX = 1500;
 const COLLAPSE_TOOL_THRESHOLD = 3;
@@ -24,6 +24,10 @@ export function renderCard(state: RunState): object {
 
   const todoBoard = renderTodoBoard(state.todos, state.terminal === 'running');
   if (todoBoard) elements.push(todoBoard);
+
+  if (state.terminal === 'running' && state.runId) {
+    elements.push(progressLine(state));
+  }
 
   for (const group of groupBlocks(state.blocks)) {
     if (group.kind === 'text') {
@@ -50,6 +54,8 @@ export function renderCard(state: RunState): object {
   if (state.terminal === 'running') {
     if (state.footer) elements.push(footerStatus(state.footer));
     elements.push(stopButton());
+  } else if (state.runId && (state.terminal === 'error' || state.terminal === 'idle_timeout')) {
+    elements.push(retryButton(state.runId));
   }
 
   return {
@@ -80,19 +86,29 @@ function* groupBlocks(blocks: Block[]): Generator<Group> {
 
 function renderToolGroup(tools: ToolEntry[], finalized: boolean): object[] {
   if (tools.length === 0) return [];
-  if (tools.length < COLLAPSE_TOOL_THRESHOLD) {
-    return tools.map((t) => toolPanel(t, false));
+  const visibleTools = tools.filter((tool) => !isLowSignalTool(tool));
+  const hiddenCount = tools.length - visibleTools.length;
+  if (visibleTools.length === 0) {
+    return finalized ? [] : [contextActivity(hiddenCount)];
+  }
+  if (visibleTools.length < COLLAPSE_TOOL_THRESHOLD) {
+    return visibleTools.map((t) => toolPanel(t, false));
   }
   if (finalized) {
-    return [collapsedToolSummary(tools, true)];
+    return [collapsedToolSummary(visibleTools, true)];
   }
   // Running: collapse prior tools, keep latest visible.
-  const prior = tools.slice(0, -1);
-  const latest = tools[tools.length - 1];
+  const prior = visibleTools.slice(0, -1);
+  const latest = visibleTools[visibleTools.length - 1];
   const out: object[] = [];
+  if (hiddenCount > 0 && visibleTools.length === 0) out.push(contextActivity(hiddenCount));
   if (prior.length > 0) out.push(collapsedToolSummary(prior, false));
   if (latest) out.push(toolPanel(latest, true));
   return out;
+}
+
+function contextActivity(count: number): object {
+  return noteMd(`_正在准备上下文${count > 1 ? `（${count} 个读取/检查步骤）` : ''}…_`);
 }
 
 function reasoningPanel(content: string, active: boolean): object {
@@ -187,6 +203,21 @@ function stopButton(): object {
   };
 }
 
+function retryButton(runId: string): object {
+  return {
+    tag: 'button',
+    text: { tag: 'plain_text', content: '重试上次任务' },
+    type: 'default',
+    behaviors: [{ type: 'callback', value: { cmd: 'retry', run_id: runId } }],
+  };
+}
+
+function progressLine(state: RunState): object {
+  const started = ageText(Date.now() - state.startedAt);
+  const active = ageText(Date.now() - state.lastActivityAt);
+  return noteMd(`_运行 ${started} · 最近活动 ${active}前 · 卡片更新 ${timeText(state.updatedAt)}_`);
+}
+
 function footerStatus(status: Exclude<FooterStatus, null>): object {
   const text =
     status === 'starting'
@@ -210,6 +241,21 @@ function summaryText(state: RunState): string {
   if (state.footer === 'tool_running') return withTodos('正在调用工具');
   if (state.footer === 'streaming') return withTodos('正在输出');
   return withTodos('思考中');
+}
+
+function timeText(ts: number): string {
+  return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+function ageText(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return rest ? `${minutes}m${rest}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const min = minutes % 60;
+  return min ? `${hours}h${min}m` : `${hours}h`;
 }
 
 function truncate(s: string, max: number): string {

@@ -3,6 +3,7 @@ import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { ChatModeCache } from '../bot/chat-mode-cache';
 import type { PendingQueue } from '../bot/pending-queue';
+import type { RunHistory } from '../bot/run-history';
 import { runCommandHandler, type CommandContext, type Controls } from '../commands';
 import { isChatAllowed, isUserAllowed } from '../config/schema';
 import { log } from '../core/logger';
@@ -26,6 +27,7 @@ export interface CardDispatchDeps {
   agent: AgentAdapter;
   controls: Controls;
   pending: PendingQueue;
+  runHistory: RunHistory;
   chatModeCache: ChatModeCache;
 }
 
@@ -94,6 +96,8 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     activeRuns: deps.activeRuns,
     agent: deps.agent,
     controls: deps.controls,
+    pending: deps.pending,
+    runHistory: deps.runHistory,
     formValue,
     fromCardAction: true,
   };
@@ -183,11 +187,12 @@ function forwardToClaude(
  * string the text-command handler expects: 'use proj-a'. Accepts `arg`
  * (preferred, generic) or `name` (legacy ws cards). */
 function composeArgs(sub: string, payload: Record<string, unknown>): string {
-  if (!sub) return '';
   const arg =
     (typeof payload.arg === 'string' && payload.arg) ||
     (typeof payload.name === 'string' && payload.name) ||
+    (typeof payload.run_id === 'string' && payload.run_id) ||
     '';
+  if (!sub) return arg;
   return arg ? `${sub} ${arg}` : sub;
 }
 

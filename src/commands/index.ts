@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
+import type { PendingQueue } from '../bot/pending-queue';
+import type { RunHistory } from '../bot/run-history';
 import {
   accountCurrentCard,
   accountFailureCard,
@@ -77,6 +79,8 @@ export interface CommandContext {
   workspaces: WorkspaceStore;
   agent: AgentAdapter;
   activeRuns: ActiveRuns;
+  pending?: PendingQueue;
+  runHistory?: RunHistory;
   controls: Controls;
   /** Set when invoked from a CardKit 2.0 form submit. Keys are input `name`s. */
   formValue?: Record<string, unknown>;
@@ -101,6 +105,8 @@ const handlers: Record<string, Handler> = {
   '/stop': handleStop,
   '/timeout': handleTimeout,
   '/ps': handlePs,
+  '/workers': handleWorkers,
+  '/retry': handleRetry,
   '/exit': handleExit,
   '/doctor': handleDoctor,
   '/reconnect': handleReconnect,
@@ -118,6 +124,7 @@ const ADMIN_COMMANDS = new Set([
   '/exit',
   '/reconnect',
   '/doctor',
+  '/workers',
   '/cd',
   '/ws',
 ]);
@@ -199,6 +206,10 @@ function expandTilde(p: string): string {
 function resolveCdInput(input: string, baseCwd: string): string {
   if (input.startsWith('/') || input.startsWith('~')) return expandTilde(input);
   return resolve(baseCwd, input);
+}
+
+function shortId(id: string): string {
+  return id.length <= 12 ? id : `${id.slice(0, 8)}…`;
 }
 
 async function handleNew(args: string, ctx: CommandContext): Promise<void> {
@@ -492,6 +503,58 @@ async function handlePs(_args: string, ctx: CommandContext): Promise<void> {
     '用 `/exit <id|#>` 关掉某一个;`/exit ' + ctx.controls.processId + '` 关掉正在回复你的这个 bot。',
   ].join('\n');
   await reply(ctx, body);
+}
+
+async function handleWorkers(_args: string, ctx: CommandContext): Promise<void> {
+  const snapshots = ctx.agent.workerSnapshots?.() ?? [];
+  if (snapshots.length === 0) {
+    await reply(ctx, '当前 agent 没有可诊断的 SDK worker pool，或 pool 为空。');
+    return;
+  }
+  const lines = snapshots.map((worker, idx) => {
+    const last = worker.lastEventAt ? `${formatRelTime(worker.lastEventAt)}` : '-';
+    const age = worker.startedAt ? `${formatRelTime(worker.startedAt)}` : '-';
+    return [
+      `**${idx + 1}. ${worker.status}** pid=${worker.pid ?? '-'}`,
+      `key=\`${worker.key}\``,
+      `pending=${worker.pendingRuns}`,
+      `started=${age}`,
+      `lastEvent=${last}`,
+      worker.agentId ? `agent=\`${shortId(worker.agentId)}\`` : '',
+      worker.cwd ? `cwd=\`${worker.cwd}\`` : '',
+      worker.lastError ? `lastError=${worker.lastError}` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+  });
+  await reply(ctx, ['🧪 **SDK workers**', '', ...lines].join('\n'));
+}
+
+async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
+  const runId = args.trim();
+  if (!runId) {
+    await reply(ctx, '用法：`/retry <run-id>`，或点击失败卡片上的重试按钮。');
+    return;
+  }
+  if (!ctx.pending || !ctx.runHistory) {
+    await reply(ctx, '当前运行环境不支持重试队列。');
+    return;
+  }
+  const entry = ctx.runHistory.get(runId);
+  if (!entry) {
+    await reply(ctx, `找不到可重试的任务：\`${runId}\`（只保留最近若干小时的失败任务）。`);
+    return;
+  }
+  if (entry.scope !== ctx.scope) {
+    await reply(ctx, '这个任务属于另一个会话/话题，不能在当前会话重试。');
+    return;
+  }
+  ctx.activeRuns.interrupt(ctx.scope);
+  let size = 0;
+  for (const msg of entry.batch) {
+    size = ctx.pending.push(ctx.scope, msg);
+  }
+  await reply(ctx, `已重新排队上次任务（${entry.batch.length} 条消息，当前队列 ${size}）。`);
 }
 
 async function handleExit(args: string, ctx: CommandContext): Promise<void> {

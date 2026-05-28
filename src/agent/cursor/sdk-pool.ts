@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { log } from '../../core/logger';
-import type { AgentEvent, AgentRun, AgentRunOptions } from '../types';
+import type { AgentEvent, AgentRun, AgentRunOptions, WorkerSnapshot } from '../types';
 import { spawnCursorRun, type CursorSpawnOptions } from './spawn-run';
 import type { SdkWorkerConfig } from './sdk-worker';
 
@@ -31,6 +31,10 @@ interface PoolEntry {
   busy: boolean;
   pendingRuns: number;
   disposed: boolean;
+  currentRunId?: string;
+  currentRunStartedAt?: number;
+  lastEventAt?: number;
+  lastError?: string;
 }
 
 interface WorkerHandle {
@@ -124,6 +128,10 @@ export class CursorSdkPool {
     entry.pendingRuns += 1;
     entry.busy = true;
     entry.lastUsed = Date.now();
+    entry.currentRunId = runId;
+    entry.currentRunStartedAt = entry.lastUsed;
+    entry.lastEventAt = entry.lastUsed;
+    entry.lastError = undefined;
     const skipEnsure = isPoolEntryReady(entry, opts);
     log.info('agent', 'sdk-pool-run', {
       key: entry.key,
@@ -191,17 +199,47 @@ export class CursorSdkPool {
     await Promise.all([...this.entries.keys()].map((key) => this.removeEntry(key)));
   }
 
+  workerSnapshots(): WorkerSnapshot[] {
+    const now = Date.now();
+    return [...this.entries.values()].map((entry) => ({
+      key: entry.key,
+      pid: entry.worker.pid,
+      status: entry.disposed
+        ? 'disposed'
+        : entry.busy && entry.lastEventAt && now - entry.lastEventAt > 5 * 60_000
+          ? 'stuck'
+          : entry.busy
+            ? 'running'
+            : 'idle',
+      agentId: entry.agentId,
+      cwd: entry.cwd,
+      pendingRuns: entry.pendingRuns,
+      currentRunId: entry.currentRunId,
+      startedAt: entry.currentRunStartedAt,
+      lastEventAt: entry.lastEventAt,
+      lastError: entry.lastError,
+    }));
+  }
+
   private async *releaseWhenDone(
     entry: PoolEntry,
     events: AsyncIterable<AgentEvent>,
     onReleased?: () => void,
   ): AsyncGenerator<AgentEvent> {
     try {
-      for await (const event of events) yield event;
+      for await (const event of events) {
+        entry.lastEventAt = Date.now();
+        if (event.type === 'error') entry.lastError = event.message;
+        yield event;
+      }
     } finally {
       entry.pendingRuns = Math.max(0, entry.pendingRuns - 1);
       entry.busy = entry.pendingRuns > 0;
       entry.lastUsed = Date.now();
+      if (!entry.busy) {
+        entry.currentRunId = undefined;
+        entry.currentRunStartedAt = undefined;
+      }
       if (!entry.disposed) this.touch(entry);
       onReleased?.();
     }
@@ -239,6 +277,10 @@ export class CursorSdkPool {
       busy: false,
       pendingRuns: 0,
       disposed: false,
+      currentRunId: undefined,
+      currentRunStartedAt: undefined,
+      lastEventAt: undefined,
+      lastError: undefined,
     };
     this.entries.set(key, entry);
     this.touch(entry);
