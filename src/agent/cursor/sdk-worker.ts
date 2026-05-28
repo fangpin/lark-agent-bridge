@@ -5,6 +5,7 @@ import {
   formatSdkErrorForStderr,
   isCursorAgentActiveRunError,
   isCursorAgentNotFoundError,
+  isCursorRateLimitError,
 } from './sdk-error';
 import { buildCursorPrompt } from './spawn-run';
 import { translateSdkMessage, type SdkMessageLike } from './sdk-translate';
@@ -46,6 +47,8 @@ let activeAbort: (() => void) | undefined;
 let ensureQueue: Promise<void> = Promise.resolve();
 let runQueue: Promise<void> = Promise.resolve();
 
+const RATE_LIMIT_RETRY_DELAYS_MS = [1000, 2500, 5000];
+
 function send(msg: WorkerResponse): void {
   if (typeof process.send === 'function') process.send(msg);
 }
@@ -53,6 +56,24 @@ function send(msg: WorkerResponse): void {
 function reportWorkerError(phase: string, err: unknown, runId?: string): void {
   process.stderr.write(`${formatSdkErrorForStderr(phase, err)}\n`);
   send({ type: 'error', id: runId, message: formatSdkErrorForIpc(phase, err) });
+}
+
+async function withRateLimitRetry<T>(
+  label: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await task();
+    } catch (err) {
+      const delayMs = RATE_LIMIT_RETRY_DELAYS_MS[attempt];
+      if (delayMs === undefined || !isCursorRateLimitError(err)) throw err;
+      process.stderr.write(
+        `[sdk-worker] ${label} rate limited/resource exhausted; retrying in ${delayMs}ms (attempt ${attempt + 2})\n`,
+      );
+      await sleep(delayMs);
+    }
+  }
 }
 
 function agentOptions(cwd: string): {
@@ -102,16 +123,16 @@ async function ensureAgent(id: string, cwd: string, agentId?: string): Promise<v
   try {
     if (agentId) {
       try {
-        agent = await Agent.resume(agentId, opts);
+        agent = await withRateLimitRetry('Agent.resume', () => Agent.resume(agentId, opts));
       } catch (err) {
         if (!isCursorAgentNotFoundError(err, agentId)) throw err;
         process.stderr.write(
           `[sdk-worker] stale SDK agent ${agentId}; creating a replacement session\n`,
         );
-        agent = await Agent.create(opts);
+        agent = await withRateLimitRetry('Agent.create', () => Agent.create(opts));
       }
     } else {
-      agent = await Agent.create(opts);
+      agent = await withRateLimitRetry('Agent.create', () => Agent.create(opts));
     }
     agentCwd = cwd;
     send({ type: 'agent', id, agentId: agent.agentId });
@@ -123,10 +144,11 @@ async function ensureAgent(id: string, cwd: string, agentId?: string): Promise<v
 async function sendPromptWithStaleSessionRecovery(id: string, prompt: string): Promise<Awaited<ReturnType<SDKAgent['send']>>> {
   if (!agent) throw new Error('sdk worker agent not initialized');
   try {
-    return await agent.send(buildCursorPrompt(prompt));
+    return await withRateLimitRetry('agent.send', () => agent!.send(buildCursorPrompt(prompt)));
   } catch (err) {
     const staleAgentId = agent.agentId;
     if (!agentCwd || !isCursorAgentActiveRunError(err, staleAgentId)) throw err;
+    const replacementCwd = agentCwd;
 
     process.stderr.write(
       `[sdk-worker] SDK agent ${staleAgentId} still has an active run; creating a replacement session\n`,
@@ -136,10 +158,14 @@ async function sendPromptWithStaleSessionRecovery(id: string, prompt: string): P
     } catch {
       /* ignore */
     }
-    agent = await Agent.create(agentOptions(agentCwd));
-    send({ type: 'event', id, event: { type: 'system', sessionId: agent.agentId, cwd: agentCwd } });
-    return await agent.send(buildCursorPrompt(prompt));
+    agent = await withRateLimitRetry('Agent.create', () => Agent.create(agentOptions(replacementCwd)));
+    send({ type: 'event', id, event: { type: 'system', sessionId: agent.agentId, cwd: replacementCwd } });
+    return await withRateLimitRetry('agent.send', () => agent!.send(buildCursorPrompt(prompt)));
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function handleRun(id: string, prompt: string): Promise<void> {

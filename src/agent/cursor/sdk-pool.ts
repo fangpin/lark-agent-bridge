@@ -30,6 +30,7 @@ interface PoolEntry {
   lastUsed: number;
   busy: boolean;
   pendingRuns: number;
+  disposed: boolean;
 }
 
 interface WorkerHandle {
@@ -132,12 +133,28 @@ export class CursorSdkPool {
       skipEnsure,
     });
     const inner = entry.worker.run(opts, runId, skipEnsure);
+    let markReleased!: () => void;
+    const released = new Promise<void>((resolve) => {
+      markReleased = resolve;
+    });
     const events = skipEnsure
       ? this.withInitialEvent(cachedSessionReadyEvent(entry.agentId), inner.events)
       : inner.events;
+    const stopGraceMs = opts.stopGraceMs ?? 5000;
     return {
-      events: this.releaseWhenDone(entry, events),
-      stop: () => inner.stop(),
+      events: this.releaseWhenDone(entry, events, markReleased),
+      stop: async () => {
+        await inner.stop();
+        const settled = await waitFor(released, stopGraceMs);
+        if (settled) return;
+        log.warn('agent', 'sdk-pool-stop-timeout-evict', {
+          key: entry.key,
+          runId,
+          pid: entry.worker.pid,
+          graceMs: stopGraceMs,
+        });
+        await this.removeEntryFor(entry);
+      },
       waitForExit: (timeoutMs) => inner.waitForExit(timeoutMs),
     };
   }
@@ -177,6 +194,7 @@ export class CursorSdkPool {
   private async *releaseWhenDone(
     entry: PoolEntry,
     events: AsyncIterable<AgentEvent>,
+    onReleased?: () => void,
   ): AsyncGenerator<AgentEvent> {
     try {
       for await (const event of events) yield event;
@@ -184,7 +202,8 @@ export class CursorSdkPool {
       entry.pendingRuns = Math.max(0, entry.pendingRuns - 1);
       entry.busy = entry.pendingRuns > 0;
       entry.lastUsed = Date.now();
-      this.touch(entry);
+      if (!entry.disposed) this.touch(entry);
+      onReleased?.();
     }
   }
 
@@ -219,6 +238,7 @@ export class CursorSdkPool {
       lastUsed: Date.now(),
       busy: false,
       pendingRuns: 0,
+      disposed: false,
     };
     this.entries.set(key, entry);
     this.touch(entry);
@@ -237,6 +257,7 @@ export class CursorSdkPool {
   }
 
   private touch(entry: PoolEntry): void {
+    if (entry.disposed) return;
     this.entries.delete(entry.key);
     this.entries.set(entry.key, entry);
   }
@@ -252,9 +273,34 @@ export class CursorSdkPool {
   private async removeEntry(key: string): Promise<void> {
     const entry = this.entries.get(key);
     if (!entry) return;
-    this.entries.delete(key);
+    await this.removeEntryFor(entry);
+  }
+
+  private async removeEntryFor(entry: PoolEntry): Promise<void> {
+    entry.disposed = true;
+    if (this.entries.get(entry.key) === entry) {
+      this.entries.delete(entry.key);
+    } else {
+      for (const [key, candidate] of this.entries) {
+        if (candidate === entry) this.entries.delete(key);
+      }
+    }
     await entry.worker.shutdown();
-    log.info('agent', 'sdk-pool-evict', { key, pid: entry.worker.pid });
+    log.info('agent', 'sdk-pool-evict', { key: entry.key, pid: entry.worker.pid });
+  }
+}
+
+async function waitFor(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
