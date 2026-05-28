@@ -8,4 +8,13 @@ export {
   finalizeIfRunning,
   markInterrupted,
 } from './card/run-state';
-export type { RunState, ToolEntry, Block, ToolStatus, Terminal, FooterStatus } from './card/run-state';
+export type {
+  RunState,
+  ToolEntry,
+  Block,
+  ToolStatus,
+  TodoItem,
+  TodoStatus,
+  Terminal,
+  FooterStatus,
+} from './card/run-state';

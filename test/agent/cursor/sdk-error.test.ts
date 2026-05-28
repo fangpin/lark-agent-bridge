@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 import {
   describeSdkError,
   formatSdkErrorForIpc,
+  isCursorAgentActiveRunError,
   isCursorAgentNotFoundError,
 } from '../../../src/agent/cursor/sdk-error';
 
@@ -43,5 +44,17 @@ describe('describeSdkError', () => {
     expect(isCursorAgentNotFoundError(err, 'agent-stale')).toBe(true);
     expect(isCursorAgentNotFoundError(err, 'agent-other')).toBe(false);
     expect(isCursorAgentNotFoundError(new Error('Cannot use this model'), 'agent-stale')).toBe(false);
+  });
+
+  test('detects Cursor SDK agent ids stuck with an active run', () => {
+    const err = Object.assign(new Error('Agent agent-stale already has active run'), {
+      name: 'UnknownAgentError',
+      operation: 'agent.send',
+      isRetryable: false,
+    });
+
+    expect(isCursorAgentActiveRunError(err, 'agent-stale')).toBe(true);
+    expect(isCursorAgentActiveRunError(err, 'agent-other')).toBe(false);
+    expect(isCursorAgentActiveRunError(new Error('Agent agent-stale not found'), 'agent-stale')).toBe(false);
   });
 });

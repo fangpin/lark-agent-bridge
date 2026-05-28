@@ -163,6 +163,21 @@ export function isCursorAgentNotFoundError(err: unknown, agentId: string): boole
   return true;
 }
 
+export function isCursorAgentActiveRunError(err: unknown, agentId: string): boolean {
+  const msg = errorMessage(err);
+  if (!msg.includes(`Agent ${agentId} already has active run`)) return false;
+  if (err instanceof CursorAgentError && err.operation !== 'agent.send') return false;
+  if (
+    err &&
+    typeof err === 'object' &&
+    'operation' in err &&
+    (err as { operation?: unknown }).operation !== 'agent.send'
+  ) {
+    return false;
+  }
+  return true;
+}
+
 /** Message sent over IPC to the bridge and shown on failure cards. */
 export function formatSdkErrorForIpc(phase: string, err: unknown): string {
   const d = describeSdkError(err);
