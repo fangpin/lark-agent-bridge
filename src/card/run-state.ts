@@ -10,6 +10,14 @@ export interface ToolEntry {
   output?: string;
 }
 
+export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled';
+
+export interface TodoItem {
+  id: string;
+  content: string;
+  status: TodoStatus;
+}
+
 export type Block =
   | { kind: 'text'; content: string; streaming: boolean }
   | { kind: 'tool'; tool: ToolEntry };
@@ -19,6 +27,7 @@ export type Terminal = 'running' | 'done' | 'interrupted' | 'error' | 'idle_time
 
 export interface RunState {
   blocks: Block[];
+  todos: TodoItem[];
   reasoning: { content: string; active: boolean };
   footer: FooterStatus;
   terminal: Terminal;
@@ -30,6 +39,7 @@ export interface RunState {
 
 export const initialState: RunState = {
   blocks: [],
+  todos: [],
   reasoning: { content: '', active: false },
   footer: 'starting',
   terminal: 'running',
@@ -82,6 +92,15 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         input: evt.input,
         status: 'running',
       };
+      const todos = readTodoWriteInput(evt.name, evt.input);
+      if (todos) {
+        return {
+          ...state,
+          todos: applyTodoWrite(state.todos, todos),
+          reasoning: { ...state.reasoning, active: false },
+          footer: 'tool_running',
+        };
+      }
       return {
         ...state,
         blocks: [...closeStreamingText(state.blocks), { kind: 'tool', tool }],
@@ -154,4 +173,48 @@ export function finalizeIfRunning(state: RunState): RunState {
     terminal: 'done',
     footer: null,
   };
+}
+
+function readTodoWriteInput(
+  name: string,
+  input: unknown,
+): { todos: TodoItem[]; merge: boolean } | undefined {
+  if (name !== 'TodoWrite') return undefined;
+  if (!input || typeof input !== 'object') return undefined;
+  const rec = input as Record<string, unknown>;
+  if (!Array.isArray(rec.todos)) return undefined;
+
+  const todos = rec.todos.flatMap((raw, idx): TodoItem[] => {
+    if (!raw || typeof raw !== 'object') return [];
+    const item = raw as Record<string, unknown>;
+    const content = typeof item.content === 'string' ? item.content.trim() : '';
+    if (!content) return [];
+    const status = readTodoStatus(item.status);
+    if (!status) return [];
+    const id = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : String(idx + 1);
+    return [{ id, content, status }];
+  });
+
+  return { todos, merge: rec.merge === true };
+}
+
+function readTodoStatus(status: unknown): TodoStatus | undefined {
+  return status === 'pending' ||
+    status === 'in_progress' ||
+    status === 'completed' ||
+    status === 'cancelled'
+    ? status
+    : undefined;
+}
+
+function applyTodoWrite(
+  existing: TodoItem[],
+  update: { todos: TodoItem[]; merge: boolean },
+): TodoItem[] {
+  if (!update.merge) return update.todos;
+  const byId = new Map(existing.map((todo) => [todo.id, todo]));
+  for (const todo of update.todos) {
+    byId.set(todo.id, todo);
+  }
+  return Array.from(byId.values());
 }

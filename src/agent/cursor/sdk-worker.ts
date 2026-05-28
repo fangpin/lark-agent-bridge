@@ -3,6 +3,7 @@ import type { SDKAgent } from '@cursor/sdk';
 import {
   formatSdkErrorForIpc,
   formatSdkErrorForStderr,
+  isCursorAgentActiveRunError,
   isCursorAgentNotFoundError,
 } from './sdk-error';
 import { buildCursorPrompt } from './spawn-run';
@@ -39,6 +40,7 @@ function readConfig(): SdkWorkerConfig | undefined {
 
 const config = readConfig();
 let agent: SDKAgent | undefined;
+let agentCwd: string | undefined;
 let activeRunId: string | undefined;
 let activeAbort: (() => void) | undefined;
 let ensureQueue: Promise<void> = Promise.resolve();
@@ -51,6 +53,18 @@ function send(msg: WorkerResponse): void {
 function reportWorkerError(phase: string, err: unknown, runId?: string): void {
   process.stderr.write(`${formatSdkErrorForStderr(phase, err)}\n`);
   send({ type: 'error', id: runId, message: formatSdkErrorForIpc(phase, err) });
+}
+
+function agentOptions(cwd: string): {
+  model: SdkWorkerConfig['model'];
+  apiKey?: string;
+  local: { cwd: string };
+} {
+  return {
+    ...(config?.apiKey ? { apiKey: config.apiKey } : {}),
+    model: config!.model,
+    local: { cwd },
+  };
 }
 
 function queueEnsure(task: () => Promise<void>): void {
@@ -83,11 +97,7 @@ async function ensureAgent(id: string, cwd: string, agentId?: string): Promise<v
     agent = undefined;
   }
 
-  const opts = {
-    ...(config.apiKey ? { apiKey: config.apiKey } : {}),
-    model: config.model,
-    local: { cwd },
-  };
+  const opts = agentOptions(cwd);
 
   try {
     if (agentId) {
@@ -103,9 +113,32 @@ async function ensureAgent(id: string, cwd: string, agentId?: string): Promise<v
     } else {
       agent = await Agent.create(opts);
     }
+    agentCwd = cwd;
     send({ type: 'agent', id, agentId: agent.agentId });
   } catch (err) {
     reportWorkerError('sdk agent init failed', err, id);
+  }
+}
+
+async function sendPromptWithStaleSessionRecovery(id: string, prompt: string): Promise<Awaited<ReturnType<SDKAgent['send']>>> {
+  if (!agent) throw new Error('sdk worker agent not initialized');
+  try {
+    return await agent.send(buildCursorPrompt(prompt));
+  } catch (err) {
+    const staleAgentId = agent.agentId;
+    if (!agentCwd || !isCursorAgentActiveRunError(err, staleAgentId)) throw err;
+
+    process.stderr.write(
+      `[sdk-worker] SDK agent ${staleAgentId} still has an active run; creating a replacement session\n`,
+    );
+    try {
+      agent.close();
+    } catch {
+      /* ignore */
+    }
+    agent = await Agent.create(agentOptions(agentCwd));
+    send({ type: 'event', id, event: { type: 'system', sessionId: agent.agentId, cwd: agentCwd } });
+    return await agent.send(buildCursorPrompt(prompt));
   }
 }
 
@@ -126,7 +159,7 @@ async function handleRun(id: string, prompt: string): Promise<void> {
   };
 
   try {
-    const run = await agent.send(buildCursorPrompt(prompt));
+    const run = await sendPromptWithStaleSessionRecovery(id, prompt);
     activeAbort = () => {
       cancelled = true;
       void run.cancel().catch(() => {});

@@ -1,4 +1,5 @@
 import type { Block, FooterStatus, RunState, ToolEntry } from './run-state';
+import { renderTodoBoard, todoSummaryText } from './todo-board-render';
 import { toolBodyMd, toolHeaderText } from './tool-render';
 
 const REASONING_MAX = 1500;
@@ -20,6 +21,9 @@ export function renderCard(state: RunState): object {
   if (state.reasoning.content) {
     elements.push(reasoningPanel(state.reasoning.content, state.reasoning.active));
   }
+
+  const todoBoard = renderTodoBoard(state.todos, state.terminal === 'running');
+  if (todoBoard) elements.push(todoBoard);
 
   for (const group of groupBlocks(state.blocks)) {
     if (group.kind === 'text') {
@@ -196,14 +200,16 @@ function footerStatus(status: Exclude<FooterStatus, null>): object {
 }
 
 function summaryText(state: RunState): string {
-  if (state.terminal === 'interrupted') return '已中断';
-  if (state.terminal === 'idle_timeout') return '已超时';
-  if (state.terminal === 'error') return '出错';
-  if (state.terminal === 'done') return '已完成';
-  if (state.footer === 'starting') return '正在启动';
-  if (state.footer === 'tool_running') return '正在调用工具';
-  if (state.footer === 'streaming') return '正在输出';
-  return '思考中';
+  const todoSummary = todoSummaryText(state.todos);
+  const withTodos = (base: string): string => (todoSummary ? `${base} · ${todoSummary}` : base);
+  if (state.terminal === 'interrupted') return withTodos('已中断');
+  if (state.terminal === 'idle_timeout') return withTodos('已超时');
+  if (state.terminal === 'error') return withTodos('出错');
+  if (state.terminal === 'done') return withTodos('已完成');
+  if (state.footer === 'starting') return withTodos('正在启动');
+  if (state.footer === 'tool_running') return withTodos('正在调用工具');
+  if (state.footer === 'streaming') return withTodos('正在输出');
+  return withTodos('思考中');
 }
 
 function truncate(s: string, max: number): string {

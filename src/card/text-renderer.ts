@@ -1,4 +1,5 @@
 import type { Block, RunState, ToolEntry } from './run-state';
+import { renderTodoMarkdown, todoSummaryText } from './todo-board-render';
 import { toolHeaderText } from './tool-render';
 
 /**
@@ -17,6 +18,10 @@ export function renderText(state: RunState): string {
   for (const block of state.blocks) {
     const piece = renderBlock(block);
     if (piece) parts.push(piece);
+  }
+
+  if (state.todos.length > 0) {
+    parts.push(`📋 **任务看板** · ${todoSummaryText(state.todos)}\n${renderTodoMarkdown(state.todos)}`);
   }
 
   if (state.terminal === 'interrupted') {
