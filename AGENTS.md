@@ -55,6 +55,9 @@ Use `npm`, not `pnpm`, unless the user explicitly asks otherwise.
 - Requests for the same SDK session must execute sequentially through the worker queue.
 - Reused workers can skip expensive ensure/resume work only when the pool entry already has the target `agentId`.
 - Only SDK-compatible session ids should be resumed with the Cursor SDK. Legacy CLI ids must be cleared and replaced with fresh SDK sessions.
+- Do not surface a bare SDK wrapper error such as `sdk run failed (runId=..., status=error)` when more detail is available. Inspect `run.wait()` results, SDK error causes, `rawMessage`, `code`, `status`, `operation`, and worker stderr so cards and logs contain an actionable reason.
+- Treat Cursor `ConnectError` codes carefully. For example, code `8` is resource exhaustion/rate limit, not authentication; code `16` is unauthenticated. Add regression tests for new classifications.
+- If an SDK worker reports repeated empty-detail `status=error` results, improve diagnostics before adding retries. Retrying an opaque failure can hide the root cause and create duplicate user-visible runs.
 - When changing SDK worker or pool behavior, check:
   - `test/agent/cursor/sdk-pool.test.ts`
   - `test/agent/cursor/adapter.test.ts`
@@ -73,9 +76,24 @@ Use `npm`, not `pnpm`, unless the user explicitly asks otherwise.
 - `src/bot/channel.ts` consumes agent events and flushes card updates.
 - `system` events with a `sessionId` persist the session and mark the agent as ready, moving the footer from startup to thinking.
 - Keep cold-start and reused-session UI states honest: do not show ready/thinking before the backend has actually accepted the run.
+- Distinguish "agent reached terminal state" from "Lark accepted the final card update". A `card.final` log should not be the only evidence that users saw the terminal UI. For streaming cards or markdown, add final-update logging and a fallback path when the Lark update cannot be confirmed.
+- Streaming markdown/card updates are lossy boundaries: throttling, oversized element content, SDK best-effort `finishStreamingCard`, or Lark API failures can leave the visible card stuck in a running footer. Terminal states should force one final full-card update where possible.
+- Keep user-visible stream content bounded. Long markdown bodies and long tool histories can exceed CardKit element limits or make final updates unreliable; cap rendered text and collapse or omit low-signal tool steps.
+- Do not render internal progress plumbing as primary output. `TodoWrite`/`updateTodos` should become a task board, not a sequence of tool lines. Context-gathering tools such as file reads, globs, grep, and `git status/log/diff` should be hidden or summarized unless they fail or are directly relevant to the user's answer.
+- Prefer stable, user-centered phase labels over raw tool names. Good cards answer: what is the agent doing, what remains, when was it last active, and how can the user stop/retry?
+- Keep terminal card controls consistent: stop buttons only while running; retry buttons only for safe, recorded failed/timeout runs.
+
+## Reliability Boundaries
+
+- Any external service or filesystem-heavy pre-run step that can block user response needs a timeout and an explicit degradation path. This includes media downloads, quoted-message fetches, session precreation, Lark streaming updates, and final flushes.
+- If a timeout fires while a run is active, stop or evict the underlying worker when safe, then surface a terminal state to the user instead of leaving a stale running card.
+- Avoid awaiting Lark updates inside the agent event loop without a timeout. A hung card update must not prevent idle watchdogs, run cleanup, or queue unblocking from completing.
+- When adding recovery or retry behavior, record enough run history to replay safely, and restrict replay to the original scope/session unless there is an explicit user action.
 
 ## Logging And Diagnostics
 
 - Use `src/core/logger.ts` for structured logs.
 - Prefer log fields that make production diagnosis possible: `sessionId`, `cwd`, `runId`, `pid`, `skipEnsure`, `footer`, and terminal state when relevant.
 - `/doctor` relies on structured daily logs under `~/.lark-channel/logs/`, so avoid replacing structured logs with ad hoc console output.
+- Log both transitions and confirmed side effects. For example, logging `terminal=done` is useful, but card/message update success or failure should have a separate event with `messageId`, mode, and relevant size/sequence fields.
+- Preserve the original low-level error details in logs even when cards show a shorter message. Do not discard SDK `rawMessage`, Connect code, API response body, request id, or run id.

@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'vitest';
 import { renderCard } from '../../src/card/run-renderer';
-import { initialState, reduce, type RunState } from '../../src/card/run-state';
+import { createInitialState, initialState, reduce, type RunState } from '../../src/card/run-state';
 import { renderText } from '../../src/card/text-renderer';
 
 function doneState(): RunState {
   return {
+    ...createInitialState(),
     blocks: [{ kind: 'text', content: '任务结果', streaming: false }],
     todos: [],
     reasoning: { content: '', active: false },
@@ -31,6 +32,34 @@ describe('run renderers', () => {
       text_size: 'notation',
     });
     expect(card.body.elements.some((element) => element.tag === 'button')).toBe(false);
+  });
+
+  test('shows runtime progress for tracked running cards', () => {
+    const state = createInitialState('run-1');
+    const card = renderCard(state) as { body: { elements: Array<Record<string, unknown>> } };
+
+    expect(card.body.elements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tag: 'markdown',
+          content: expect.stringContaining('运行'),
+        }),
+      ]),
+    );
+  });
+
+  test('shows a retry button on failed tracked cards', () => {
+    const card = renderCard({
+      ...createInitialState('run-err'),
+      terminal: 'error',
+      footer: null,
+      errorMsg: 'network timeout',
+    }) as { body: { elements: Array<Record<string, unknown>> } };
+
+    expect(card.body.elements.at(-1)).toMatchObject({
+      tag: 'button',
+      behaviors: [{ type: 'callback', value: { cmd: 'retry', run_id: 'run-err' } }],
+    });
   });
 
   test('preserves the empty-result note before the completed card footer', () => {
@@ -70,6 +99,61 @@ describe('run renderers', () => {
       tag: 'collapsible_panel',
       expanded: true,
     });
+  });
+
+  test('recognizes updateTodos aliases as the task board source', () => {
+    const state = reduce(initialState, {
+      type: 'tool_use',
+      id: 'tool-1',
+      name: 'updateTodos',
+      input: {
+        todos: [{ id: 'review', content: '优化卡片展示', status: 'in_progress' }],
+      },
+    });
+
+    expect(state.blocks).toEqual([]);
+    expect(renderText(state)).toContain('📋 **任务看板** · 0/1 完成 · 当前: 优化卡片展示');
+  });
+
+  test('suppresses low-signal context tools from user-facing output', () => {
+    const afterRead = reduce(initialState, {
+      type: 'tool_use',
+      id: 'read-1',
+      name: 'read',
+      input: { path: '/tmp/project/src/bot/channel.ts' },
+    });
+    const afterShell = reduce(afterRead, {
+      type: 'tool_use',
+      id: 'shell-1',
+      name: 'shell',
+      input: { command: 'git status --short --branch' },
+    });
+    const done = reduce(afterShell, { type: 'done' });
+
+    expect(renderText(done)).not.toContain('git status');
+    expect(renderText(done)).not.toContain('channel.ts');
+
+    const card = renderCard(done) as { body: { elements: Array<Record<string, unknown>> } };
+    expect(JSON.stringify(card)).not.toContain('git status');
+    expect(JSON.stringify(card)).not.toContain('channel.ts');
+  });
+
+  test('caps markdown tool lines to keep streaming cards small', () => {
+    let state = initialState;
+    for (let i = 0; i < 12; i++) {
+      state = reduce(state, {
+        type: 'tool_use',
+        id: `edit-${i}`,
+        name: 'edit',
+        input: { file_path: `/tmp/project/file-${i}.ts` },
+      });
+    }
+    state = reduce(state, { type: 'done' });
+
+    const text = renderText(state);
+    expect(text).toContain('已折叠 4 个工具步骤');
+    expect(text).toContain('file-7.ts');
+    expect(text).not.toContain('file-8.ts');
   });
 
   test('merges TodoWrite updates by id when requested', () => {

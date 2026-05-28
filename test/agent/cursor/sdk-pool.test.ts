@@ -209,4 +209,57 @@ describe('poolKeyFor', () => {
     expect(shutdown).toHaveBeenCalledTimes(1);
     expect(entries.has('session:agent-123')).toBe(false);
   });
+
+  test('reports running worker snapshots', () => {
+    const pool = new CursorSdkPool(
+      { command: 'agent', prefixArgs: [], commandLabel: 'agent' },
+      { model: { id: 'gpt-5.5' } },
+      1,
+    );
+    const entry = {
+      key: 'session:agent-123',
+      agentId: 'agent-123',
+      worker: {
+        pid: 123,
+        ensure: async () => 'agent-123',
+        run: () =>
+          ({
+            events: (async function* () {
+              await new Promise(() => {});
+            })(),
+            stop: async () => {},
+            waitForExit: async () => true,
+          }) satisfies AgentRun,
+        stopRun: () => {},
+        shutdown: async () => {},
+      },
+      cwd: '/tmp/ws',
+      lastUsed: Date.now(),
+      busy: false,
+      pendingRuns: 0,
+      disposed: false,
+      currentRunId: undefined as string | undefined,
+      currentRunStartedAt: undefined as number | undefined,
+      lastEventAt: undefined as number | undefined,
+      lastError: undefined as string | undefined,
+    };
+    const entries = (
+      pool as unknown as {
+        entries: Map<string, typeof entry>;
+      }
+    ).entries;
+    entries.set(entry.key, entry);
+
+    pool.run({ prompt: 'hi', cwd: '/tmp/ws', sessionId: 'agent-123' });
+
+    expect(pool.workerSnapshots()).toEqual([
+      expect.objectContaining({
+        key: 'session:agent-123',
+        pid: 123,
+        status: 'running',
+        pendingRuns: 1,
+        currentRunId: '1',
+      }),
+    ]);
+  });
 });

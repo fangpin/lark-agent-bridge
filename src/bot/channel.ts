@@ -10,7 +10,7 @@ import { handleCardAction } from '../card/dispatcher';
 import { renderCard } from '../card/run-renderer';
 import {
   finalizeIfRunning,
-  initialState,
+  createInitialState,
   markAgentReady,
   markIdleTimeout,
   markInterrupted,
@@ -45,8 +45,16 @@ import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, renderQuotedBlock, type QuotedContext } from './quote';
 import { addWorkingReaction, removeReaction } from './reaction';
+import { RunHistory } from './run-history';
+import { TimeoutError, withTimeout } from '../utils/timeout';
 
 const PENDING_FLUSH_DELAY_MS = 0;
+const MEDIA_RESOLVE_TIMEOUT_MS = 20_000;
+const QUOTE_FETCH_TIMEOUT_MS = 10_000;
+const SESSION_PRECREATE_TIMEOUT_MS = 20_000;
+const STREAM_UPDATE_TIMEOUT_MS = 15_000;
+const FINAL_FLUSH_TIMEOUT_MS = 20_000;
+const PROGRESS_REFRESH_MS = 15_000;
 
 // Lark SDK logs API errors at error level even when the caller catches them.
 // These specific codes are EXPECTED in our flow (wiki-node lookup that
@@ -124,6 +132,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // ChatModeCache stays per-bridge-instance — invalidated on restart along
   // with everything else. Topic-mode chats only need one chat.get() call ever.
   const chatModeCache = new ChatModeCache();
+  const runHistory = new RunHistory();
   // Concurrency cap — reads `preferences.maxConcurrentRuns` on each acquire,
   // so /config bumps take effect for the next run.
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
@@ -202,6 +211,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           controls,
           scope,
           mode,
+          runHistory,
         });
       } catch (err) {
         log.fail('flush', err);
@@ -228,6 +238,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           pending,
           msg,
           controls,
+          runHistory,
           chatModeCache,
         }),
       ).catch((err) => log.fail('intake', err));
@@ -246,6 +257,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           agent,
           controls,
           pending,
+          runHistory,
           chatModeCache,
         });
       }).catch((err) => log.fail('cardAction', err));
@@ -335,6 +347,7 @@ interface IntakeDeps {
   workspaces: WorkspaceStore;
   activeRuns: ActiveRuns;
   pending: PendingQueue;
+  runHistory: RunHistory;
   msg: NormalizedMessage;
   controls: Controls;
   chatModeCache: ChatModeCache;
@@ -348,6 +361,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     workspaces,
     activeRuns,
     pending,
+    runHistory,
     msg,
     controls,
     chatModeCache,
@@ -415,6 +429,8 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     workspaces,
     agent,
     activeRuns,
+    pending,
+    runHistory,
     controls,
   });
   if (handled) {
@@ -438,6 +454,7 @@ interface RunBatchDeps {
   controls: Controls;
   scope: string;
   mode: ChatMode;
+  runHistory: RunHistory;
 }
 
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
@@ -452,6 +469,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     controls,
     scope,
     mode,
+    runHistory,
   } = deps;
   if (batch.length === 0) return;
   const firstMsg = batch[0];
@@ -460,11 +478,22 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const chatId = firstMsg.chatId;
   const threadId = firstMsg.threadId;
+  const historyEntry = runHistory.create(scope, batch);
 
   const resourceItems = batch.flatMap((m) =>
     m.resources.map((r) => ({ messageId: m.messageId, resource: r })),
   );
-  const attachments = await media.resolve(chatId, resourceItems);
+  let attachments: LocalAttachment[] = [];
+  if (resourceItems.length > 0) {
+    attachments = await withTimeout(
+      'media.resolve',
+      MEDIA_RESOLVE_TIMEOUT_MS,
+      media.resolve(chatId, resourceItems),
+    ).catch((err) => {
+      log.fail('media', err, { fallback: 'skip-attachments', count: resourceItems.length });
+      return [];
+    });
+  }
   if (attachments.length > 0) {
     log.info('media', 'resolved', { count: attachments.length });
   }
@@ -482,7 +511,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   ];
   const quotes: QuotedContext[] = [];
   for (const targetId of quoteTargets) {
-    const q = await fetchQuotedContext(channel, targetId);
+    const q = await withTimeout(
+      'quote.fetch',
+      QUOTE_FETCH_TIMEOUT_MS,
+      fetchQuotedContext(channel, targetId),
+    ).catch((err) => {
+      log.fail('quote', err, { messageId: targetId, fallback: 'skip-quote' });
+      return undefined;
+    });
     if (q) {
       quotes.push(q);
       log.info('quote', 'fetched', {
@@ -513,7 +549,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     } else {
       log.info('session', 'fresh', { cwd });
     }
-    resumeFrom = await ensureResumeSession(agent, sessions, scope, cwd);
+    resumeFrom = await withTimeout(
+      'session.precreate',
+      SESSION_PRECREATE_TIMEOUT_MS,
+      ensureResumeSession(agent, sessions, scope, cwd),
+    ).catch((err) => {
+      log.fail('session', err, { cwd, fallback: 'run-without-precreated-session' });
+      return undefined;
+    });
     if (resumeFrom) {
       log.info('session', 'resume-precreate', { sessionId: resumeFrom, cwd });
     }
@@ -544,6 +587,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const replyMode = getMessageReplyMode(controls.cfg);
   log.info('flush', 'reply-mode', { mode: replyMode });
+  let finalState: RunState = createInitialState(historyEntry.runId);
 
   // Re-read prefs on every flush so toggling /config mid-stream takes
   // effect immediately. Cheap object lookups, no allocation when on.
@@ -563,58 +607,78 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // Add a "Typing" reaction as an instant ack while the agent CLI is still
   // starting up (card footer shows the same phase in more detail).
   const reactionId = await addWorkingReaction(channel, lastMsg.messageId);
+  let streamMessageId: string | undefined;
 
   try {
     if (replyMode === 'card') {
-      await channel.stream(
+      const result = await channel.stream(
         chatId,
         {
           card: {
-            initial: renderCard(initialState),
+            initial: renderCard(finalState),
             producer: async (ctrl) => {
-              await processAgentStream(
+              finalState = await processAgentStream(
                 handle,
                 sessions,
                 scope,
                 cwd,
                 idleTimeoutMs,
                 async (state) => {
-                  await ctrl.update(renderCard(filterForPrefs(state)));
+                  finalState = state;
+                  await withTimeout(
+                    'card.update',
+                    STREAM_UPDATE_TIMEOUT_MS,
+                    ctrl.update(renderCard(filterForPrefs(state))),
+                  );
                 },
                 agentStopGraceMs,
+                finalState,
               );
             },
           },
         },
         sendOpts,
       );
+      streamMessageId = result.messageId;
+      await forceFinalCardUpdate(channel, streamMessageId, filterForPrefs(finalState), 'card');
     } else if (replyMode === 'markdown') {
-      await channel.stream(
+      const result = await channel.stream(
         chatId,
         {
           markdown: async (ctrl) => {
-            await ctrl.setContent(renderText(filterForPrefs(initialState)));
-            await processAgentStream(
+            await withTimeout(
+              'markdown.initial-flush',
+              STREAM_UPDATE_TIMEOUT_MS,
+              ctrl.setContent(renderText(filterForPrefs(finalState))),
+            );
+            finalState = await processAgentStream(
               handle,
               sessions,
               scope,
               cwd,
               idleTimeoutMs,
               async (state) => {
-                await ctrl.setContent(renderText(filterForPrefs(state)));
+                finalState = state;
+                await withTimeout(
+                  'markdown.update',
+                  STREAM_UPDATE_TIMEOUT_MS,
+                  ctrl.setContent(renderText(filterForPrefs(state))),
+                );
               },
               agentStopGraceMs,
+              finalState,
             );
           },
         },
         sendOpts,
       );
+      streamMessageId = result.messageId;
+      await forceFinalCardUpdate(channel, streamMessageId, filterForPrefs(finalState), 'markdown');
     } else {
       // text mode: drain the agent stream without sending anything during
       // the run, then post the final rendered text once as a plain markdown
       // (msg_type=post) message — no card, no streaming, no typewriter.
-      let finalState: RunState = initialState;
-      await processAgentStream(
+      finalState = await processAgentStream(
         handle,
         sessions,
         scope,
@@ -624,6 +688,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           finalState = state;
         },
         agentStopGraceMs,
+        finalState,
       );
       const body = renderText(filterForPrefs(finalState));
       if (body.trim()) {
@@ -632,12 +697,70 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   } catch (err) {
     log.fail('stream', err);
+    if (err instanceof TimeoutError) {
+      handle.interrupted = true;
+      finalState = markInterrupted(finalState);
+      await run.stop().catch((stopErr) => {
+        log.fail('stream', stopErr, { step: 'stop-after-timeout' });
+      });
+    }
+    if (err instanceof TimeoutError || finalState.terminal !== 'running') {
+      const fallback = renderText(filterForPrefs(finalState));
+      if (fallback.trim()) {
+        await channel.send(chatId, { markdown: fallback }, sendOpts).catch((sendErr) => {
+          log.fail('stream', sendErr, { step: 'fallback-send' });
+        });
+      }
+    }
   } finally {
+    runHistory.finish(historyEntry.runId, finalState.terminal, finalState.errorMsg);
     activeRuns.unregister(scope, run);
     if (reactionId) {
       await removeReaction(channel, lastMsg.messageId, reactionId);
     }
   }
+}
+
+async function forceFinalCardUpdate(
+  channel: LarkChannel,
+  messageId: string | undefined,
+  state: RunState,
+  mode: 'card' | 'markdown',
+): Promise<void> {
+  if (!messageId || state.terminal === 'running') return;
+  const card = mode === 'markdown' ? markdownFinalCard(renderText(state), state) : renderCard(state);
+  try {
+    await withTimeout('final-card-update', FINAL_FLUSH_TIMEOUT_MS, channel.updateCard(messageId, card));
+    log.info('card', 'final-update', {
+      messageId,
+      mode,
+      terminal: state.terminal,
+      chars: mode === 'markdown' ? renderText(state).length : undefined,
+    });
+  } catch (err) {
+    log.fail('card', err, { step: 'final-update', messageId, mode, terminal: state.terminal });
+  }
+}
+
+function markdownFinalCard(markdown: string, state: RunState): object {
+  return {
+    schema: '2.0',
+    config: {
+      streaming_mode: false,
+      summary: { content: finalSummary(state) },
+    },
+    body: {
+      elements: [{ tag: 'markdown', content: markdown || '_（未返回内容）_' }],
+    },
+  };
+}
+
+function finalSummary(state: RunState): string {
+  if (state.terminal === 'done') return '已完成';
+  if (state.terminal === 'interrupted') return '已中断';
+  if (state.terminal === 'idle_timeout') return '已超时';
+  if (state.terminal === 'error') return '出错';
+  return '运行中';
 }
 
 /**
@@ -653,8 +776,9 @@ export async function processAgentStream(
   idleTimeoutMs: number | undefined,
   flush: (state: RunState) => Promise<void>,
   postDoneExitGraceMs = POST_DONE_EXIT_GRACE_MS,
-): Promise<void> {
-  let state: RunState = initialState;
+  startState?: RunState,
+): Promise<RunState> {
+  let state: RunState = startState ?? createInitialState();
 
   // Idle watchdog: claude going silent for `idleTimeoutMs` is treated as
   // "presumed hung", we stop() and surface a timeout marker on the card.
@@ -665,6 +789,8 @@ export async function processAgentStream(
   // recover "tool running" cards that would otherwise stay stale forever.
   let idleFired = false;
   let timer: NodeJS.Timeout | undefined;
+  let progressTimer: NodeJS.Timeout | undefined;
+  let flushTail: Promise<void> = Promise.resolve();
   let stopping: Promise<void> | undefined;
   const inFlightTools = new Set<string>();
   const stopRun = (): Promise<void> => {
@@ -673,9 +799,19 @@ export async function processAgentStream(
     });
     return stopping;
   };
+  const enqueueFlush = (snapshot: RunState): Promise<void> => {
+    const task = flushTail.then(
+      () => flush(snapshot),
+      () => flush(snapshot),
+    );
+    flushTail = task.catch(() => {
+      /* keep later flushes moving after a failed update */
+    });
+    return task;
+  };
   const flushFromEventLoop = async (): Promise<void> => {
     try {
-      await flush(state);
+      await enqueueFlush(state);
     } catch (err) {
       throw new FlushFailure(err);
     }
@@ -692,6 +828,16 @@ export async function processAgentStream(
     }, idleTimeoutMs);
   };
   armOrPauseIdle();
+  progressTimer = setInterval(() => {
+    if (state.terminal !== 'running' || handle.interrupted) return;
+    const snapshot = { ...state, updatedAt: Date.now() };
+    void withTimeout('progress-refresh', STREAM_UPDATE_TIMEOUT_MS, enqueueFlush(snapshot)).catch((err) => {
+      log.warn('card', 'progress-refresh-failed', {
+        scope,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, PROGRESS_REFRESH_MS);
 
   try {
     for await (const evt of handle.run.events) {
@@ -757,6 +903,7 @@ export async function processAgentStream(
     }
   } finally {
     if (timer) clearTimeout(timer);
+    if (progressTimer) clearInterval(progressTimer);
   }
 
   // If state already reached a terminal event (done/error/etc.) before the
@@ -773,22 +920,26 @@ export async function processAgentStream(
     }
   }
   log.info('card', 'final', { terminal: state.terminal, interrupted: handle.interrupted });
-  await flush(state);
+  try {
+    await withTimeout('final-flush', FINAL_FLUSH_TIMEOUT_MS, enqueueFlush(state));
+  } finally {
     // Reap the subprocess. Two regimes:
-  //  - Interrupted (user /stop, idle watchdog, disconnect): stop() was already
-  //    fire-and-forgotten by whoever set handle.interrupted; this awaits it.
-  //  - Natural done: stream-json emits `result` ~1ms before claude actually
-  //    closes stdout (telemetry flush). Wait it out so the run exits with
-  //    code 0; only SIGTERM as a hung-process safety net.
-  if (handle.interrupted) {
-    await stopRun();
-  } else {
-    const exited = await handle.run.waitForExit(postDoneExitGraceMs);
-    if (!exited) {
-      log.warn('agent', 'post-done-timeout', { graceMs: postDoneExitGraceMs });
-      await handle.run.stop();
+    //  - Interrupted (user /stop, idle watchdog, disconnect): stop() was already
+    //    fire-and-forgotten by whoever set handle.interrupted; this awaits it.
+    //  - Natural done: stream-json emits `result` ~1ms before claude actually
+    //    closes stdout (telemetry flush). Wait it out so the run exits with
+    //    code 0; only SIGTERM as a hung-process safety net.
+    if (handle.interrupted) {
+      await stopRun();
+    } else {
+      const exited = await handle.run.waitForExit(postDoneExitGraceMs);
+      if (!exited) {
+        log.warn('agent', 'post-done-timeout', { graceMs: postDoneExitGraceMs });
+        await handle.run.stop();
+      }
     }
   }
+  return state;
 }
 
 /**

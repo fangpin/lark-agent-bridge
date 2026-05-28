@@ -210,10 +210,12 @@ async function handleRun(id: string, prompt: string): Promise<void> {
 
     const result = await run.wait();
     if (result.status === 'error') {
+      const message = formatRunResultError(result);
+      process.stderr.write(`[sdk-worker] ${message}\n`);
       send({
         type: 'error',
         id,
-        message: result.result ?? `sdk run failed (runId=${result.id}, status=${result.status})`,
+        message,
       });
       return;
     }
@@ -223,6 +225,27 @@ async function handleRun(id: string, prompt: string): Promise<void> {
   } finally {
     activeRunId = undefined;
     activeAbort = undefined;
+  }
+}
+
+function formatRunResultError(result: Awaited<ReturnType<Awaited<ReturnType<SDKAgent['send']>>['wait']>>): string {
+  const headline = `sdk run failed (runId=${result.id}, status=${result.status})`;
+  if (typeof result.result === 'string' && result.result.trim()) {
+    return `${headline}: ${result.result.trim()}`;
+  }
+  const diagnostic = safeJson({
+    id: result.id,
+    status: result.status,
+    result: result.result,
+  });
+  return `${headline}; Cursor returned no error detail${diagnostic ? ` | result=${diagnostic}` : ''}`;
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value).slice(0, 1200);
+  } catch {
+    return '';
   }
 }
 

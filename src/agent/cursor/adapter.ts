@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { log } from '../../core/logger';
-import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../types';
+import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions, WorkerSnapshot } from '../types';
 import { spawnCreateChat } from './create-chat';
 import { CursorSdkPool } from './sdk-pool';
 import { spawnCursorRun, type CursorSpawnOptions } from './spawn-run';
@@ -107,6 +107,10 @@ export class CursorAdapter implements AgentAdapter {
 
   async evictScope(scope: string, cwd?: string): Promise<void> {
     await this.sdkPool?.evictScope(scope, cwd);
+  }
+
+  workerSnapshots(): WorkerSnapshot[] {
+    return this.sdkPool?.workerSnapshots() ?? [];
   }
 
   async shutdown(): Promise<void> {
