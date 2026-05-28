@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
   cachedSessionReadyEvent,
   CursorSdkPool,
@@ -6,6 +6,10 @@ import {
   poolKeyFor,
 } from '../../../src/agent/cursor/sdk-pool';
 import type { AgentEvent, AgentRun } from '../../../src/agent/types';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('poolKeyFor', () => {
   test('uses only session id for reusable workers', () => {
@@ -147,5 +151,62 @@ describe('poolKeyFor', () => {
       { type: 'text', delta: 'hello' },
       { type: 'done' },
     ]);
+  });
+
+  test('evicts a reused worker when stop does not settle the run stream', async () => {
+    vi.useFakeTimers();
+    const pool = new CursorSdkPool(
+      { command: 'agent', prefixArgs: [], commandLabel: 'agent' },
+      { model: { id: 'gpt-5.5' } },
+      1,
+    );
+    const stop = vi.fn(async () => {});
+    const shutdown = vi.fn(async () => {});
+    const run = vi.fn(() => {
+      return {
+        events: (async function* () {
+          await new Promise(() => {});
+        })(),
+        stop,
+        waitForExit: async () => true,
+      } satisfies AgentRun;
+    });
+    const entry = {
+      key: 'session:agent-123',
+      agentId: 'agent-123',
+      worker: {
+        pid: 123,
+        ensure: async () => 'agent-123',
+        run,
+        stopRun: () => {},
+        shutdown,
+      },
+      cwd: '/tmp/ws',
+      lastUsed: Date.now(),
+      busy: false,
+      pendingRuns: 0,
+      disposed: false,
+    };
+    const entries = (
+      pool as unknown as {
+        entries: Map<string, typeof entry>;
+      }
+    ).entries;
+    entries.set(entry.key, entry);
+
+    const result = pool.run({
+      prompt: 'hi',
+      cwd: '/tmp/ws',
+      sessionId: 'agent-123',
+      stopGraceMs: 100,
+    });
+    const stopping = result.stop();
+
+    await vi.advanceTimersByTimeAsync(100);
+    await stopping;
+
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(shutdown).toHaveBeenCalledTimes(1);
+    expect(entries.has('session:agent-123')).toBe(false);
   });
 });

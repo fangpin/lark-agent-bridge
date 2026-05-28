@@ -659,32 +659,36 @@ export async function processAgentStream(
   // Idle watchdog: claude going silent for `idleTimeoutMs` is treated as
   // "presumed hung", we stop() and surface a timeout marker on the card.
   //
-  // BUT — claude can legitimately be silent for a long time when it's
-  // waiting on a long-running tool call (e.g. `lark-cli` printing an
-  // OAuth URL and blocking until the user clicks authorize). In that
-  // case there's no event stream activity from claude itself, only the
-  // tool subprocess running. We track which tool_use ids haven't matched
-  // a tool_result yet, and pause the watchdog whenever the set is
-  // non-empty.
-  //
-  // The watchdog re-arms when:
-  //  - a tool_result drains the in-flight set to zero, OR
-  //  - any non-tool event arrives while the set is empty.
+  // Tool calls count as activity when they start/finish, but a tool that never
+  // returns is still indistinguishable from a stuck backend to the user. Keep
+  // the watchdog armed during in-flight tools so configured timeouts also
+  // recover "tool running" cards that would otherwise stay stale forever.
   let idleFired = false;
   let timer: NodeJS.Timeout | undefined;
+  let stopping: Promise<void> | undefined;
   const inFlightTools = new Set<string>();
+  const stopRun = (): Promise<void> => {
+    stopping ??= handle.run.stop().catch(() => {
+      /* stop errors are non-fatal */
+    });
+    return stopping;
+  };
+  const flushFromEventLoop = async (): Promise<void> => {
+    try {
+      await flush(state);
+    } catch (err) {
+      throw new FlushFailure(err);
+    }
+  };
   const armOrPauseIdle = (): void => {
     if (!idleTimeoutMs) return;
     if (timer) clearTimeout(timer);
     timer = undefined;
-    if (inFlightTools.size > 0) return;
     timer = setTimeout(() => {
       idleFired = true;
       handle.interrupted = true;
       log.warn('agent', 'idle-timeout', { scope, idleTimeoutMs });
-      void handle.run.stop().catch(() => {
-        /* stop errors are non-fatal */
-      });
+      void stopRun();
     }, idleTimeoutMs);
   };
   armOrPauseIdle();
@@ -718,7 +722,7 @@ export async function processAgentStream(
         state = markAgentReady(state);
         if (state.footer !== prevFooter) {
           log.info('card', 'transition', { footer: state.footer, terminal: state.terminal });
-          await flush(state);
+          await flushFromEventLoop();
         }
         continue;
       }
@@ -739,11 +743,17 @@ export async function processAgentStream(
       if (state.footer !== prevFooter || state.terminal !== prevTerminal) {
         log.info('card', 'transition', { footer: state.footer, terminal: state.terminal });
       }
-      await flush(state);
+      await flushFromEventLoop();
       // Stop iterating as soon as we have a terminal state. Some claude
       // versions don't close stdout immediately after the result event, which
       // would leave the for-await waiting forever otherwise.
       if (state.terminal !== 'running') break;
+    }
+  } catch (err) {
+    if (err instanceof FlushFailure) throw err.cause;
+    log.fail('agent-stream', err);
+    if (state.terminal === 'running') {
+      state = reduce(state, { type: 'error', message: formatAgentStreamError(err) });
     }
   } finally {
     if (timer) clearTimeout(timer);
@@ -771,7 +781,7 @@ export async function processAgentStream(
   //    closes stdout (telemetry flush). Wait it out so the run exits with
   //    code 0; only SIGTERM as a hung-process safety net.
   if (handle.interrupted) {
-    await handle.run.stop();
+    await stopRun();
   } else {
     const exited = await handle.run.waitForExit(postDoneExitGraceMs);
     if (!exited) {
@@ -787,6 +797,31 @@ export async function processAgentStream(
  * slower Cursor cleanup is not killed by this legacy 2s default.
  */
 const POST_DONE_EXIT_GRACE_MS = 2000;
+
+class FlushFailure {
+  constructor(readonly cause: unknown) {}
+}
+
+function errorField(err: unknown, key: 'code' | 'rawMessage'): string | number | undefined {
+  if (!err || typeof err !== 'object' || !(key in err)) return undefined;
+  const value = (err as Record<string, unknown>)[key];
+  return typeof value === 'string' || typeof value === 'number' ? value : undefined;
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message || err.name;
+  if (typeof err === 'string') return err;
+  return String(err);
+}
+
+function formatAgentStreamError(err: unknown): string {
+  const parts = [`agent stream error: ${errorMessage(err)}`];
+  const raw = errorField(err, 'rawMessage');
+  const code = errorField(err, 'code');
+  if (raw && raw !== errorMessage(err)) parts.push(`raw=${raw}`);
+  if (code !== undefined) parts.push(`code=${code}`);
+  return parts.join(' | ');
+}
 
 function buildPrompt(
   batch: NormalizedMessage[],

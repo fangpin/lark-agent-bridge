@@ -77,13 +77,19 @@ function classifyKind(err: unknown): SdkErrorKind {
   if (errorMessage(err).includes('Cannot use this model')) return 'config';
   const code = errorCode(err);
   if (code === 'unauthenticated' || code === 16) return 'auth';
-  if (typeof code === 'number' && code === 8) return 'auth'; // Connect Code.Unauthenticated
+  if (typeof code === 'number' && code === 8) return 'rate_limit'; // Connect Code.ResourceExhausted
   const msg = errorMessage(err).toLowerCase();
   if (msg.includes('unauthenticated') || msg.includes('authentication') || msg.includes('api key')) {
     return 'auth';
   }
   if (msg.includes('cancelled') || msg.includes('canceled')) return 'cancelled';
-  if (msg.includes('econnrefused') || msg.includes('network') || msg.includes('timeout')) {
+  if (
+    msg.includes('econnrefused') ||
+    msg.includes('econnreset') ||
+    msg.includes('socket hang up') ||
+    msg.includes('network') ||
+    msg.includes('timeout')
+  ) {
     return 'network';
   }
   return 'unknown';
@@ -176,6 +182,10 @@ export function isCursorAgentActiveRunError(err: unknown, agentId: string): bool
     return false;
   }
   return true;
+}
+
+export function isCursorRateLimitError(err: unknown): boolean {
+  return describeSdkError(err).kind === 'rate_limit';
 }
 
 /** Message sent over IPC to the bridge and shown on failure cards. */

@@ -4,6 +4,7 @@ import {
   formatSdkErrorForIpc,
   isCursorAgentActiveRunError,
   isCursorAgentNotFoundError,
+  isCursorRateLimitError,
 } from '../../../src/agent/cursor/sdk-error';
 
 describe('describeSdkError', () => {
@@ -32,6 +33,36 @@ describe('describeSdkError', () => {
     const msg = formatSdkErrorForIpc('sdk run failed', err);
     expect(msg).toContain('sdk run failed:');
     expect(msg).toContain('CURSOR_API_KEY');
+  });
+
+  test('classifies Connect resource exhaustion as rate limit, not auth', () => {
+    const err = Object.assign(new Error('resource exhausted'), {
+      name: 'ConnectError',
+      rawMessage: 'resource exhausted',
+      code: 8,
+    });
+
+    const d = describeSdkError(err);
+    expect(d.kind).toBe('rate_limit');
+    expect(d.headline).toContain('限流');
+    expect(d.hint).toContain('降低并发');
+    expect(isCursorRateLimitError(err)).toBe(true);
+  });
+
+  test('classifies ECONNRESET aborts as network errors', () => {
+    const cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+    const err = Object.assign(new Error('[aborted] read ECONNRESET'), {
+      name: 'ConnectError',
+      rawMessage: 'read ECONNRESET',
+      code: 10,
+      cause,
+    });
+
+    const d = describeSdkError(err);
+    expect(d.kind).toBe('network');
+    expect(d.headline).toContain('网络错误');
+    expect(d.detail).toContain('raw=read ECONNRESET');
+    expect(d.detail).toContain('code=ECONNRESET');
   });
 
   test('detects stale Cursor SDK agent ids that cannot be resumed', () => {
