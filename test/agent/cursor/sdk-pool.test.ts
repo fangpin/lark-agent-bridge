@@ -4,6 +4,7 @@ import {
   CursorSdkPool,
   doneEventForAgent,
   poolKeyFor,
+  sdkWorkerEnv,
 } from '../../../src/agent/cursor/sdk-pool';
 import type { AgentEvent, AgentRun } from '../../../src/agent/types';
 
@@ -12,6 +13,26 @@ afterEach(() => {
 });
 
 describe('poolKeyFor', () => {
+  test('removes eval-only node options from SDK worker env', () => {
+    const previous = process.env.NODE_OPTIONS;
+    try {
+      process.env.NODE_OPTIONS = '--trace-warnings --input-type=module --max-old-space-size=4096';
+
+      expect(sdkWorkerEnv({ LARK_CURSOR_SDK_WORKER: '1' }).NODE_OPTIONS).toBe(
+        '--trace-warnings --max-old-space-size=4096',
+      );
+
+      process.env.NODE_OPTIONS = '--input-type module';
+      expect(sdkWorkerEnv({ LARK_CURSOR_SDK_WORKER: '1' })).not.toHaveProperty('NODE_OPTIONS');
+    } finally {
+      if (previous === undefined) {
+        delete process.env.NODE_OPTIONS;
+      } else {
+        process.env.NODE_OPTIONS = previous;
+      }
+    }
+  });
+
   test('uses only session id for reusable workers', () => {
     expect(
       poolKeyFor({
