@@ -522,11 +522,14 @@ function createWorker(
   const packageRoot = resolvePackageRoot();
   const child = fork(script, [], {
     cwd: packageRoot,
-    env: {
-      ...process.env,
+    env: sdkWorkerEnv({
       LARK_CURSOR_SDK_WORKER: '1',
       LARK_CURSOR_SDK_CONFIG: JSON.stringify(sdkConfig),
-    },
+    }),
+    // The worker is a real file entrypoint. Parent processes launched via
+    // `node -e`/stdin can carry execArgv like `--input-type=module`, which
+    // makes Node reject file entrypoints during fork startup.
+    execArgv: [],
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
   });
 
@@ -754,6 +757,33 @@ function createWorker(
       });
     },
   };
+}
+
+export function sdkWorkerEnv(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...overrides };
+  const nodeOptions = sanitizeNodeOptions(env.NODE_OPTIONS);
+  if (nodeOptions) {
+    env.NODE_OPTIONS = nodeOptions;
+  } else {
+    delete env.NODE_OPTIONS;
+  }
+  return env;
+}
+
+function sanitizeNodeOptions(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const parts = value.split(/\s+/).filter(Boolean);
+  const kept: string[] = [];
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i]!;
+    if (part === '--input-type') {
+      i += 1;
+      continue;
+    }
+    if (part.startsWith('--input-type=')) continue;
+    kept.push(part);
+  }
+  return kept.length > 0 ? kept.join(' ') : undefined;
 }
 
 function isRecoverableFatalWorkerEvent(event: AgentEvent): event is Extract<AgentEvent, { type: 'error' }> {
