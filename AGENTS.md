@@ -39,6 +39,7 @@ Use `npm`, not `pnpm`, unless the user explicitly asks otherwise.
 - Keep changes scoped to the requested behavior. Do not refactor unrelated modules while fixing a bug.
 - Preserve strict TypeScript settings. Prefer explicit types at module boundaries and for test doubles that model production interfaces.
 - Use existing adapters, stores, renderers, and logger helpers instead of introducing parallel abstractions.
+- After code changes, especially behavior or feature changes, explicitly consider whether `README.md`, `README.zh.md`, or `AGENTS.md` need updates before declaring the work complete.
 - Do not commit local credentials or runtime state. Files under `~/.lark-channel/` are user data, not repository fixtures.
 - Treat `dist/`, `node_modules/`, local logs, and generated runtime data as build/runtime artifacts.
 

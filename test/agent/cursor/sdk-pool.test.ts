@@ -210,7 +210,7 @@ describe('poolKeyFor', () => {
     expect(entries.has('session:agent-123')).toBe(false);
   });
 
-  test('evicts a reused worker after a fatal sdk run error', async () => {
+  test('evicts a reused worker after a non-recoverable fatal sdk run error', async () => {
     const pool = new CursorSdkPool(
       { command: 'agent', prefixArgs: [], commandLabel: 'agent' },
       { model: { id: 'gpt-5.5' } },
@@ -222,7 +222,7 @@ describe('poolKeyFor', () => {
         events: (async function* () {
           yield {
             type: 'error',
-            message: 'sdk run failed; Cursor returned no error detail',
+            message: 'sdk run failed; permission denied',
             fatal: true,
           } as const;
         })(),
@@ -270,12 +270,82 @@ describe('poolKeyFor', () => {
       },
       {
         type: 'error',
-        message: 'sdk run failed; Cursor returned no error detail',
+        message: 'sdk run failed; permission denied',
         fatal: true,
       },
     ]);
     expect(shutdown).toHaveBeenCalledTimes(1);
     expect(entries.has('session:agent-123')).toBe(false);
+  });
+
+  test('resumes the original session once after a fatal worker error', async () => {
+    const firstShutdown = vi.fn(async () => {});
+    const secondShutdown = vi.fn(async () => {});
+    const firstRun = vi.fn(() => {
+      return {
+        events: (async function* () {
+          yield {
+            type: 'error',
+            message: 'sdk run failed; Cursor returned no error detail',
+            fatal: true,
+          } as const;
+        })(),
+        stop: async () => {},
+        waitForExit: async () => true,
+      } satisfies AgentRun;
+    });
+    const secondRun = vi.fn((opts) => {
+      expect(opts.sessionId).toBe('agent-123');
+      expect(opts.allowSessionReplacement).toBe(false);
+      return {
+        events: (async function* () {
+          yield { type: 'system', sessionId: 'agent-123' } as const;
+          yield { type: 'text', delta: 'continued' } as const;
+          yield { type: 'done', sessionId: 'agent-123' } as const;
+        })(),
+        stop: async () => {},
+        waitForExit: async () => true,
+      } satisfies AgentRun;
+    });
+    const workers = [
+      {
+        pid: 123,
+        ensure: async () => 'agent-123',
+        run: firstRun,
+        stopRun: () => {},
+        shutdown: firstShutdown,
+      },
+      {
+        pid: 456,
+        ensure: async () => 'agent-123',
+        run: secondRun,
+        stopRun: () => {},
+        shutdown: secondShutdown,
+      },
+    ];
+    const factory = vi.fn(() => workers.shift()!);
+    const pool = new CursorSdkPool(
+      { command: 'agent', prefixArgs: [], commandLabel: 'agent' },
+      { model: { id: 'gpt-5.5' } },
+      1,
+      factory,
+    );
+
+    const result = pool.run({ prompt: 'hi', cwd: '/tmp/ws', sessionId: 'agent-123' });
+    const seen: AgentEvent[] = [];
+    for await (const event of result.events) {
+      seen.push(event);
+    }
+
+    expect(seen).toEqual([
+      { type: 'system', sessionId: 'agent-123' },
+      { type: 'text', delta: 'continued' },
+      { type: 'done', sessionId: 'agent-123' },
+    ]);
+    expect(firstRun).toHaveBeenCalledTimes(1);
+    expect(secondRun).toHaveBeenCalledTimes(1);
+    expect(firstShutdown).toHaveBeenCalledTimes(1);
+    expect(secondShutdown).not.toHaveBeenCalled();
   });
 
   test('reports running worker snapshots', () => {

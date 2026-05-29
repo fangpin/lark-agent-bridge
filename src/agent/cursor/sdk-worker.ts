@@ -18,8 +18,8 @@ export interface SdkWorkerConfig {
 }
 
 type WorkerRequest =
-  | { type: 'ensure'; id: string; cwd: string; agentId?: string }
-  | { type: 'run'; id: string; prompt: string }
+  | { type: 'ensure'; id: string; cwd: string; agentId?: string; allowReplacement?: boolean }
+  | { type: 'run'; id: string; prompt: string; allowReplacement?: boolean }
   | { type: 'stop'; id: string }
   | { type: 'shutdown' };
 
@@ -124,7 +124,12 @@ function queueRun(id: string, task: () => Promise<void>): void {
   });
 }
 
-async function ensureAgent(id: string, cwd: string, agentId?: string): Promise<void> {
+async function ensureAgent(
+  id: string,
+  cwd: string,
+  agentId?: string,
+  allowReplacement = true,
+): Promise<void> {
   if (!config) {
     send({ type: 'error', id, message: 'sdk worker config missing' });
     return;
@@ -151,6 +156,13 @@ async function ensureAgent(id: string, cwd: string, agentId?: string): Promise<v
         agent = await withRecoverableRetry('Agent.resume', () => Agent.resume(agentId, opts), recoveryNotes);
       } catch (err) {
         if (!isCursorAgentNotFoundError(err, agentId)) throw err;
+        if (!allowReplacement) {
+          addRecoveryNote(
+            recoveryNotes,
+            `原 SDK session 不可恢复，未自动创建 replacement session`,
+          );
+          throw err;
+        }
         process.stderr.write(
           `[sdk-worker] stale SDK agent ${agentId}; creating a replacement session\n`,
         );
@@ -175,6 +187,7 @@ async function sendPromptWithStaleSessionRecovery(
   id: string,
   prompt: string,
   recoveryNotes: string[],
+  allowReplacement = true,
 ): Promise<Awaited<ReturnType<SDKAgent['send']>>> {
   if (!agent) throw new Error('sdk worker agent not initialized');
   try {
@@ -182,6 +195,13 @@ async function sendPromptWithStaleSessionRecovery(
   } catch (err) {
     const staleAgentId = agent.agentId;
     if (!agentCwd || !isCursorAgentActiveRunError(err, staleAgentId)) throw err;
+    if (!allowReplacement) {
+      addRecoveryNote(
+        recoveryNotes,
+        `原 SDK session 仍有 active run，未自动创建 replacement session`,
+      );
+      throw err;
+    }
     const replacementCwd = agentCwd;
 
     process.stderr.write(
@@ -206,7 +226,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function handleRun(id: string, prompt: string): Promise<void> {
+async function handleRun(id: string, prompt: string, allowReplacement = true): Promise<void> {
   if (!agent) {
     send({ type: 'error', id, message: 'sdk worker agent not initialized' });
     return;
@@ -224,7 +244,7 @@ async function handleRun(id: string, prompt: string): Promise<void> {
   };
 
   try {
-    const run = await sendPromptWithStaleSessionRecovery(id, prompt, recoveryNotes);
+    const run = await sendPromptWithStaleSessionRecovery(id, prompt, recoveryNotes, allowReplacement);
     activeAbort = () => {
       cancelled = true;
       void run.cancel().catch(() => {});
@@ -317,7 +337,7 @@ function withRecoverySummary(message: string, recoveryNotes: string[]): string {
 
 function withWorkerRecoveryHint(message: string, fatal: boolean): string {
   if (!fatal) return message;
-  return `${message}\n\n已自动丢弃当前 SDK worker，下次消息会创建新的 worker/session。`;
+  return `${message}\n\n已自动丢弃当前 SDK worker。bridge 会优先用原 session 创建新 worker 并继续一次；若原 session 不可恢复或仍有 active run，将停止自动继续，保留一键重试/新 session 入口。`;
 }
 
 process.on('uncaughtException', (err) => {
@@ -340,10 +360,10 @@ process.on('message', (msg: WorkerRequest) => {
         send({ type: 'agent', id: msg.id, agentId: agent.agentId });
         return;
       }
-      queueEnsure(() => ensureAgent(msg.id, msg.cwd, msg.agentId));
+      queueEnsure(() => ensureAgent(msg.id, msg.cwd, msg.agentId, msg.allowReplacement));
       return;
     case 'run':
-      queueRun(msg.id, () => handleRun(msg.id, msg.prompt));
+      queueRun(msg.id, () => handleRun(msg.id, msg.prompt, msg.allowReplacement));
       return;
     case 'stop':
       if (activeRunId === msg.id) activeAbort?.();
