@@ -25,9 +25,9 @@ function joinShellArgs(args: string[]): string {
   return args.map(quoteShellArg).join(' ');
 }
 
-export const BRIDGE_SYSTEM_PROMPT = `# lark-channel-bridge 运行约定
+export const BRIDGE_SYSTEM_PROMPT = `# lark-agent-bridge 运行约定
 
-你正在 lark-channel-bridge 里跑：把飞书/Lark 用户消息桥到本地命令行 coding agent。
+你正在 lark-agent-bridge 里跑：把飞书/Lark 用户消息桥到本地命令行 coding agent。
 
 ## bridge_context
 

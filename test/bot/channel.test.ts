@@ -166,7 +166,7 @@ describe('processAgentStream', () => {
     const flushed: string[] = [];
     const run: AgentRun = {
       events: (async function* (): AsyncGenerator<AgentEvent> {
-        yield { type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'bnpm publish' } };
+        yield { type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'npm publish' } };
         await streamReleased;
       })(),
       stop,

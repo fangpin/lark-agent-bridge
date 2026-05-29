@@ -1,6 +1,6 @@
-# ttadk-channel-bridge
+# lark-agent-bridge
 
-把飞书 / Lark 消息和本地 coding-agent CLI（Claude Code、TTADK 包装后的 Claude、Cursor Agent 等）打通的轻量 bot，用一条命令起服务，扫码绑应用，在飞书里和 agent 对话、让它读图 / 改代码。
+把飞书 / Lark 消息和本地 coding-agent CLI（Claude Code、Cursor Agent，或其它兼容包装命令）打通的轻量 bot，用一条命令起服务，扫码绑应用，在飞书里和 agent 对话、让它读图 / 改代码。
 
 [English README](./README.md)
 
@@ -8,6 +8,7 @@
 
 - 在飞书（私聊直接发；群里 `@bot`）把消息转给本地 agent，agent 在你指定的工作目录里工作
 - **流式卡片**：agent 的文本和工具调用实时出现在同一张卡片上，不用傻等
+- **可靠的运行 UI**：失败或超时的任务会显示一键重试；卡片更新失败时会降级成普通 markdown，避免一直卡在“运行中”
 - **会话延续**：每个 chat 独立 session，对话能接着上次说
 - **抢占 + 批处理**：中途发新消息会打断旧任务；快速连发几条会合并成一次请求
 - **多工作空间**：`/ws` 切换不同项目，session 自己重置
@@ -17,27 +18,27 @@
 ## 前置条件
 
 - Node.js **≥ 20**
-- 已安装并登录一个受支持的 coding-agent 命令。默认运行 `claude`；也可以使用 `ttadk code -t claude` 这类包装命令，或 Cursor CLI 的 `agent` 命令。
+- 已安装并登录一个受支持的 coding-agent 命令。默认运行 `claude`；也可以通过 `agentCommand` 使用兼容包装命令，或使用 Cursor CLI 的 `agent` 命令。
 - 一个飞书 / Lark PersonalAgent 应用（首次启动的扫码向导能帮你创建）
 
 ## 安装
 
 ```bash
-NPM_CONFIG_REGISTRY=http://bnpm.byted.org npm i -g @byted/ttadk-channel-bridge
+npm i -g lark-agent-bridge
 # 或
-NPM_CONFIG_REGISTRY=http://bnpm.byted.org pnpm add -g @byted/ttadk-channel-bridge
+pnpm add -g lark-agent-bridge
 ```
 
-也可以直接从字节 npm 运行：
+也可以不安装直接运行：
 
 ```bash
-NPM_CONFIG_REGISTRY=http://bnpm.byted.org npx -y @byted/ttadk-channel-bridge@latest start
+npx -y lark-agent-bridge@latest start
 ```
 
 ## 首次启动
 
 ```bash
-ttadk-channel-bridge start
+lark-agent-bridge start
 ```
 
 第一次跑会检测到没配置应用，**自动进入扫码向导**：
@@ -62,17 +63,17 @@ ttadk-channel-bridge start
 - `im.message.reaction.created_v1` / `deleted_v1`（可选）
 - `im.chat.member.bot.added_v1`（可选）
 
-启用以后再次 `ttadk-channel-bridge start`，看到 `✓ 已连接` 就可以在飞书里找 bot 对话了。
+启用以后再次 `lark-agent-bridge start`，看到 `✓ 已连接` 就可以在飞书里找 bot 对话了。
 
 ## 命令速查
 
 ### 宿主 CLI
 
 ```
-ttadk-channel-bridge start [-c <config>]   启动 bot
-ttadk-channel-bridge ps                    列出本机所有正在跑的 start 进程
-ttadk-channel-bridge stop <id|#>           终止指定 start 进程（SIGTERM，2s 后 SIGKILL）
-ttadk-channel-bridge --help                列所有命令
+lark-agent-bridge start [-c <config>]   启动 bot
+lark-agent-bridge ps                    列出本机所有正在跑的 start 进程
+lark-agent-bridge stop <id|#>           终止指定 start 进程（SIGTERM，2s 后 SIGKILL）
+lark-agent-bridge --help                列所有命令
 ```
 
 > 多开同一个 app 时，开放平台会把事件随机推到其中一个长连接。`start` 启动前会检测同 app 已有的进程，TTY 下提示 `[c]ontinue / [k]ill old / [a]bort` 三选；非 TTY 只 warn 并继续。
@@ -93,10 +94,14 @@ ttadk-channel-bridge --help                列所有命令
 | `/config` | 调整偏好（消息回复方式、工具调用显示等） |
 | `/stop` | 终止当前正在跑的 run（也可点卡片底部 ⏹ 终止 按钮） |
 | `/timeout [N\|off\|default]` | 当前 session 的 idle 探活（分钟）；`/config` 改全局默认。详见下方"常见问题 — Claude 子进程假死" |
+| `/retry <run-id>` | 重放最近失败或超时的任务；失败卡片里也有一键重试按钮 |
+| `/shell <command>` | 在当前 cwd 执行 shell 命令并回传 stdout/stderr。配置管理员后仅管理员可用；限制 30 秒和 12k 字符输出 |
+| `/workers` | 查看 Cursor SDK worker pool 健康状态：状态、队列、当前 run、session/cwd 和最近错误 |
 | `/ps` | 列出本机所有 start 进程，标识当前回复的是哪个 |
 | `/exit <id\|#>` | 终止指定 start 进程（自己 = graceful 退出；他人 = SIGTERM） |
 | `/reconnect` | 强制重连 WebSocket（网络抖动后 bot 没反应时用） |
 | `/doctor [描述]` | 把最近运行日志和你的描述喂给 agent，自助诊断卡住 / 异常的原因 |
+| `/doctor workers` | 直接查看当前 SDK worker pool 状态 |
 | `/help` | 帮助卡片 |
 | 其它 `/xxx` | 原样交给 agent |
 
@@ -113,26 +118,26 @@ ttadk-channel-bridge --help                列所有命令
 | `~/.lark-channel/media/<chatId>/` | 下载的图片 / 文件，24h 自动清理 |
 | `~/.lark-channel/logs/YYYY-MM-DD.log` | 结构化运行日志（JSON line），按天滚动；启动时清理超过 7 天的老文件（`LARK_CHANNEL_LOG_DAYS` 环境变量可改）；`/doctor` 命令读它做诊断 |
 
-> 升级自 0.1.11 之前的版本？跑一次 `ttadk-channel-bridge migrate` —— 自动把旧路径 `~/.config/lark-channel-bridge/` 和 `~/.cache/lark-channel-bridge/` 下的内容搬到新位置，并把 `config.json` 升级到新结构。
+> 升级自 0.1.11 之前的版本？跑一次 `lark-agent-bridge migrate` —— 自动把旧路径 `~/.config/lark-channel-bridge/` 和 `~/.cache/lark-channel-bridge/` 下的内容搬到新位置，并把 `config.json` 升级到新结构。
 
 ### 自定义 agent 命令
 
-默认情况下 bridge 使用 Claude backend，并把 Claude Code 参数追加到 `claude` 后面。要使用 TTADK 这类兼容包装命令，可以在 `~/.lark-channel/config.json` 里加入 `preferences.agentCommand`：
+默认情况下 bridge 使用 Claude backend，并把 Claude Code 参数追加到 `claude` 后面。要使用兼容包装命令，可以在 `~/.lark-channel/config.json` 里加入 `preferences.agentCommand`：
 
 ```json
 {
   "preferences": {
     "agentCommand": {
       "backend": "claude",
-      "command": "ttadk",
-      "args": ["code", "-t", "claude", "-m", "gpt-5.5"],
-      "claudeArgsOption": "-a"
+      "command": "my-claude-wrapper",
+      "args": ["--model", "gpt-5.5"],
+      "claudeArgsOption": "--claude-args"
     }
   }
 }
 ```
 
-配置 `claudeArgsOption` 后，bridge 会把 Claude Code 参数安全拼成一个字符串，运行类似 `ttadk code -t claude -a "-p ... --output-format stream-json --verbose ..."` 的命令。不配置 `claudeArgsOption` 时会把 Claude 参数作为普通 argv 追加；不配置 `agentCommand` 时仍然使用默认的 `claude`。
+配置 `claudeArgsOption` 后，bridge 会把 Claude Code 参数安全拼成一个字符串，运行类似 `my-claude-wrapper --model gpt-5.5 --claude-args "-p ... --output-format stream-json --verbose ..."` 的命令。不配置 `claudeArgsOption` 时会把 Claude 参数作为普通 argv 追加；不配置 `agentCommand` 时仍然使用默认的 `claude`。
 
 要使用 Cursor CLI，先确认 `agent` 命令已安装、已登录，并且在 `PATH` 中可用，然后配置 Cursor backend：
 
@@ -179,7 +184,7 @@ Cursor 模式下，bridge 会把运行约定注入到 prompt 里，因为 Cursor
 - "管理员"：填你自己的 `open_id`
 - 其它两栏留空
 
-下次别人发 `/account` `/config` `/exit` `/reconnect` `/doctor` `/cd` `/ws` 这些敏感命令，会收到 `❌ 此命令仅管理员可用`。普通对话（让 bot 帮忙做事）不受影响。
+下次别人发 `/account` `/config` `/exit` `/reconnect` `/doctor` `/workers` `/shell` `/cd` `/ws` 这些敏感命令，会收到 `❌ 此命令仅管理员可用`。普通对话（让 bot 帮忙做事）不受影响。
 
 **完全收紧**
 
@@ -227,6 +232,12 @@ grep '"event":"enter"' ~/.lark-channel/logs/$(date +%Y-%m-%d).log | tail -5
 **Claude 挂住不回复**：通常是 `claude` CLI 本身没登录，或者 session 指向了不存在的 cwd。发 `/status` 看当前状态；`/new` 重开会话往往就好。
 
 **Claude 子进程假死（卡片停在最后一帧不动）**：从 0.1.20 起支持 idle 探活：claude 一段时间没输出就被 SIGTERM kill，卡片末尾会标 "⏱ N 分钟无响应，已自动终止"。默认关闭。开启方式：`/config` 设全局值（分钟），或 `/timeout 10` 只对当前 session 生效；`/timeout off` 关掉某个 session 的探活；`/timeout default` 清掉 session 覆盖回退到全局。
+
+**卡片显示 agent 失败，可以重试吗？** 失败和 idle-timeout 卡片会在 bridge 保存了原始 run 的情况下显示一键重试按钮。也可以在同一个 chat / 话题里运行 `/retry <run-id>`。重试只允许在原会话范围内触发，避免一个失败任务被别的 chat 误重放。
+
+**怎么排查卡片卡住或 Cursor SDK worker 异常？** 运行 `/doctor <现象描述>`，它会把最近结构化日志和 run timeline 喂给 agent 自诊断。timeline 覆盖 `intake -> queue -> session -> agent -> card update -> done`，能帮助判断问题停在 Lark 更新、session 准备还是 agent 本身。只看 Cursor SDK worker 状态可以运行 `/workers` 或 `/doctor workers`。
+
+**Cursor SDK 返回没有细节的 `status=error` 怎么办？** bridge 会把这类不透明 Cursor SDK run 失败视为当前 SDK worker 的 fatal 错误：展示最终原因、丢弃该 worker，并在后续运行中使用新 worker/session。限流、网络和 stale-session 等可恢复路径会记录自动恢复步骤和最终失败原因。
 
 **图片发过去 Claude 说看不到**：升级到最新版，0.1.0 之前的版本有文件名去重 bug。
 

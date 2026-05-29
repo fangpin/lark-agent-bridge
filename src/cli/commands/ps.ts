@@ -1,7 +1,7 @@
 import { readAndPrune, resolveTarget, isAlive } from '../../runtime/registry';
 
 /**
- * Pretty-print the list of running lark-channel-bridge processes.
+ * Pretty-print the list of running lark-agent-bridge processes.
  *
  * `readAndPrune` drops dead entries but does not persist the pruned state —
  * fine for a read-only view. Persistence happens on the next `register` /
@@ -32,13 +32,13 @@ export function runPs(): void {
 
 export async function runStopCli(target: string | undefined): Promise<void> {
   if (!target) {
-    console.error('用法: lark-channel-bridge stop <bot id 或序号>');
+    console.error('用法: lark-agent-bridge stop <bot id 或序号>');
     process.exit(1);
   }
   const entry = resolveTarget(target);
   if (!entry) {
     console.error(`✗ 没找到匹配的 bot:${target}`);
-    console.error('  用 `lark-channel-bridge ps` 看可选目标。');
+    console.error('  用 `lark-agent-bridge ps` 看可选目标。');
     process.exit(1);
   }
   console.log(`正在关闭 bot ${entry.id}…`);

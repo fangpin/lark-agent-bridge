@@ -1,11 +1,10 @@
 {
-  "name": "@byted/ttadk-channel-bridge",
-  "version": "0.1.38",
+  "name": "lark-agent-bridge",
+  "version": "0.1.39",
   "description": "Bridge Feishu/Lark messenger with local CLI coding agents (Claude Code, ...)",
   "type": "module",
   "bin": {
-    "ttadk-channel-bridge": "bin/lark-channel-bridge.mjs",
-    "lark-channel-bridge": "bin/lark-channel-bridge.mjs"
+    "lark-agent-bridge": "bin/lark-agent-bridge.mjs"
   },
   "exports": {
     ".": {

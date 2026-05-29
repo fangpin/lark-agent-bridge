@@ -7,7 +7,7 @@ import { WorkspaceStore } from '../../src/workspace/store';
 const roots: string[] = [];
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'ttadk-workspace-store-'));
+  const root = await mkdtemp(join(tmpdir(), 'lark-agent-workspace-store-'));
   roots.push(root);
   return root;
 }

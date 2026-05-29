@@ -5,11 +5,11 @@ import { getSecret, listSecretIds, removeSecret, setSecret } from '../../config/
 /**
  * `secrets` CLI surface. Two intended consumers:
  *
- * 1. Humans: `lark-channel-bridge secrets set/list/remove` to manage the
+ * 1. Humans: `lark-agent-bridge secrets set/list/remove` to manage the
  *    encrypted keystore manually.
  *
  * 2. lark-cli (and any other tool implementing openclaw's exec-provider
- *    protocol): `lark-channel-bridge secrets get` reads a JSON-RPC request
+ *    protocol): `lark-agent-bridge secrets get` reads a JSON-RPC request
  *    from stdin and writes the decrypted secret to stdout. This is what
  *    `accounts.app.secret = { source: "exec", ... }` resolves through when
  *    lark-cli binds against ~/.lark-channel/config.json.
@@ -78,8 +78,8 @@ export async function runSecretsSet(
 ): Promise<void> {
   const id = secretId?.trim() || (appId ? `app-${appId}` : undefined);
   if (!id) {
-    console.error('用法: lark-channel-bridge secrets set --app-id <id>');
-    console.error('  或: lark-channel-bridge secrets set --id cursor-api-key');
+    console.error('用法: lark-agent-bridge secrets set --app-id <id>');
+    console.error('  或: lark-agent-bridge secrets set --id cursor-api-key');
     process.exit(1);
   }
   const label =
@@ -115,8 +115,8 @@ export async function runSecretsRemove(
 ): Promise<void> {
   const id = secretId?.trim() || (appId ? `app-${appId}` : undefined);
   if (!id) {
-    console.error('用法: lark-channel-bridge secrets remove --app-id <id>');
-    console.error('  或: lark-channel-bridge secrets remove --id cursor-api-key');
+    console.error('用法: lark-agent-bridge secrets remove --app-id <id>');
+    console.error('  或: lark-agent-bridge secrets remove --id cursor-api-key');
     process.exit(1);
   }
   const removed = await removeSecret(id);

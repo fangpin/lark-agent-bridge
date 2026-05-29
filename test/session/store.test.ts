@@ -7,7 +7,7 @@ import { SessionStore } from '../../src/session/store';
 const roots: string[] = [];
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'ttadk-session-store-'));
+  const root = await mkdtemp(join(tmpdir(), 'lark-agent-session-store-'));
   roots.push(root);
   return root;
 }

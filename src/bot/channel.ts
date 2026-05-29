@@ -151,7 +151,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     appId: cfg.accounts.app.id,
     appSecret,
     domain: cfg.accounts.app.tenant === 'lark' ? Domain.Lark : Domain.Feishu,
-    source: 'lark-channel-bridge',
+    source: 'lark-agent-bridge',
     loggerLevel: LoggerLevel.info,
     logger: buildQuietLogger(),
     policy: {

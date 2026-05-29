@@ -14,7 +14,7 @@ async function collectEvents(adapter: CursorAdapter, cwd: string): Promise<strin
 
 describe('CursorAdapter', () => {
   test('reports a missing working directory before spawning the cursor command', async () => {
-    const missingCwd = join(tmpdir(), `ttadk-missing-cwd-${process.pid}-${Date.now()}`);
+    const missingCwd = join(tmpdir(), `lark-agent-missing-cwd-${process.pid}-${Date.now()}`);
     const adapter = new CursorAdapter({ command: process.execPath });
 
     const messages = await collectEvents(adapter, missingCwd);

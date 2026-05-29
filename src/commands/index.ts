@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
@@ -111,6 +112,7 @@ const handlers: Record<string, Handler> = {
   '/ps': handlePs,
   '/workers': handleWorkers,
   '/retry': handleRetry,
+  '/shell': handleShell,
   '/exit': handleExit,
   '/doctor': handleDoctor,
   '/reconnect': handleReconnect,
@@ -129,6 +131,7 @@ const ADMIN_COMMANDS = new Set([
   '/reconnect',
   '/doctor',
   '/workers',
+  '/shell',
   '/cd',
   '/ws',
 ]);
@@ -658,6 +661,205 @@ async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
   await reply(ctx, `已重新排队上次任务（${entry.batch.length} 条消息，当前队列 ${size}）。`);
 }
 
+const SHELL_TIMEOUT_MS = 30_000;
+const SHELL_OUTPUT_MAX_CHARS = 12_000;
+
+interface ShellRunResult {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  timedOut: boolean;
+  truncated: boolean;
+}
+
+async function handleShell(args: string, ctx: CommandContext): Promise<void> {
+  const command = args.trim();
+  if (!command) {
+    await reply(ctx, '用法：`/shell <command>`\n在当前 cwd 执行 shell 命令，并回传 stdout/stderr。');
+    return;
+  }
+
+  const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  log.info('command', 'shell-start', {
+    cwd,
+    commandChars: command.length,
+    timeoutMs: SHELL_TIMEOUT_MS,
+  });
+
+  const result = await runShellCommand(command, cwd, SHELL_TIMEOUT_MS, SHELL_OUTPUT_MAX_CHARS);
+  log.info('command', 'shell-done', {
+    cwd,
+    durationMs: result.durationMs,
+    code: result.code,
+    signal: result.signal,
+    timedOut: result.timedOut,
+    truncated: result.truncated,
+  });
+
+  await reply(ctx, formatShellResult(command, cwd, result));
+}
+
+export function runShellCommand(
+  command: string,
+  cwd: string,
+  timeoutMs: number,
+  maxOutputChars: number,
+): Promise<ShellRunResult> {
+  return new Promise((resolveShell) => {
+    const startedAt = Date.now();
+    let timedOut = false;
+    let truncated = false;
+    let remaining = maxOutputChars;
+    let stdout = '';
+    let stderr = '';
+
+    const append = (target: 'stdout' | 'stderr', chunk: Buffer | string): void => {
+      if (remaining <= 0) {
+        truncated = true;
+        return;
+      }
+      const text = String(chunk);
+      const slice = text.slice(0, remaining);
+      remaining -= slice.length;
+      if (slice.length < text.length) truncated = true;
+      if (target === 'stdout') stdout += slice;
+      else stderr += slice;
+    };
+
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(command, {
+        cwd,
+        env: process.env,
+        shell: true,
+        detached: process.platform !== 'win32',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      resolveShell({
+        code: null,
+        signal: null,
+        stdout,
+        stderr: err instanceof Error ? err.message : String(err),
+        durationMs: Date.now() - startedAt,
+        timedOut,
+        truncated,
+      });
+      return;
+    }
+
+    child.stdout?.on('data', (chunk: Buffer | string) => append('stdout', chunk));
+    child.stderr?.on('data', (chunk: Buffer | string) => append('stderr', chunk));
+
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    const killTimer = setTimeout(() => {
+      timedOut = true;
+      forceKillTimer = terminateShellProcess(child.pid);
+    }, timeoutMs);
+
+    child.on('error', (err) => {
+      clearTimeout(killTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      stderr += `${stderr ? '\n' : ''}${err instanceof Error ? err.message : String(err)}`;
+      resolveShell({
+        code: null,
+        signal: null,
+        stdout,
+        stderr,
+        durationMs: Date.now() - startedAt,
+        timedOut,
+        truncated,
+      });
+    });
+
+    child.on('close', (code, signal) => {
+      clearTimeout(killTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      resolveShell({
+        code,
+        signal,
+        stdout,
+        stderr,
+        durationMs: Date.now() - startedAt,
+        timedOut,
+        truncated,
+      });
+    });
+  });
+}
+
+function terminateShellProcess(pid: number | undefined): NodeJS.Timeout | undefined {
+  if (!pid) return undefined;
+  try {
+    if (process.platform === 'win32') {
+      process.kill(pid, 'SIGTERM');
+    } else {
+      process.kill(-pid, 'SIGTERM');
+    }
+  } catch {
+    /* process already exited */
+  }
+  const forceKillTimer = setTimeout(() => {
+    try {
+      if (process.platform === 'win32') {
+        process.kill(pid, 'SIGKILL');
+      } else {
+        process.kill(-pid, 'SIGKILL');
+      }
+    } catch {
+      /* process already exited */
+    }
+  }, 2000).unref();
+  return forceKillTimer;
+}
+
+function formatShellResult(command: string, cwd: string, result: ShellRunResult): string {
+  const status = result.timedOut
+    ? `timed out after ${Math.round(SHELL_TIMEOUT_MS / 1000)}s`
+    : result.signal
+      ? `signal ${result.signal}`
+      : `exit ${result.code ?? 'unknown'}`;
+  const notes = [
+    result.truncated ? `输出已截断到 ${SHELL_OUTPUT_MAX_CHARS} 字符。` : '',
+    `duration: ${formatDuration(result.durationMs)}`,
+  ].filter(Boolean);
+  return [
+    `**/shell ${status}**`,
+    '',
+    `cwd: \`${escapeInlineCode(cwd)}\``,
+    `command: \`${escapeInlineCode(command)}\``,
+    notes.length > 0 ? notes.join('\n') : '',
+    '',
+    '**stdout**',
+    fencedOutput(result.stdout),
+    '',
+    '**stderr**',
+    fencedOutput(result.stderr),
+  ]
+    .filter((line) => line !== '')
+    .join('\n');
+}
+
+function fencedOutput(text: string): string {
+  const body = text.trimEnd() || '(empty)';
+  return ['```text', escapeFence(body), '```'].join('\n');
+}
+
+function escapeFence(text: string): string {
+  return text.replace(/```/g, '``\u200b`');
+}
+
+function escapeInlineCode(text: string): string {
+  return text.replace(/`/g, '\u02cb');
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
 async function handleExit(args: string, ctx: CommandContext): Promise<void> {
   const target = args.trim();
   if (!target) {
@@ -729,7 +931,7 @@ async function handleReconnect(_args: string, ctx: CommandContext): Promise<void
   }
 }
 
-const DOCTOR_INSTRUCTIONS = `你是 lark-channel-bridge 的诊断助理。下面会给你两段输入:
+const DOCTOR_INSTRUCTIONS = `你是 lark-agent-bridge 的诊断助理。下面会给你两段输入:
 1. 用户的故障描述
 2. 最近的 run timeline 和运行日志(JSON line 格式,旧→新)
 

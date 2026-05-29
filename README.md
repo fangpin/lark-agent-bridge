@@ -1,6 +1,6 @@
-# ttadk-channel-bridge
+# lark-agent-bridge
 
-A lightweight bot that bridges Feishu / Lark messenger with your local coding-agent CLI (Claude Code, TTADK-wrapped Claude, Cursor Agent, ...). Run one command, scan a QR code to bind a Lark app, and talk to the agent from chat — read screenshots, edit code, anything you'd do at the terminal.
+A lightweight bot that bridges Feishu / Lark messenger with your local coding-agent CLI (Claude Code, Cursor Agent, or another compatible wrapper). Run one command, scan a QR code to bind a Lark app, and talk to the agent from chat — read screenshots, edit code, anything you'd do at the terminal.
 
 [中文 README](./README.zh.md)
 
@@ -18,27 +18,27 @@ A lightweight bot that bridges Feishu / Lark messenger with your local coding-ag
 ## Prerequisites
 
 - Node.js **>= 20**
-- A supported coding-agent command installed and logged in. By default the bridge runs `claude`; it can also use wrappers such as `ttadk code -t claude`, or Cursor CLI's `agent` command.
+- A supported coding-agent command installed and logged in. By default the bridge runs `claude`; it can also use compatible wrappers through `agentCommand`, or Cursor CLI's `agent` command.
 - A Lark / Feishu **PersonalAgent** app (the QR-code wizard on first launch can create one for you).
 
 ## Install
 
 ```bash
-NPM_CONFIG_REGISTRY=http://bnpm.byted.org npm i -g @byted/ttadk-channel-bridge
+npm i -g lark-agent-bridge
 # or
-NPM_CONFIG_REGISTRY=http://bnpm.byted.org pnpm add -g @byted/ttadk-channel-bridge
+pnpm add -g lark-agent-bridge
 ```
 
-Run directly from ByteDance npm:
+Run without installing:
 
 ```bash
-NPM_CONFIG_REGISTRY=http://bnpm.byted.org npx -y @byted/ttadk-channel-bridge@latest start
+npx -y lark-agent-bridge@latest start
 ```
 
 ## First run
 
 ```bash
-ttadk-channel-bridge start
+lark-agent-bridge start
 ```
 
 The first run detects there's no app configured and **opens a QR-code wizard**:
@@ -63,17 +63,17 @@ The wizard creates the app shell, but you still need to confirm a few things on 
 - `im.message.reaction.created_v1` / `deleted_v1` (optional)
 - `im.chat.member.bot.added_v1` (optional)
 
-After enabling those, run `ttadk-channel-bridge start` again. Once you see `✓ Connected`, find the bot in Feishu / Lark and start chatting.
+After enabling those, run `lark-agent-bridge start` again. Once you see `✓ Connected`, find the bot in Feishu / Lark and start chatting.
 
 ## Commands
 
 ### Host CLI
 
 ```
-ttadk-channel-bridge start [-c <config>]   Start the bot
-ttadk-channel-bridge ps                    List all running start processes on this machine
-ttadk-channel-bridge stop <id|#>           Stop a start process (SIGTERM, SIGKILL after 2s)
-ttadk-channel-bridge --help                List all commands
+lark-agent-bridge start [-c <config>]   Start the bot
+lark-agent-bridge ps                    List all running start processes on this machine
+lark-agent-bridge stop <id|#>           Stop a start process (SIGTERM, SIGKILL after 2s)
+lark-agent-bridge --help                List all commands
 ```
 
 > When the same app is started multiple times, Lark's open platform routes events to one of the live WebSocket connections at random. `start` detects existing processes for the same app and (in a TTY) prompts: `[c]ontinue / [k]ill old / [a]bort`. In non-TTY mode it warns and continues.
@@ -95,6 +95,7 @@ ttadk-channel-bridge --help                List all commands
 | `/stop` | Stop the run in progress (also the `⏹` button on the card) |
 | `/timeout [N\|off\|default]` | Idle-watchdog (minutes) for the current session. `/config` sets the global default. See FAQ below. |
 | `/retry <run-id>` | Replay a recent failed or timed-out run. Failed cards include a one-click retry button. |
+| `/shell <command>` | Run a shell command in the current cwd and return stdout/stderr. Admin-only when admins are configured; capped at 30s and 12k chars. |
 | `/workers` | Show Cursor SDK worker-pool health: status, queue count, current run, session/cwd, and recent error. |
 | `/ps` | List all `start` processes on this host, marking the one replying |
 | `/exit <id\|#>` | Stop a `start` process (your own → graceful; another's → SIGTERM) |
@@ -117,26 +118,26 @@ ttadk-channel-bridge --help                List all commands
 | `~/.lark-channel/media/<chatId>/` | Downloaded images / files, cleaned up after 24h |
 | `~/.lark-channel/logs/YYYY-MM-DD.log` | Structured run logs (JSONL), rotated daily; older than 7 days are pruned at startup (`LARK_CHANNEL_LOG_DAYS` env var overrides). `/doctor` reads these. |
 
-> Upgrading from before 0.1.11? Run `ttadk-channel-bridge migrate` once — it moves anything under the legacy `~/.config/lark-channel-bridge/` and `~/.cache/lark-channel-bridge/` paths to the new location and upgrades `config.json` to the new schema.
+> Upgrading from before 0.1.11? Run `lark-agent-bridge migrate` once — it moves anything under the legacy `~/.config/lark-channel-bridge/` and `~/.cache/lark-channel-bridge/` paths to the new location and upgrades `config.json` to the new schema.
 
 ### Custom agent command
 
-By default the bridge uses the Claude backend and appends Claude Code arguments to `claude`. To use a compatible wrapper such as TTADK, add `preferences.agentCommand` to `~/.lark-channel/config.json`:
+By default the bridge uses the Claude backend and appends Claude Code arguments to `claude`. To use a compatible wrapper, add `preferences.agentCommand` to `~/.lark-channel/config.json`:
 
 ```json
 {
   "preferences": {
     "agentCommand": {
       "backend": "claude",
-      "command": "ttadk",
-      "args": ["code", "-t", "claude", "-m", "gpt-5.5"],
-      "claudeArgsOption": "-a"
+      "command": "my-claude-wrapper",
+      "args": ["--model", "gpt-5.5"],
+      "claudeArgsOption": "--claude-args"
     }
   }
 }
 ```
 
-With `claudeArgsOption`, the bridge safely joins Claude Code arguments and runs commands like `ttadk code -t claude -a "-p ... --output-format stream-json --verbose ..."`. Without `claudeArgsOption`, it appends Claude args as normal argv entries. If `agentCommand` is omitted, it keeps using plain `claude`.
+With `claudeArgsOption`, the bridge safely joins Claude Code arguments and runs commands like `my-claude-wrapper --model gpt-5.5 --claude-args "-p ... --output-format stream-json --verbose ..."`. Without `claudeArgsOption`, it appends Claude args as normal argv entries. If `agentCommand` is omitted, it keeps using plain `claude`.
 
 To use Cursor CLI, make sure the `agent` command is installed, logged in, and available on `PATH`, then configure the Cursor backend:
 
@@ -183,7 +184,7 @@ DMs are unaffected; only listed groups trigger responses:
 - **Admins**: your own `open_id`
 - Other two blank
 
-Others running `/account`, `/config`, `/exit`, `/reconnect`, `/doctor`, `/cd`, or `/ws` get a `❌ 此命令仅管理员可用` reply. Normal conversation (asking the bot to do things) is unaffected.
+Others running `/account`, `/config`, `/exit`, `/reconnect`, `/doctor`, `/workers`, `/shell`, `/cd`, or `/ws` get a `❌ 此命令仅管理员可用` reply. Normal conversation (asking the bot to do things) is unaffected.
 
 **Lock everything down**
 

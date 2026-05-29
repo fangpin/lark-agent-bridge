@@ -13,7 +13,7 @@ import { runStart } from './commands/start';
 const program = new Command();
 
 program
-  .name('ttadk-channel-bridge')
+  .name('lark-agent-bridge')
   .description('Bridge Feishu/Lark messenger with local CLI coding agents')
   .version(pkg.version, '-v, --version');
 
@@ -39,7 +39,7 @@ program
 
 program
   .command('ps')
-  .description('List running lark-channel-bridge start processes (this machine)')
+  .description('List running lark-agent-bridge start processes (this machine)')
   .action(() => {
     runPs();
   });

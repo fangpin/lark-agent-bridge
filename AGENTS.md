@@ -4,7 +4,7 @@ Guidance for AI agents working in this repository.
 
 ## Project Overview
 
-`ttadk-channel-bridge` is a Node.js/TypeScript CLI that bridges Feishu/Lark messages to local coding agents such as Claude Code, TTADK-wrapped Claude, and Cursor Agent. It streams agent output into Lark cards, persists per-chat sessions, supports multiple workspaces, downloads media for local agent access, and exposes host plus in-chat slash commands.
+`lark-agent-bridge` is a Node.js/TypeScript CLI that bridges Feishu/Lark messages to local coding agents such as Claude Code, Cursor Agent, or compatible wrappers. It streams agent output into Lark cards, persists per-chat sessions, supports multiple workspaces, downloads media for local agent access, and exposes host plus in-chat slash commands.
 
 The package is ESM-only (`"type": "module"`) and requires Node.js 20 or newer.
 
@@ -42,6 +42,7 @@ Use `npm`, not `pnpm`, unless the user explicitly asks otherwise.
 - After code changes, especially behavior or feature changes, explicitly consider whether `README.md`, `README.zh.md`, or `AGENTS.md` need updates before declaring the work complete.
 - Do not commit local credentials or runtime state. Files under `~/.lark-channel/` are user data, not repository fixtures.
 - Treat `dist/`, `node_modules/`, local logs, and generated runtime data as build/runtime artifacts.
+- Keep host-executing slash commands such as `/shell` admin-gated, bounded by time/output limits, and careful about logs: record diagnostic metadata, not full command output.
 
 ## Testing Expectations
 

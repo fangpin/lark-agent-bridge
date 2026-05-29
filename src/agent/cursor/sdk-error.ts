@@ -13,7 +13,7 @@ export interface SdkErrorDescription {
 
 const AUTH_HINT =
   'Cursor 需要 API Key：在 config.json 配置 preferences.agentCursorApiKey（推荐加密：' +
-  'lark-channel-bridge secrets set --id cursor-api-key），或 export CURSOR_API_KEY；' +
+  'lark-agent-bridge secrets set --id cursor-api-key），或 export CURSOR_API_KEY；' +
   '也可将 agentCursorRuntime 设为 "cli" 以使用 `agent login` 会话。';
 
 function getCause(err: unknown): unknown {
