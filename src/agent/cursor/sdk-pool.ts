@@ -10,8 +10,8 @@ import type { SdkWorkerConfig } from './sdk-worker';
 const DEFAULT_POOL_SIZE = 10;
 
 type WorkerRequest =
-  | { type: 'ensure'; id: string; cwd: string; agentId?: string }
-  | { type: 'run'; id: string; prompt: string }
+  | { type: 'ensure'; id: string; cwd: string; agentId?: string; allowReplacement?: boolean }
+  | { type: 'run'; id: string; prompt: string; allowReplacement?: boolean }
   | { type: 'stop'; id: string }
   | { type: 'shutdown' };
 
@@ -40,10 +40,29 @@ interface PoolEntry {
 
 interface WorkerHandle {
   pid: number | null;
-  ensure(cwd: string, agentId: string | undefined, reqId: string): Promise<string | undefined>;
-  run(opts: AgentRunOptions, runId: string, skipEnsure?: boolean): AgentRun;
+  ensure(
+    cwd: string,
+    agentId: string | undefined,
+    reqId: string,
+    allowReplacement?: boolean,
+  ): Promise<string | undefined>;
+  run(opts: SdkRunOptions, runId: string, skipEnsure?: boolean): AgentRun;
   stopRun(runId: string): void;
   shutdown(): Promise<void>;
+}
+
+type SdkRunOptions = AgentRunOptions & { allowSessionReplacement?: boolean };
+type WorkerFactory = (
+  script: string,
+  sdkConfig: SdkWorkerConfig,
+  onDead?: () => void,
+) => WorkerHandle;
+
+interface RunningAttempt {
+  entry: PoolEntry;
+  inner: AgentRun;
+  events: AsyncIterable<AgentEvent>;
+  released: Promise<void>;
 }
 
 /** True when the pooled worker already holds the target Cursor agent session. */
@@ -80,6 +99,7 @@ export class CursorSdkPool {
   private readonly sdkConfig: SdkWorkerConfig;
   private readonly maxSize: number;
   private readonly workerScript: string;
+  private readonly workerFactory: WorkerFactory;
   private nextRunId = 1;
   private nextReqId = 1;
 
@@ -87,11 +107,13 @@ export class CursorSdkPool {
     spawnOpts: CursorSpawnOptions,
     sdkConfig: SdkWorkerConfig,
     maxSize = DEFAULT_POOL_SIZE,
+    workerFactory: WorkerFactory = createWorker,
   ) {
     this.spawnOpts = spawnOpts;
     this.sdkConfig = sdkConfig;
     this.maxSize = Math.max(1, maxSize);
     this.workerScript = resolveWorkerScript();
+    this.workerFactory = workerFactory;
   }
 
   async ensureAgent(cwd: string, agentId?: string): Promise<string | undefined> {
@@ -126,6 +148,37 @@ export class CursorSdkPool {
       return spawnCursorRun(this.spawnOpts, opts);
     }
     const runId = String(this.nextRunId++);
+    let current = this.startAttempt(entry, opts, runId);
+    const stopGraceMs = opts.stopGraceMs ?? 5000;
+    return {
+      events: this.resumeOnceAfterFatalWorkerError(current, opts, runId, (attempt) => {
+        current = attempt;
+      }),
+      stop: async () => {
+        const attempt = current;
+        attempt.entry.stopping = true;
+        try {
+          await attempt.inner.stop();
+          const settled = await waitFor(attempt.released, stopGraceMs);
+          if (settled) return;
+        } finally {
+          attempt.entry.stopping = false;
+        }
+        log.warn('agent', 'sdk-pool-stop-timeout-evict', {
+          key: attempt.entry.key,
+          sessionId: attempt.entry.agentId,
+          runId,
+          pid: attempt.entry.worker.pid,
+          graceMs: stopGraceMs,
+          reason: 'stop did not settle run stream before grace timeout',
+        });
+        await this.removeEntryFor(attempt.entry);
+      },
+      waitForExit: (timeoutMs) => current.inner.waitForExit(timeoutMs),
+    };
+  }
+
+  private startAttempt(entry: PoolEntry, opts: SdkRunOptions, runId: string): RunningAttempt {
     entry.pendingRuns += 1;
     entry.busy = true;
     entry.lastUsed = Date.now();
@@ -140,6 +193,7 @@ export class CursorSdkPool {
       poolKey: opts.poolKey ?? null,
       pid: entry.worker.pid,
       skipEnsure,
+      allowSessionReplacement: opts.allowSessionReplacement !== false,
     });
     const inner = entry.worker.run(opts, runId, skipEnsure);
     let markReleased!: () => void;
@@ -149,30 +203,78 @@ export class CursorSdkPool {
     const events = skipEnsure
       ? this.withInitialEvent(cachedSessionReadyEvent(entry.agentId), inner.events)
       : inner.events;
-    const stopGraceMs = opts.stopGraceMs ?? 5000;
     return {
+      entry,
+      inner,
       events: this.releaseWhenDone(entry, events, markReleased),
-      stop: async () => {
-        entry.stopping = true;
-        try {
-          await inner.stop();
-          const settled = await waitFor(released, stopGraceMs);
-          if (settled) return;
-        } finally {
-          entry.stopping = false;
-        }
-        log.warn('agent', 'sdk-pool-stop-timeout-evict', {
-          key: entry.key,
-          sessionId: entry.agentId,
-          runId,
-          pid: entry.worker.pid,
-          graceMs: stopGraceMs,
-          reason: 'stop did not settle run stream before grace timeout',
-        });
-        await this.removeEntryFor(entry);
-      },
-      waitForExit: (timeoutMs) => inner.waitForExit(timeoutMs),
+      released,
     };
+  }
+
+  private async *resumeOnceAfterFatalWorkerError(
+    firstAttempt: RunningAttempt,
+    opts: AgentRunOptions,
+    runId: string,
+    setCurrent: (attempt: RunningAttempt) => void,
+  ): AsyncGenerator<AgentEvent> {
+    let attempt = firstAttempt;
+    let recovered = false;
+    let sessionId = opts.sessionId ?? attempt.entry.agentId;
+
+    for (;;) {
+      let fatalWorkerError: Extract<AgentEvent, { type: 'error' }> | undefined;
+      for await (const event of attempt.events) {
+        if ((event.type === 'system' || event.type === 'done') && event.sessionId) {
+          sessionId = event.sessionId;
+        }
+        if (!recovered && isRecoverableFatalWorkerEvent(event)) {
+          fatalWorkerError = event;
+          break;
+        }
+        yield event;
+      }
+
+      if (!fatalWorkerError) return;
+      recovered = true;
+
+      if (!sessionId) {
+        yield {
+          ...fatalWorkerError,
+          message: withFatalRecoveryFailure(
+            fatalWorkerError.message,
+            '无法确定原 SDK session，已停止自动继续',
+          ),
+        };
+        return;
+      }
+
+      log.warn('agent', 'sdk-pool-resume-after-fatal-worker-error', {
+        runId,
+        sessionId,
+        previousPid: attempt.entry.worker.pid,
+      });
+      await attempt.released;
+
+      const retryOpts: SdkRunOptions = {
+        ...opts,
+        sessionId,
+        allowSessionReplacement: false,
+      };
+      const nextEntry = this.acquireEntrySync(sessionPoolKey(sessionId), retryOpts);
+      if (!nextEntry) {
+        yield {
+          ...fatalWorkerError,
+          message: withFatalRecoveryFailure(
+            fatalWorkerError.message,
+            '无法启动新的 SDK worker，已停止自动继续',
+          ),
+        };
+        return;
+      }
+
+      attempt = this.startAttempt(nextEntry, retryOpts, runId);
+      setCurrent(attempt);
+    }
   }
 
   noteSessionId(opts: AgentRunOptions, sessionId: string): void {
@@ -288,7 +390,7 @@ export class CursorSdkPool {
     }
     void this.evictIfNeeded();
     let entry!: PoolEntry;
-    const worker = createWorker(this.workerScript, this.sdkConfig, () => {
+    const worker = this.workerFactory(this.workerScript, this.sdkConfig, () => {
       if (this.entries.get(entry.key) === entry) {
         this.entries.delete(entry.key);
         log.warn('agent', 'sdk-pool-worker-died', { key: entry.key, pid: worker.pid });
@@ -484,7 +586,7 @@ function createWorker(
     const exitMsg = `sdk worker exited (${code ?? signal ?? 'unknown'})`;
     log.warn('agent', 'sdk-worker-error', { message: exitMsg });
     for (const [id, handlers] of pendingRuns) {
-      handlers.fail(exitMsg);
+      handlers.fail(exitMsg, true);
       pendingRuns.delete(id);
     }
     for (const [id, handlers] of pendingEnsures) {
@@ -495,7 +597,7 @@ function createWorker(
 
   return {
     pid: child.pid ?? null,
-    ensure(cwd, agentId, reqId) {
+    ensure(cwd, agentId, reqId, allowReplacement = true) {
       return new Promise<string | undefined>((resolve, reject) => {
         pendingEnsures.set(reqId, {
           resolve: (id) => resolve(id),
@@ -504,7 +606,15 @@ function createWorker(
             resolve(undefined);
           },
         });
-        if (!ipcSend(child, { type: 'ensure', id: reqId, cwd, agentId } satisfies WorkerRequest)) {
+        if (
+          !ipcSend(child, {
+            type: 'ensure',
+            id: reqId,
+            cwd,
+            agentId,
+            allowReplacement,
+          } satisfies WorkerRequest)
+        ) {
           reject('sdk worker ipc closed');
         }
         setTimeout(() => {
@@ -562,6 +672,7 @@ function createWorker(
                 id: ensureId,
                 cwd,
                 agentId: opts.sessionId,
+                allowReplacement: opts.allowSessionReplacement !== false,
               } satisfies WorkerRequest)
             ) {
               pendingEnsures.delete(ensureId);
@@ -576,13 +687,23 @@ function createWorker(
               resolve(undefined);
             }, 120_000);
           });
-          if (ensuredAgentId && ensuredAgentId !== opts.sessionId) {
+          if (
+            ensuredAgentId &&
+            (ensuredAgentId !== opts.sessionId || opts.allowSessionReplacement === false)
+          ) {
             pushEvent({ type: 'system', sessionId: ensuredAgentId });
           }
         }
 
         if (!errorMsg) {
-          if (!ipcSend(child, { type: 'run', id: runId, prompt: opts.prompt } satisfies WorkerRequest)) {
+          if (
+            !ipcSend(child, {
+              type: 'run',
+              id: runId,
+              prompt: opts.prompt,
+              allowReplacement: opts.allowSessionReplacement !== false,
+            } satisfies WorkerRequest)
+          ) {
             fail('sdk worker ipc closed');
           }
         }
@@ -635,6 +756,24 @@ function createWorker(
   };
 }
 
+function isRecoverableFatalWorkerEvent(event: AgentEvent): event is Extract<AgentEvent, { type: 'error' }> {
+  return event.type === 'error' && Boolean(event.fatal) && isPoisonedSdkWorkerError(event.message);
+}
+
 function isPoisonedSdkWorkerError(message: string): boolean {
-  return message.includes('Cursor returned no error detail') || message.includes('已自动丢弃当前 SDK worker');
+  return (
+    message.includes('Cursor returned no error detail') ||
+    message.includes('已自动丢弃当前 SDK worker') ||
+    message.includes('sdk worker exited')
+  );
+}
+
+function withFatalRecoveryFailure(originalMessage: string, reason: string): string {
+  return [
+    `SDK worker fatal 后自动恢复失败：${reason}。`,
+    '已保留原 session，不会自动创建 replacement session 或无上下文重放。',
+    '可点击一键重试，或发送 `/new` 开新 session 后再试。',
+    '',
+    `原始错误：${originalMessage}`,
+  ].join('\n');
 }
