@@ -41,6 +41,12 @@ npx -y lark-agent-bridge@latest start
 lark-agent-bridge start
 ```
 
+Or run it directly with npx:
+
+```bash
+npx -y lark-agent-bridge@latest start
+```
+
 The first run detects there's no app configured and **opens a QR-code wizard**:
 
 1. A QR code renders in your terminal.
@@ -71,6 +77,7 @@ After enabling those, run `lark-agent-bridge start` again. Once you see `✓ Con
 
 ```
 lark-agent-bridge start [-c <config>]   Start the bot
+npx -y lark-agent-bridge@latest start  Start without installing
 lark-agent-bridge ps                    List all running start processes on this machine
 lark-agent-bridge stop <id|#>           Stop a start process (SIGTERM, SIGKILL after 2s)
 lark-agent-bridge --help                List all commands

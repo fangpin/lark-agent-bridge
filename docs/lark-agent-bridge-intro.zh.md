@@ -33,6 +33,12 @@ npm i -g lark-agent-bridge
 lark-agent-bridge start
 ```
 
+也可以不安装，直接用 npx 启动：
+
+```bash
+npx -y lark-agent-bridge@latest start
+```
+
 首次启动时，工具会进入扫码向导，帮助你绑定一个飞书 / Lark PersonalAgent 应用。完成应用配置和必要权限后，你就可以在私聊里直接发消息，或在群里 `@bot` 触发 agent。
 
 默认情况下，bridge 会调用本地的 `claude` 命令。如果你想使用 Cursor Agent，可以在配置里改成 Cursor backend：

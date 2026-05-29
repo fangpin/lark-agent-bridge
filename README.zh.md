@@ -41,6 +41,12 @@ npx -y lark-agent-bridge@latest start
 lark-agent-bridge start
 ```
 
+也可以用 npx 直接启动，不需要全局安装：
+
+```bash
+npx -y lark-agent-bridge@latest start
+```
+
 第一次跑会检测到没配置应用，**自动进入扫码向导**：
 
 1. 终端渲染一个二维码
@@ -71,6 +77,7 @@ lark-agent-bridge start
 
 ```
 lark-agent-bridge start [-c <config>]   启动 bot
+npx -y lark-agent-bridge@latest start  不安装，直接启动
 lark-agent-bridge ps                    列出本机所有正在跑的 start 进程
 lark-agent-bridge stop <id|#>           终止指定 start 进程（SIGTERM，2s 后 SIGKILL）
 lark-agent-bridge --help                列所有命令
