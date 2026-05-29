@@ -23,6 +23,9 @@ export type Block =
   | { kind: 'tool'; tool: ToolEntry };
 
 export type FooterStatus = 'starting' | 'thinking' | 'tool_running' | 'streaming' | null;
+export type ActivityEntry =
+  | { kind: 'phase'; phase: Exclude<FooterStatus, null>; label?: string; detail?: string }
+  | { kind: 'tool'; tool: ToolEntry };
 export type Terminal = 'running' | 'done' | 'interrupted' | 'error' | 'idle_timeout';
 
 export interface RunState {
@@ -31,6 +34,7 @@ export interface RunState {
   todos: TodoItem[];
   reasoning: { content: string; active: boolean };
   footer: FooterStatus;
+  activity?: ActivityEntry;
   terminal: Terminal;
   errorMsg?: string;
   startedAt: number;
@@ -49,6 +53,7 @@ export function createInitialState(runId?: string): RunState {
     todos: [],
     reasoning: { content: '', active: false },
     footer: 'starting',
+    activity: { kind: 'phase', phase: 'starting' },
     terminal: 'running',
     startedAt: now,
     updatedAt: now,
@@ -60,7 +65,7 @@ export const initialState: RunState = createInitialState();
 
 export function markAgentReady(state: RunState): RunState {
   if (state.footer !== 'starting') return state;
-  return touch({ ...state, footer: 'thinking' });
+  return touch({ ...state, footer: 'thinking', activity: { kind: 'phase', phase: 'thinking' } });
 }
 
 function closeStreamingText(blocks: Block[]): Block[] {
@@ -80,6 +85,7 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
           blocks: [...state.blocks.slice(0, -1), next],
           reasoning: { ...state.reasoning, active: false },
           footer: 'streaming',
+          activity: { kind: 'phase', phase: 'streaming' },
         });
       }
       return touch({
@@ -87,6 +93,7 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         blocks: [...state.blocks, { kind: 'text', content: evt.delta, streaming: true }],
         reasoning: { ...state.reasoning, active: false },
         footer: 'streaming',
+        activity: { kind: 'phase', phase: 'streaming' },
       });
     }
 
@@ -95,6 +102,25 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         ...state,
         reasoning: { content: state.reasoning.content + evt.delta, active: true },
         footer: 'thinking',
+        activity: {
+          kind: 'phase',
+          phase: 'thinking',
+          detail: summarizeActivityText(evt.delta),
+        },
+      });
+    }
+
+    case 'progress': {
+      const phase: Exclude<FooterStatus, null> = evt.phase ?? state.footer ?? 'thinking';
+      return touch({
+        ...state,
+        footer: phase,
+        activity: {
+          kind: 'phase',
+          phase,
+          label: summarizeActivityText(evt.label),
+          detail: summarizeActivityText(evt.detail),
+        },
       });
     }
 
@@ -112,6 +138,7 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
           todos: applyTodoWrite(state.todos, todos),
           reasoning: { ...state.reasoning, active: false },
           footer: 'tool_running',
+          activity: { kind: 'phase', phase: 'tool_running', label: '更新任务看板' },
         });
       }
       return touch({
@@ -119,26 +146,36 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         blocks: [...closeStreamingText(state.blocks), { kind: 'tool', tool }],
         reasoning: { ...state.reasoning, active: false },
         footer: 'tool_running',
+        activity: { kind: 'tool', tool },
       });
     }
 
     case 'tool_result': {
+      let completedTool: ToolEntry | undefined;
       const blocks = state.blocks.map((b) => {
         if (b.kind !== 'tool' || b.tool.id !== evt.id) return b;
+        completedTool = {
+          ...b.tool,
+          status: evt.isError ? ('error' as const) : ('done' as const),
+          output: evt.output,
+        };
         return {
           ...b,
-          tool: {
-            ...b.tool,
-            status: evt.isError ? ('error' as const) : ('done' as const),
-            output: evt.output,
-          },
+          tool: completedTool,
         };
       });
-      return touch({ ...state, blocks });
+      return touch({
+        ...state,
+        blocks,
+        activity:
+          completedTool && state.activity?.kind === 'tool' && state.activity.tool.id === evt.id
+            ? { kind: 'tool', tool: completedTool }
+            : state.activity,
+      });
     }
 
     case 'error': {
-      return touch({ ...state, terminal: 'error', errorMsg: evt.message, footer: null });
+      return touch({ ...state, terminal: 'error', errorMsg: evt.message, footer: null, activity: undefined });
     }
 
     case 'done': {
@@ -148,6 +185,7 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         reasoning: { ...state.reasoning, active: false },
         terminal: 'done',
         footer: null,
+        activity: undefined,
       });
     }
 
@@ -163,6 +201,7 @@ export function markInterrupted(state: RunState): RunState {
     reasoning: { ...state.reasoning, active: false },
     terminal: 'interrupted',
     footer: null,
+    activity: undefined,
   });
 }
 
@@ -173,6 +212,7 @@ export function markIdleTimeout(state: RunState, minutes: number): RunState {
     reasoning: { ...state.reasoning, active: false },
     terminal: 'idle_timeout',
     footer: null,
+    activity: undefined,
     idleTimeoutMinutes: minutes,
   });
 }
@@ -185,6 +225,7 @@ export function finalizeIfRunning(state: RunState): RunState {
     reasoning: { ...state.reasoning, active: false },
     terminal: 'done',
     footer: null,
+    activity: undefined,
   });
 }
 
@@ -240,4 +281,11 @@ function applyTodoWrite(
     byId.set(todo.id, todo);
   }
   return Array.from(byId.values());
+}
+
+function summarizeActivityText(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const oneLine = value.replace(/\s+/g, ' ').trim();
+  if (!oneLine) return undefined;
+  return oneLine.length > 140 ? `${oneLine.slice(0, 140)}…` : oneLine;
 }

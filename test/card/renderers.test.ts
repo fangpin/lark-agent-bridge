@@ -16,7 +16,7 @@ function doneState(): RunState {
 
 describe('run renderers', () => {
   test('shows a starting footer before the agent is ready', () => {
-    expect(renderText({ ...initialState })).toBe('_🚀 正在启动 Agent…_');
+    expect(renderText({ ...initialState })).toBe('_🚀 正在启动 Agent_');
   });
 
   test('keeps a completed footer in markdown reply mode', () => {
@@ -182,5 +182,31 @@ describe('run renderers', () => {
       { id: 'explore', content: '梳理代码路径', status: 'completed' },
       { id: 'verify', content: '运行测试', status: 'pending' },
     ]);
+  });
+
+  test('shows the current tool summary in the running card footer', () => {
+    const state = reduce(initialState, {
+      type: 'tool_use',
+      id: 'tool-1',
+      name: 'Bash',
+      input: { command: 'npm test' },
+    });
+    const card = renderCard(state) as { body: { elements: Array<Record<string, unknown>> } };
+
+    expect(card.body.elements.at(-2)).toMatchObject({
+      tag: 'markdown',
+      content: '⏳ **终端** — npm test',
+      text_size: 'notation',
+    });
+  });
+
+  test('renders progress text as a replaceable markdown footer', () => {
+    const state = reduce(initialState, {
+      type: 'progress',
+      phase: 'thinking',
+      label: 'Inspecting workspace',
+    });
+
+    expect(renderText(state)).toBe('_🧠 Inspecting workspace_');
   });
 });

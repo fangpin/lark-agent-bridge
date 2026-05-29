@@ -91,6 +91,10 @@ export interface CommandContext {
 }
 
 type Handler = (args: string, ctx: CommandContext) => Promise<void>;
+interface ParsedCommand {
+  cmd: string;
+  args: string;
+}
 
 const handlers: Record<string, Handler> = {
   '/new': handleNew,
@@ -134,27 +138,36 @@ function isAdminCommand(cmd: string): boolean {
 }
 
 export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
-  const trimmed = ctx.msg.content.trim();
-  if (!trimmed.startsWith('/')) return false;
-  const parts = trimmed.split(/\s+/);
-  const cmd = parts[0] ?? '';
-  const args = parts.slice(1).join(' ');
-  const h = handlers[cmd];
+  const parsed = parseCommandText(ctx.msg.content);
+  if (!parsed) return false;
+  const h = handlers[parsed.cmd];
   if (!h) return false;
-  if (isAdminCommand(cmd) && !isAdmin(ctx.controls.cfg, ctx.msg.senderId)) {
+  if (isAdminCommand(parsed.cmd) && !isAdmin(ctx.controls.cfg, ctx.msg.senderId)) {
     log.info('command', 'admin-deny', {
-      cmd,
+      cmd: parsed.cmd,
       sender: ctx.msg.senderId.slice(-6),
     });
     await reply(ctx, '❌ 此命令仅管理员可用。');
     return true;
   }
   try {
-    await h(args, ctx);
+    await h(parsed.args, ctx);
   } catch (err) {
-    log.fail('command', err, { cmd });
+    log.fail('command', err, { cmd: parsed.cmd });
   }
   return true;
+}
+
+export function parseCommandText(content: string): ParsedCommand | undefined {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith('/')) return undefined;
+  const parts = trimmed.split(/\s+/);
+  const cmd = parts[0] ?? '';
+  return { cmd, args: parts.slice(1).join(' ') };
+}
+
+export function isStopCommandText(content: string): boolean {
+  return parseCommandText(content)?.cmd === '/stop';
 }
 
 /** Invoke a named command handler (e.g. from a card button click). */

@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
+import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import type { AgentEvent, AgentRun } from '../../src/agent/types';
 import type { RunHandle } from '../../src/bot/active-runs';
-import { processAgentStream } from '../../src/bot/channel';
+import { ActiveRuns } from '../../src/bot/active-runs';
+import { interruptScopeNow, processAgentStream } from '../../src/bot/channel';
+import { PendingQueue } from '../../src/bot/pending-queue';
 import { createInitialState } from '../../src/card/run-state';
 import type { SessionStore } from '../../src/session/store';
 
@@ -270,3 +273,53 @@ describe('processAgentStream', () => {
     await rejection;
   });
 });
+
+describe('interruptScopeNow', () => {
+  test('interrupts the active run and drops queued messages immediately', () => {
+    let stopCount = 0;
+    let flushCount = 0;
+    const activeRuns = new ActiveRuns();
+    const pending = new PendingQueue(0, () => {
+      flushCount++;
+    });
+    const run: AgentRun = {
+      events: (async function* (): AsyncGenerator<AgentEvent> {})(),
+      async stop() {
+        stopCount++;
+      },
+      async waitForExit() {
+        return true;
+      },
+    };
+
+    activeRuns.register('chat-1', run);
+    pending.block('chat-1');
+    pending.push('chat-1', fakeMessage('queued-1'));
+    pending.push('chat-1', fakeMessage('queued-2'));
+
+    expect(interruptScopeNow(activeRuns, pending, 'chat-1')).toEqual({
+      interrupted: true,
+      droppedPending: 2,
+    });
+    pending.unblock('chat-1');
+
+    expect(stopCount).toBe(1);
+    expect(flushCount).toBe(0);
+  });
+});
+
+function fakeMessage(messageId: string): NormalizedMessage {
+  return {
+    messageId,
+    chatId: 'chat-1',
+    chatType: 'group',
+    senderId: 'ou_user',
+    content: 'queued',
+    rawContentType: 'text',
+    resources: [],
+    mentions: [],
+    mentionAll: false,
+    mentionedBot: true,
+    createTime: Date.now(),
+  };
+}

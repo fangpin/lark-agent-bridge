@@ -1,4 +1,5 @@
-import type { Block, FooterStatus, RunState, ToolEntry } from './run-state';
+import { activityText } from './activity-render';
+import type { Block, RunState, ToolEntry } from './run-state';
 import { renderTodoBoard, todoSummaryText } from './todo-board-render';
 import { isLowSignalTool, toolBodyMd, toolHeaderText } from './tool-render';
 
@@ -52,7 +53,8 @@ export function renderCard(state: RunState): object {
   }
 
   if (state.terminal === 'running') {
-    if (state.footer) elements.push(footerStatus(state.footer));
+    const activity = activityText(state.activity, state.footer);
+    if (activity) elements.push(noteMd(activity));
     elements.push(stopButton());
   } else if (state.runId && (state.terminal === 'error' || state.terminal === 'idle_timeout')) {
     elements.push(retryButton(state.runId));
@@ -216,18 +218,6 @@ function progressLine(state: RunState): object {
   const started = ageText(Date.now() - state.startedAt);
   const active = ageText(Date.now() - state.lastActivityAt);
   return noteMd(`_运行 ${started} · 最近活动 ${active}前 · 卡片更新 ${timeText(state.updatedAt)}_`);
-}
-
-function footerStatus(status: Exclude<FooterStatus, null>): object {
-  const text =
-    status === 'starting'
-      ? '🚀 正在启动 Agent'
-      : status === 'thinking'
-        ? '🧠 正在思考'
-        : status === 'tool_running'
-          ? '🧰 正在调用工具'
-          : '✍️ 正在输出';
-  return noteMd(text);
 }
 
 function summaryText(state: RunState): string {
