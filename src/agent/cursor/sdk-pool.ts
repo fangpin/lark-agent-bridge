@@ -20,7 +20,7 @@ type WorkerResponse =
   | { type: 'agent'; id: string; agentId: string }
   | { type: 'event'; id: string; event: AgentEvent }
   | { type: 'done'; id: string; agentId: string }
-  | { type: 'error'; id?: string; message: string };
+  | { type: 'error'; id?: string; message: string; fatal?: boolean };
 
 interface PoolEntry {
   key: string;
@@ -31,6 +31,7 @@ interface PoolEntry {
   busy: boolean;
   pendingRuns: number;
   disposed: boolean;
+  stopping: boolean;
   currentRunId?: string;
   currentRunStartedAt?: number;
   lastEventAt?: number;
@@ -152,14 +153,21 @@ export class CursorSdkPool {
     return {
       events: this.releaseWhenDone(entry, events, markReleased),
       stop: async () => {
-        await inner.stop();
-        const settled = await waitFor(released, stopGraceMs);
-        if (settled) return;
+        entry.stopping = true;
+        try {
+          await inner.stop();
+          const settled = await waitFor(released, stopGraceMs);
+          if (settled) return;
+        } finally {
+          entry.stopping = false;
+        }
         log.warn('agent', 'sdk-pool-stop-timeout-evict', {
           key: entry.key,
+          sessionId: entry.agentId,
           runId,
           pid: entry.worker.pid,
           graceMs: stopGraceMs,
+          reason: 'stop did not settle run stream before grace timeout',
         });
         await this.removeEntryFor(entry);
       },
@@ -206,6 +214,8 @@ export class CursorSdkPool {
       pid: entry.worker.pid,
       status: entry.disposed
         ? 'disposed'
+        : entry.stopping
+          ? 'stopping'
         : entry.busy && entry.lastEventAt && now - entry.lastEventAt > 5 * 60_000
           ? 'stuck'
           : entry.busy
@@ -226,15 +236,21 @@ export class CursorSdkPool {
     events: AsyncIterable<AgentEvent>,
     onReleased?: () => void,
   ): AsyncGenerator<AgentEvent> {
+    let evictAfterRun = false;
     try {
       for await (const event of events) {
         entry.lastEventAt = Date.now();
-        if (event.type === 'error') entry.lastError = event.message;
+        if (event.type === 'error') {
+          entry.lastError = event.message;
+          evictAfterRun ||= Boolean(event.fatal) || isPoisonedSdkWorkerError(event.message);
+        }
         yield event;
       }
     } finally {
+      const runId = entry.currentRunId;
       entry.pendingRuns = Math.max(0, entry.pendingRuns - 1);
       entry.busy = entry.pendingRuns > 0;
+      entry.stopping = false;
       entry.lastUsed = Date.now();
       if (!entry.busy) {
         entry.currentRunId = undefined;
@@ -242,6 +258,16 @@ export class CursorSdkPool {
       }
       if (!entry.disposed) this.touch(entry);
       onReleased?.();
+      if (evictAfterRun && !entry.disposed) {
+        log.warn('agent', 'sdk-pool-evict-after-fatal-error', {
+          key: entry.key,
+          sessionId: entry.agentId,
+          pid: entry.worker.pid,
+          runId,
+          reason: 'fatal sdk run error',
+        });
+        await this.removeEntryFor(entry);
+      }
     }
   }
 
@@ -277,6 +303,7 @@ export class CursorSdkPool {
       busy: false,
       pendingRuns: 0,
       disposed: false,
+      stopping: false,
       currentRunId: undefined,
       currentRunStartedAt: undefined,
       lastEventAt: undefined,
@@ -411,7 +438,7 @@ function createWorker(
     {
       pushEvent: (event: AgentEvent) => void;
       finish: (agentId?: string) => void;
-      fail: (message: string) => void;
+      fail: (message: string, fatal?: boolean) => void;
     }
   >();
 
@@ -442,7 +469,7 @@ function createWorker(
         message: msg.message,
       });
       if (msg.id && pendingRuns.has(msg.id)) {
-        pendingRuns.get(msg.id)?.fail(msg.message);
+        pendingRuns.get(msg.id)?.fail(msg.message, msg.fatal);
         pendingRuns.delete(msg.id);
       } else if (msg.id && pendingEnsures.has(msg.id)) {
         pendingEnsures.get(msg.id)?.reject(msg.message);
@@ -492,6 +519,7 @@ function createWorker(
       const queue: AgentEvent[] = [];
       let done = false;
       let errorMsg: string | undefined;
+      let errorFatal = false;
       let notify: (() => void) | undefined;
 
       const pushEvent = (event: AgentEvent) => {
@@ -503,8 +531,9 @@ function createWorker(
         done = true;
         notify?.();
       };
-      const fail = (message: string) => {
+      const fail = (message: string, fatal = false) => {
         errorMsg = message;
+        errorFatal = fatal;
         done = true;
         notify?.();
       };
@@ -573,7 +602,7 @@ function createWorker(
         }
 
         pendingRuns.delete(runId);
-        if (errorMsg) yield { type: 'error', message: errorMsg };
+        if (errorMsg) yield { type: 'error', message: errorMsg, fatal: errorFatal };
       })();
 
       return {
@@ -604,4 +633,8 @@ function createWorker(
       });
     },
   };
+}
+
+function isPoisonedSdkWorkerError(message: string): boolean {
+  return message.includes('Cursor returned no error detail') || message.includes('已自动丢弃当前 SDK worker');
 }

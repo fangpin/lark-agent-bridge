@@ -188,6 +188,10 @@ export function isCursorRateLimitError(err: unknown): boolean {
   return describeSdkError(err).kind === 'rate_limit';
 }
 
+export function isCursorNetworkError(err: unknown): boolean {
+  return describeSdkError(err).kind === 'network';
+}
+
 /** Message sent over IPC to the bridge and shown on failure cards. */
 export function formatSdkErrorForIpc(phase: string, err: unknown): string {
   const d = describeSdkError(err);

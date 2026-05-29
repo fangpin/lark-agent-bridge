@@ -8,6 +8,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local coding-ag
 
 - Forwards Feishu / Lark messages (DM directly, or `@bot` in a group) to your local coding agent, running in a working directory you control.
 - **Streaming card**: the agent's text and tool calls update on a single Lark card in real time — no waiting for the final reply.
+- **Resilient run UI**: failed or timed-out runs show a one-click retry button; card update failures degrade to a plain markdown fallback instead of leaving a stale running card.
 - **Per-chat sessions**: each chat keeps its own agent session, so conversations resume where they left off.
 - **Preempt + batch**: a new message interrupts the running run; rapid-fire messages get coalesced into one request.
 - **Multiple workspaces**: `/ws` switches between named project directories, with sessions tracked per workspace.
@@ -77,7 +78,7 @@ ttadk-channel-bridge --help                List all commands
 
 > When the same app is started multiple times, Lark's open platform routes events to one of the live WebSocket connections at random. `start` detects existing processes for the same app and (in a TTY) prompts: `[c]ontinue / [k]ill old / [a]bort`. In non-TTY mode it warns and continues.
 
-`status` / `doctor` / `handover` / `workspace` / `service` are placeholders, planned for later releases.
+`handover` / `workspace` / `service` are placeholders, planned for later releases.
 
 ### Slash commands inside Feishu / Lark
 
@@ -93,10 +94,13 @@ ttadk-channel-bridge --help                List all commands
 | `/config` | Adjust preferences (reply style, tool-call display, ...) |
 | `/stop` | Stop the run in progress (also the `⏹` button on the card) |
 | `/timeout [N\|off\|default]` | Idle-watchdog (minutes) for the current session. `/config` sets the global default. See FAQ below. |
+| `/retry <run-id>` | Replay a recent failed or timed-out run. Failed cards include a one-click retry button. |
+| `/workers` | Show Cursor SDK worker-pool health: status, queue count, current run, session/cwd, and recent error. |
 | `/ps` | List all `start` processes on this host, marking the one replying |
 | `/exit <id\|#>` | Stop a `start` process (your own → graceful; another's → SIGTERM) |
 | `/reconnect` | Force a WebSocket reconnect (use when the bot stops responding after a network blip) |
-| `/doctor [description]` | Feed recent logs and your description back to the agent for self-diagnosis |
+| `/doctor [description]` | Feed recent logs, run timeline, and your description back to the agent for self-diagnosis |
+| `/doctor workers` | Shortcut for the live SDK worker-pool view |
 | `/help` | Help card |
 | Any other `/xxx` | Forwarded verbatim to the agent |
 
@@ -227,6 +231,12 @@ After a manual edit, **restart the bridge** or send **`/reconnect`** from any al
 **The bot stays silent / Claude never replies.** Usually the `claude` CLI itself is not logged in, or the session points to a cwd that no longer exists. Send `/status` to inspect; `/new` to start a fresh session.
 
 **Claude subprocess looks frozen (card stuck on the last frame).** Since 0.1.20 there's an idle watchdog: if Claude emits nothing for N minutes the process is killed and the card is annotated `⏱ N min no response, auto-terminated`. Disabled by default. Enable with `/config` (global, in minutes), or `/timeout 10` to set it on the current session; `/timeout off` disables for the session; `/timeout default` clears the session override.
+
+**The card says the agent failed. Can I retry?** Failed and idle-timeout run cards include a one-click retry button when the bridge has the original run in recent history. You can also run `/retry <run-id>` in the same chat/topic. Retries are scoped to the original conversation so a failed task cannot be replayed from another chat by accident.
+
+**How do I debug a stuck card or Cursor SDK worker?** Run `/doctor <what happened>` to analyze recent structured logs. The doctor prompt includes a run timeline covering `intake -> queue -> session -> agent -> card update -> done`, which helps identify whether the run stopped in Lark updates, session setup, or the agent. For Cursor SDK worker health only, run `/workers` or `/doctor workers`.
+
+**Cursor SDK returns `status=error` with no detail.** The bridge treats opaque Cursor SDK run failures as fatal to that SDK worker: it surfaces the final reason, discards the worker, and creates a fresh worker/session on the next run. Recoverable rate-limit, network, and stale-session paths record how many automatic recovery steps happened before the final failure.
 
 **Claude says it can't see the image I sent.** Upgrade to the latest version — releases before 0.1.0 had a filename-dedup bug.
 

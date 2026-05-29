@@ -479,6 +479,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const chatId = firstMsg.chatId;
   const threadId = firstMsg.threadId;
   const historyEntry = runHistory.create(scope, batch);
+  log.info('run', 'timeline', { runId: historyEntry.runId, step: 'intake', batchSize: batch.length });
+  log.info('run', 'timeline', { runId: historyEntry.runId, step: 'queue', scope, batchSize: batch.length });
 
   const resourceItems = batch.flatMap((m) =>
     m.resources.map((r) => ({ messageId: m.messageId, resource: r })),
@@ -497,6 +499,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   if (attachments.length > 0) {
     log.info('media', 'resolved', { count: attachments.length });
   }
+  log.info('run', 'timeline', {
+    runId: historyEntry.runId,
+    step: 'media',
+    attachments: attachments.length,
+  });
 
   // Collect any reply-quote targets in the batch. Dedup so the same target
   // quoted by multiple messages in one batch only fetches once. Filter out
@@ -531,6 +538,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const prompt = buildPrompt(batch, attachments, quotes);
   log.info('prompt', 'built', { promptChars: prompt.length, quotes: quotes.length });
+  log.info('run', 'timeline', {
+    runId: historyEntry.runId,
+    step: 'prompt',
+    promptChars: prompt.length,
+    quotes: quotes.length,
+  });
 
   const cwd = workspaces.cwdFor(scope) ?? homedir();
   let resumeFrom = sessions.resumeFor(scope, cwd);
@@ -561,6 +574,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       log.info('session', 'resume-precreate', { sessionId: resumeFrom, cwd });
     }
   }
+  log.info('run', 'timeline', {
+    runId: historyEntry.runId,
+    step: 'session',
+    sessionId: resumeFrom,
+    cwd,
+  });
 
   const agentStopGraceMs = getAgentStopGraceMs(controls.cfg);
   const run = agent.run({
@@ -571,6 +590,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     stopGraceMs: agentStopGraceMs,
   });
   const handle = activeRuns.register(scope, run);
+  log.info('run', 'timeline', {
+    runId: historyEntry.runId,
+    step: 'agent',
+    sessionId: resumeFrom,
+  });
 
   // Resolve idle-timeout for this run: scope override (on SessionEntry) wins
   // over global default (preferences). 0 / undefined = no watchdog.
@@ -611,6 +635,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   try {
     if (replyMode === 'card') {
+      log.info('run', 'timeline', { runId: historyEntry.runId, step: 'card-stream-start', mode: 'card' });
       const result = await channel.stream(
         chatId,
         {
@@ -640,8 +665,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         sendOpts,
       );
       streamMessageId = result.messageId;
+      log.info('run', 'timeline', {
+        runId: historyEntry.runId,
+        step: 'card-stream-done',
+        mode: 'card',
+        messageId: streamMessageId,
+      });
       await forceFinalCardUpdate(channel, streamMessageId, filterForPrefs(finalState), 'card');
     } else if (replyMode === 'markdown') {
+      log.info('run', 'timeline', { runId: historyEntry.runId, step: 'card-stream-start', mode: 'markdown' });
       const result = await channel.stream(
         chatId,
         {
@@ -673,6 +705,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         sendOpts,
       );
       streamMessageId = result.messageId;
+      log.info('run', 'timeline', {
+        runId: historyEntry.runId,
+        step: 'card-stream-done',
+        mode: 'markdown',
+        messageId: streamMessageId,
+      });
       await forceFinalCardUpdate(channel, streamMessageId, filterForPrefs(finalState), 'markdown');
     } else {
       // text mode: drain the agent stream without sending anything during
@@ -697,16 +735,31 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   } catch (err) {
     log.fail('stream', err);
+    const message = errorMessage(err);
     if (err instanceof TimeoutError) {
       handle.interrupted = true;
       finalState = markInterrupted(finalState);
       await run.stop().catch((stopErr) => {
         log.fail('stream', stopErr, { step: 'stop-after-timeout' });
       });
+    } else if (finalState.terminal === 'running') {
+      handle.interrupted = true;
+      finalState = reduce(finalState, {
+        type: 'error',
+        message: `卡片更新失败，已降级为普通消息：${message}`,
+      });
+      await run.stop().catch((stopErr) => {
+        log.fail('stream', stopErr, { step: 'stop-after-update-failure' });
+      });
     }
     if (err instanceof TimeoutError || finalState.terminal !== 'running') {
       const fallback = renderText(filterForPrefs(finalState));
       if (fallback.trim()) {
+        log.info('run', 'timeline', {
+          runId: historyEntry.runId,
+          step: 'fallback-send',
+          reason: message,
+        });
         await channel.send(chatId, { markdown: fallback }, sendOpts).catch((sendErr) => {
           log.fail('stream', sendErr, { step: 'fallback-send' });
         });
@@ -714,6 +767,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   } finally {
     runHistory.finish(historyEntry.runId, finalState.terminal, finalState.errorMsg);
+    log.info('run', 'timeline', {
+      runId: historyEntry.runId,
+      step: 'done',
+      terminal: finalState.terminal,
+      errorMsg: finalState.errorMsg,
+    });
     activeRuns.unregister(scope, run);
     if (reactionId) {
       await removeReaction(channel, lastMsg.messageId, reactionId);
@@ -743,6 +802,15 @@ async function forceFinalCardUpdate(
 }
 
 function markdownFinalCard(markdown: string, state: RunState): object {
+  const elements: object[] = [{ tag: 'markdown', content: markdown || '_（未返回内容）_' }];
+  if (state.runId && (state.terminal === 'error' || state.terminal === 'idle_timeout')) {
+    elements.push({
+      tag: 'button',
+      text: { tag: 'plain_text', content: '一键重试' },
+      type: 'default',
+      behaviors: [{ type: 'callback', value: { cmd: 'retry', run_id: state.runId } }],
+    });
+  }
   return {
     schema: '2.0',
     config: {
@@ -750,7 +818,7 @@ function markdownFinalCard(markdown: string, state: RunState): object {
       summary: { content: finalSummary(state) },
     },
     body: {
-      elements: [{ tag: 'markdown', content: markdown || '_（未返回内容）_' }],
+      elements,
     },
   };
 }

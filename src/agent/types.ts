@@ -6,7 +6,7 @@ export type AgentEvent =
   | { type: 'tool_result'; id: string; output: string; isError: boolean }
   | { type: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number }
   | { type: 'done'; sessionId?: string }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string; fatal?: boolean };
 
 export interface AgentRunOptions {
   prompt: string;
