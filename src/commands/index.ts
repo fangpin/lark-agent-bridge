@@ -197,6 +197,44 @@ async function reply(ctx: CommandContext, markdown: string): Promise<void> {
   }
 }
 
+async function replyCard(ctx: CommandContext, card: object): Promise<void> {
+  try {
+    await ctx.channel.send(ctx.msg.chatId, { card }, { replyTo: ctx.msg.messageId });
+  } catch (err) {
+    log.fail('command', err, { step: 'reply-card' });
+  }
+}
+
+interface CommandStatusCardOpts {
+  title: string;
+  status: 'success' | 'warning' | 'info' | 'error';
+  lines: string[];
+}
+
+function commandStatusCard(opts: CommandStatusCardOpts): object {
+  const statusMeta = {
+    success: { icon: '✅' },
+    warning: { icon: '⚠️' },
+    info: { icon: 'ℹ️' },
+    error: { icon: '❌' },
+  }[opts.status];
+  const body = opts.lines.filter(Boolean).join('\n\n');
+  return {
+    schema: '2.0',
+    config: {
+      summary: { content: opts.title },
+    },
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content: `**${statusMeta.icon} ${opts.title}**${body ? `\n\n${body}` : ''}`,
+        },
+      ],
+    },
+  };
+}
+
 function expandTilde(p: string): string {
   if (p === '~') return homedir();
   if (p.startsWith('~/')) return `${homedir()}${p.slice(1)}`;
@@ -226,7 +264,18 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
   ctx.sessions.clear(ctx.scope);
   const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
   await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, cwd);
-  await reply(ctx, wasRunning ? '已中断当前任务并开始新会话。' : '已开始新会话。');
+  await replyCard(
+    ctx,
+    commandStatusCard({
+      title: wasRunning ? '已中断当前任务并开始新会话' : '已开始新会话',
+      status: 'success',
+      lines: [
+        `cwd: \`${cwd}\``,
+        '当前 session 已清空并预创建，下一条消息会进入新 agent 会话。',
+        wasRunning ? '原运行中的任务会在其卡片上显示为已中断。' : '',
+      ].filter(Boolean),
+    }),
+  );
 }
 
 async function handleNewChat(rawName: string, ctx: CommandContext): Promise<void> {
@@ -422,8 +471,16 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
 async function handleStop(_args: string, ctx: CommandContext): Promise<void> {
   const ok = ctx.activeRuns.interrupt(ctx.scope);
   log.info('command', 'stop', { interrupted: ok });
-  // No reply: if there was a run, its in-flight render loop will mark the
-  // card as 'interrupted' and re-render (`_⏹ 已被中断_`).
+  await replyCard(
+    ctx,
+    commandStatusCard({
+      title: ok ? '已请求终止当前任务' : '当前没有运行中的任务',
+      status: ok ? 'warning' : 'info',
+      lines: ok
+        ? ['运行卡片会更新为“已被中断”。如果卡片没有及时变化，可用 `/status` 或 `/workers` 复查。']
+        : ['没有找到当前会话正在执行的 agent run。'],
+    }),
+  );
 }
 
 async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
@@ -441,21 +498,37 @@ async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
     if (scopeMinutes !== undefined) {
       const effective =
         scopeMinutes > 0 ? `${scopeMinutes} 分钟` : '已关闭（当前 session）';
-      await reply(ctx, `⏱ 当前 session 探活:${effective}\n全局默认:${formatGlobal()}${usage}`);
+      await replyCard(
+        ctx,
+        commandStatusCard({
+          title: '当前 session 探活设置',
+          status: 'info',
+          lines: [`当前 session: ${effective}`, `全局默认: ${formatGlobal()}`, usage],
+        }),
+      );
       return;
     }
-    await reply(ctx, `⏱ 当前 session 探活:跟随全局(${formatGlobal()})${usage}`);
+    await replyCard(
+      ctx,
+      commandStatusCard({
+        title: '当前 session 探活设置',
+        status: 'info',
+        lines: [`当前 session: 跟随全局`, `全局默认: ${formatGlobal()}`, usage],
+      }),
+    );
     return;
   }
 
   if (trimmed === 'default') {
     const cleared = ctx.sessions.clearIdleTimeoutOverride(ctx.scope);
     log.info('command', 'timeout-clear', { scope: ctx.scope, cleared });
-    await reply(
+    await replyCard(
       ctx,
-      cleared
-        ? `✅ 已清除 session 覆盖,回退到全局(${formatGlobal()})。`
-        : `当前 session 本来就没设过覆盖,跟随全局(${formatGlobal()})。`,
+      commandStatusCard({
+        title: cleared ? '已清除 session 探活覆盖' : 'session 未设置探活覆盖',
+        status: 'success',
+        lines: [`当前 session: 跟随全局`, `全局默认: ${formatGlobal()}`],
+      }),
     );
     return;
   }
@@ -463,7 +536,14 @@ async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
   if (trimmed === 'off' || trimmed === '0') {
     ctx.sessions.setIdleTimeoutMinutes(ctx.scope, 0);
     log.info('command', 'timeout-off', { scope: ctx.scope });
-    await reply(ctx, '✅ 已关闭当前 session 的探活。');
+    await replyCard(
+      ctx,
+      commandStatusCard({
+        title: '已关闭当前 session 探活',
+        status: 'warning',
+        lines: ['当前 session 不会因为 agent 长时间无事件而自动终止。', `全局默认仍为: ${formatGlobal()}`],
+      }),
+    );
     return;
   }
 
@@ -474,7 +554,14 @@ async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
   }
   ctx.sessions.setIdleTimeoutMinutes(ctx.scope, n);
   log.info('command', 'timeout-set', { scope: ctx.scope, minutes: n });
-  await reply(ctx, `✅ 当前 session 探活已设为 ${n} 分钟。`);
+  await replyCard(
+    ctx,
+    commandStatusCard({
+      title: '已更新当前 session 探活',
+      status: 'success',
+      lines: [`当前 session: ${n} 分钟`, `全局默认: ${formatGlobal()}`, '`/timeout default` 可恢复跟随全局。'],
+    }),
+  );
 }
 
 async function handlePs(_args: string, ctx: CommandContext): Promise<void> {
@@ -518,6 +605,7 @@ async function handleWorkers(_args: string, ctx: CommandContext): Promise<void> 
       `**${idx + 1}. ${worker.status}** pid=${worker.pid ?? '-'}`,
       `key=\`${worker.key}\``,
       `pending=${worker.pendingRuns}`,
+      worker.currentRunId ? `run=\`${shortId(worker.currentRunId)}\`` : '',
       `started=${age}`,
       `lastEvent=${last}`,
       worker.agentId ? `agent=\`${shortId(worker.agentId)}\`` : '',
@@ -630,7 +718,7 @@ async function handleReconnect(_args: string, ctx: CommandContext): Promise<void
 
 const DOCTOR_INSTRUCTIONS = `你是 lark-channel-bridge 的诊断助理。下面会给你两段输入:
 1. 用户的故障描述
-2. 最近的运行日志(JSON line 格式,旧→新)
+2. 最近的 run timeline 和运行日志(JSON line 格式,旧→新)
 
 日志字段含义:
 - ts: ISO 时间戳
@@ -639,6 +727,7 @@ const DOCTOR_INSTRUCTIONS = `你是 lark-channel-bridge 的诊断助理。下面
 - event: enter | exit | transition | fail | 各 phase 自定义事件
 - traceId: 同一逻辑操作的串联 ID(同一条消息的多个日志会共享)
 - chatId: 飞书聊天 ID(用 chatId 反查相关日志)
+- run timeline: 已按 runId 提炼的关键阶段，用来快速定位卡在 intake / queue / session / agent / card update / done 哪一步
 
 回复严格三段,markdown 标题用二级:
 
@@ -653,7 +742,7 @@ const DOCTOR_INSTRUCTIONS = `你是 lark-channel-bridge 的诊断助理。下面
 
 如果日志里没有任何相关线索,直接说"日志不足以判断,建议:"再列动作。回复要直接,不寒暄。`;
 
-function buildDoctorPrompt(description: string, logs: string): string {
+function buildDoctorPrompt(description: string, logs: string, timeline: string): string {
   const desc = description.trim() || '(用户没写描述,自行从日志找最显眼的异常。)';
   return `${DOCTOR_INSTRUCTIONS}
 
@@ -662,13 +751,67 @@ function buildDoctorPrompt(description: string, logs: string): string {
 用户故障描述:
 ${desc}
 
+Run timeline:
+\`\`\`
+${timeline || '(最近日志里没有 run timeline 事件。)'}
+\`\`\`
+
 最近的运行日志:
 \`\`\`
 ${logs}
 \`\`\``;
 }
 
+function buildRunTimeline(logs: string): string {
+  const entries = logs
+    .split('\n')
+    .flatMap((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return [];
+      try {
+        return [JSON.parse(trimmed) as Record<string, unknown>];
+      } catch {
+        return [];
+      }
+    })
+    .filter((entry) => isTimelineEntry(entry) || isCardOrStreamFailure(entry));
+
+  if (entries.length === 0) return '';
+
+  return entries
+    .slice(-80)
+    .map((entry) => {
+      const ts = typeof entry.ts === 'string' ? entry.ts : '-';
+      const trace = typeof entry.traceId === 'string' ? ` trace=${entry.traceId}` : '';
+      const runId = typeof entry.runId === 'string' ? ` run=${shortId(entry.runId)}` : '';
+      const phase = typeof entry.phase === 'string' ? entry.phase : '-';
+      const event = typeof entry.event === 'string' ? entry.event : '-';
+      const step = typeof entry.step === 'string' ? ` step=${entry.step}` : '';
+      const mode = typeof entry.mode === 'string' ? ` mode=${entry.mode}` : '';
+      const terminal = typeof entry.terminal === 'string' ? ` terminal=${entry.terminal}` : '';
+      const err = typeof entry.err === 'string' ? ` err=${entry.err.slice(0, 180)}` : '';
+      const reason = typeof entry.reason === 'string' ? ` reason=${entry.reason.slice(0, 180)}` : '';
+      return `${ts}${trace}${runId} ${phase}.${event}${step}${mode}${terminal}${err}${reason}`;
+    })
+    .join('\n');
+}
+
+function isTimelineEntry(entry: Record<string, unknown>): boolean {
+  return entry.phase === 'run' && entry.event === 'timeline';
+}
+
+function isCardOrStreamFailure(entry: Record<string, unknown>): boolean {
+  if (entry.phase === 'stream' && entry.event === 'fail') return true;
+  if (entry.phase === 'card' && (entry.event === 'fail' || entry.event === 'final' || entry.event === 'transition')) {
+    return true;
+  }
+  return false;
+}
+
 async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
+  if (args.trim().toLowerCase() === 'workers') {
+    return handleWorkers('', ctx);
+  }
   log.info('command', 'doctor', {
     hasDescription: args.trim().length > 0,
     chatMode: ctx.chatMode,
@@ -689,6 +832,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
   // Anthropic via the agent prompt, and (b) end up in any card payload
   // Lark may cache server-side.
   const logs = sanitizeLogsForDoctor(rawLogs);
+  const timeline = sanitizeLogsForDoctor(buildRunTimeline(rawLogs));
 
   // In group / topic chats other members would see the result card. Ack
   // in-channel, deliver the actual analysis privately to the operator's
@@ -698,7 +842,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, '🔍 已收到诊断请求，分析结果将私信发给你。');
   }
 
-  const prompt = buildDoctorPrompt(args, logs);
+  const prompt = buildDoctorPrompt(args, logs, timeline);
   const run = ctx.agent.run({
     prompt,
     cwd: homedir(),

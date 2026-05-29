@@ -206,7 +206,7 @@ function stopButton(): object {
 function retryButton(runId: string): object {
   return {
     tag: 'button',
-    text: { tag: 'plain_text', content: '重试上次任务' },
+    text: { tag: 'plain_text', content: '一键重试' },
     type: 'default',
     behaviors: [{ type: 'callback', value: { cmd: 'retry', run_id: runId } }],
   };

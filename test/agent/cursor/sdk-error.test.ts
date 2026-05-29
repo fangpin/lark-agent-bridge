@@ -4,6 +4,7 @@ import {
   formatSdkErrorForIpc,
   isCursorAgentActiveRunError,
   isCursorAgentNotFoundError,
+  isCursorNetworkError,
   isCursorRateLimitError,
 } from '../../../src/agent/cursor/sdk-error';
 
@@ -63,6 +64,7 @@ describe('describeSdkError', () => {
     expect(d.headline).toContain('网络错误');
     expect(d.detail).toContain('raw=read ECONNRESET');
     expect(d.detail).toContain('code=ECONNRESET');
+    expect(isCursorNetworkError(err)).toBe(true);
   });
 
   test('detects stale Cursor SDK agent ids that cannot be resumed', () => {

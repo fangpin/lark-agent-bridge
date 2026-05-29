@@ -210,6 +210,74 @@ describe('poolKeyFor', () => {
     expect(entries.has('session:agent-123')).toBe(false);
   });
 
+  test('evicts a reused worker after a fatal sdk run error', async () => {
+    const pool = new CursorSdkPool(
+      { command: 'agent', prefixArgs: [], commandLabel: 'agent' },
+      { model: { id: 'gpt-5.5' } },
+      1,
+    );
+    const shutdown = vi.fn(async () => {});
+    const run = vi.fn(() => {
+      return {
+        events: (async function* () {
+          yield {
+            type: 'error',
+            message: 'sdk run failed; Cursor returned no error detail',
+            fatal: true,
+          } as const;
+        })(),
+        stop: async () => {},
+        waitForExit: async () => true,
+      } satisfies AgentRun;
+    });
+    const entry = {
+      key: 'session:agent-123',
+      agentId: 'agent-123',
+      worker: {
+        pid: 123,
+        ensure: async () => 'agent-123',
+        run,
+        stopRun: () => {},
+        shutdown,
+      },
+      cwd: '/tmp/ws',
+      lastUsed: Date.now(),
+      busy: false,
+      pendingRuns: 0,
+      disposed: false,
+      currentRunId: undefined as string | undefined,
+      currentRunStartedAt: undefined as number | undefined,
+      lastEventAt: undefined as number | undefined,
+      lastError: undefined as string | undefined,
+    };
+    const entries = (
+      pool as unknown as {
+        entries: Map<string, typeof entry>;
+      }
+    ).entries;
+    entries.set(entry.key, entry);
+
+    const result = pool.run({ prompt: 'hi', cwd: '/tmp/ws', sessionId: 'agent-123' });
+    const seen: AgentEvent[] = [];
+    for await (const event of result.events) {
+      seen.push(event);
+    }
+
+    expect(seen).toEqual([
+      {
+        type: 'system',
+        sessionId: 'agent-123',
+      },
+      {
+        type: 'error',
+        message: 'sdk run failed; Cursor returned no error detail',
+        fatal: true,
+      },
+    ]);
+    expect(shutdown).toHaveBeenCalledTimes(1);
+    expect(entries.has('session:agent-123')).toBe(false);
+  });
+
   test('reports running worker snapshots', () => {
     const pool = new CursorSdkPool(
       { command: 'agent', prefixArgs: [], commandLabel: 'agent' },
