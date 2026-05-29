@@ -139,7 +139,9 @@ lark-agent-bridge --help                列所有命令
 
 配置 `claudeArgsOption` 后，bridge 会把 Claude Code 参数安全拼成一个字符串，运行类似 `my-claude-wrapper --model gpt-5.5 --claude-args "-p ... --output-format stream-json --verbose ..."` 的命令。不配置 `claudeArgsOption` 时会把 Claude 参数作为普通 argv 追加；不配置 `agentCommand` 时仍然使用默认的 `claude`。
 
-要使用 Cursor CLI，先确认 `agent` 命令已安装、已登录，并且在 `PATH` 中可用，然后配置 Cursor backend：
+### Cursor backend（`@cursor/sdk` 或 CLI）
+
+要接入 Cursor Agent，配置 Cursor backend。默认 runtime 是 `@cursor/sdk`：bridge 会维护一个小型 LRU 的持久 SDK agent 池，在多轮消息之间 resume 原 Cursor session，并提供 `/workers` 和 `/doctor workers` 用于诊断 worker pool。
 
 ```json
 {
@@ -147,12 +149,29 @@ lark-agent-bridge --help                列所有命令
     "agentCommand": {
       "backend": "cursor",
       "command": "agent"
+    },
+    "agentCursorRuntime": "sdk",
+    "agentSessionPoolSize": 10,
+    "agentCursorApiKey": "${CURSOR_API_KEY}",
+    "agentCursorModel": "gpt-5.5-extra-high-fast"
+  }
+}
+```
+
+SDK 模式需要 Cursor API key：可以通过环境变量 `CURSOR_API_KEY` 提供，也可以用 `lark-agent-bridge secrets set --id cursor-api-key` 加密保存后，在 `agentCursorApiKey` 里引用。`agentCursorModel` 使用 Cursor CLI 风格的模型 id；bridge 会把已知变体映射到 SDK model-selection 结构。如果想完全手写 SDK 选择，可以直接配置 `agentCursorSdkModel`：
+
+```json
+{
+  "preferences": {
+    "agentCursorSdkModel": {
+      "id": "gpt-5.5",
+      "params": [{ "id": "reasoning", "value": "extra-high" }]
     }
   }
 }
 ```
 
-Cursor 模式下，bridge 会把运行约定注入到 prompt 里，因为 Cursor CLI 没有 Claude 的 `--append-system-prompt` 参数。bridge 会用类似 `agent -p --output-format stream-json --trust --workspace <cwd> ...` 的方式运行；如果你明确希望 Cursor 自动允许命令，可以把 `"-f"` 或 `"--force"` 加到 `agentCommand.args`。
+如果要强制使用旧的 Cursor CLI 路径，把 `"agentCursorRuntime"` 设为 `"cli"`。CLI 模式下需要确认 `agent` 命令已安装、已登录，并且在 `PATH` 中可用；bridge 会用类似 `agent -p --output-format stream-json --trust --workspace <cwd> ...` 的方式运行。如果你明确希望 Cursor 自动允许命令，可以把 `"-f"` 或 `"--force"` 加到 `agentCommand.args`。
 
 ## 访问控制（可选）
 

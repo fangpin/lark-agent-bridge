@@ -139,7 +139,9 @@ By default the bridge uses the Claude backend and appends Claude Code arguments 
 
 With `claudeArgsOption`, the bridge safely joins Claude Code arguments and runs commands like `my-claude-wrapper --model gpt-5.5 --claude-args "-p ... --output-format stream-json --verbose ..."`. Without `claudeArgsOption`, it appends Claude args as normal argv entries. If `agentCommand` is omitted, it keeps using plain `claude`.
 
-To use Cursor CLI, make sure the `agent` command is installed, logged in, and available on `PATH`, then configure the Cursor backend:
+### Cursor backend (`@cursor/sdk` or CLI)
+
+To use Cursor Agent, configure the Cursor backend. The default runtime is `@cursor/sdk`: the bridge keeps a small LRU pool of persistent SDK agents, resumes the original Cursor session across messages, and exposes `/workers` plus `/doctor workers` for worker-pool diagnosis.
 
 ```json
 {
@@ -147,12 +149,29 @@ To use Cursor CLI, make sure the `agent` command is installed, logged in, and av
     "agentCommand": {
       "backend": "cursor",
       "command": "agent"
+    },
+    "agentCursorRuntime": "sdk",
+    "agentSessionPoolSize": 10,
+    "agentCursorApiKey": "${CURSOR_API_KEY}",
+    "agentCursorModel": "gpt-5.5-extra-high-fast"
+  }
+}
+```
+
+For SDK mode, provide a Cursor API key with `CURSOR_API_KEY`, or store it encrypted with `lark-agent-bridge secrets set --id cursor-api-key` and reference it from `agentCursorApiKey`. `agentCursorModel` uses Cursor CLI-style model ids; the bridge maps known variants to the SDK model-selection shape. For full control, set `agentCursorSdkModel` directly:
+
+```json
+{
+  "preferences": {
+    "agentCursorSdkModel": {
+      "id": "gpt-5.5",
+      "params": [{ "id": "reasoning", "value": "extra-high" }]
     }
   }
 }
 ```
 
-For Cursor, the bridge injects its runtime instructions into the prompt because Cursor CLI does not provide Claude's `--append-system-prompt` flag. The bridge runs Cursor with `agent -p --output-format stream-json --trust --workspace <cwd> ...`; if you intentionally want Cursor to auto-allow commands, add `"-f"` or `"--force"` to `agentCommand.args`.
+Set `"agentCursorRuntime": "cli"` to force the legacy Cursor CLI path. In CLI mode, make sure the `agent` command is installed, logged in, and available on `PATH`; the bridge runs `agent -p --output-format stream-json --trust --workspace <cwd> ...`. If you intentionally want Cursor to auto-allow commands, add `"-f"` or `"--force"` to `agentCommand.args`.
 
 ## Access control (optional)
 
