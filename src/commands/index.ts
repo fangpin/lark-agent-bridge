@@ -277,7 +277,7 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
 
   const wasRunning = ctx.activeRuns.interrupt(ctx.scope);
   await ctx.agent.evictScope?.(ctx.scope, ctx.workspaces.cwdFor(ctx.scope) ?? undefined);
-  ctx.sessions.clear(ctx.scope);
+  ctx.sessions.clear(ctx.scope, ctx.agent.sessionKey);
   const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
   await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, cwd);
   await replyCard(
@@ -353,7 +353,7 @@ async function handleCd(args: string, ctx: CommandContext): Promise<void> {
   ctx.activeRuns.interrupt(ctx.scope);
   await ctx.agent.evictScope?.(ctx.scope, ctx.workspaces.cwdFor(ctx.scope) ?? undefined);
   ctx.workspaces.setCwd(ctx.scope, absolute);
-  ctx.sessions.clear(ctx.scope);
+  ctx.sessions.clear(ctx.scope, ctx.agent.sessionKey);
   await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, absolute);
   await reply(ctx, `✓ 已切换 cwd 到 \`${absolute}\`\n（session 已重置）`);
 }
@@ -412,7 +412,7 @@ async function handleWsUse(name: string, ctx: CommandContext): Promise<void> {
   ctx.activeRuns.interrupt(ctx.scope);
   await ctx.agent.evictScope?.(ctx.scope, ctx.workspaces.cwdFor(ctx.scope) ?? undefined);
   ctx.workspaces.setCwd(ctx.scope, cwd);
-  ctx.sessions.clear(ctx.scope);
+  ctx.sessions.clear(ctx.scope, ctx.agent.sessionKey);
   await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, cwd);
   await reply(ctx, `✓ 已切换到 \`${name}\` (${cwd})\n（session 已重置）`);
 }
@@ -448,7 +448,7 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
   const sessions = await listRecentSessions(cwd, limit);
-  const currentSession = ctx.sessions.getRaw(ctx.scope);
+  const currentSession = ctx.sessions.getRaw(ctx.scope, ctx.agent.sessionKey);
   const entries = sessions.map((s) => ({
     sessionId: s.sessionId,
     preview: s.preview,
@@ -463,7 +463,7 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
 async function applyResume(sessionId: string, ctx: CommandContext): Promise<void> {
   const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
   ctx.activeRuns.interrupt(ctx.scope);
-  ctx.sessions.set(ctx.scope, sessionId, cwd);
+  ctx.sessions.set(ctx.scope, ctx.agent.sessionKey, sessionId, cwd);
   await reply(
     ctx,
     `✓ 已恢复会话 \`${sessionId.slice(0, 8)}…\`。接着发消息就行。`,
@@ -472,7 +472,7 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
 
 async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
   const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
-  const sess = ctx.sessions.getRaw(ctx.scope);
+  const sess = ctx.sessions.getRaw(ctx.scope, ctx.agent.sessionKey);
   const card = statusCard({
     cwd,
     sessionId: sess?.sessionId,

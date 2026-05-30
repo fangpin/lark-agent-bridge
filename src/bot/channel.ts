@@ -576,32 +576,33 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   });
 
   const cwd = workspaces.cwdFor(scope) ?? homedir();
-  let resumeFrom = sessions.resumeFor(scope, cwd);
+  const sessionKey = agent.sessionKey;
+  let resumeFrom = sessions.resumeFor(scope, cwd, sessionKey);
   if (resumeFrom && agent.canResumeSession?.(resumeFrom) === false) {
-    log.warn('session', 'resume-incompatible', { sessionId: resumeFrom, cwd });
-    sessions.clear(scope);
+    log.warn('session', 'resume-incompatible', { sessionId: resumeFrom, cwd, sessionKey });
+    sessions.clear(scope, sessionKey);
     resumeFrom = undefined;
   }
   if (resumeFrom) {
-    log.info('session', 'resume', { sessionId: resumeFrom, cwd });
+    log.info('session', 'resume', { sessionId: resumeFrom, cwd, sessionKey });
   } else {
-    const stale = sessions.getRaw(scope);
-    if (stale && stale.cwd !== cwd) {
-      log.info('session', 'stale-cleared', { staleCwd: stale.cwd, newCwd: cwd });
-      sessions.clear(scope);
+    const stale = sessions.getRaw(scope, sessionKey);
+    if (stale?.cwd && stale.cwd !== cwd) {
+      log.info('session', 'stale-cleared', { staleCwd: stale.cwd, newCwd: cwd, sessionKey });
+      sessions.clear(scope, sessionKey);
     } else {
-      log.info('session', 'fresh', { cwd });
+      log.info('session', 'fresh', { cwd, sessionKey });
     }
     resumeFrom = await withTimeout(
       'session.precreate',
       SESSION_PRECREATE_TIMEOUT_MS,
       ensureResumeSession(agent, sessions, scope, cwd),
     ).catch((err) => {
-      log.fail('session', err, { cwd, fallback: 'run-without-precreated-session' });
+      log.fail('session', err, { cwd, sessionKey, fallback: 'run-without-precreated-session' });
       return undefined;
     });
     if (resumeFrom) {
-      log.info('session', 'resume-precreate', { sessionId: resumeFrom, cwd });
+      log.info('session', 'resume-precreate', { sessionId: resumeFrom, cwd, sessionKey });
     }
   }
   log.info('run', 'timeline', {
@@ -683,6 +684,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
                 sessions,
                 scope,
                 cwd,
+                agent.sessionKey,
                 idleTimeoutMs,
                 async (state) => {
                   finalState = state;
@@ -724,6 +726,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
               sessions,
               scope,
               cwd,
+              agent.sessionKey,
               idleTimeoutMs,
               async (state) => {
                 finalState = state;
@@ -757,6 +760,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         sessions,
         scope,
         cwd,
+        agent.sessionKey,
         idleTimeoutMs,
         async (state) => {
           finalState = state;
@@ -951,6 +955,7 @@ export async function processAgentStream(
   sessions: SessionStore,
   scope: string,
   cwd: string,
+  sessionKey: string,
   idleTimeoutMs: number | undefined,
   flush: (state: RunState) => Promise<void>,
   postDoneExitGraceMs = POST_DONE_EXIT_GRACE_MS,
@@ -1039,8 +1044,8 @@ export async function processAgentStream(
       if (evt.type === 'system') {
         if (evt.sessionId) {
           const effectiveCwd = evt.cwd ?? cwd;
-          sessions.set(scope, evt.sessionId, effectiveCwd);
-          log.info('session', 'set', { sessionId: evt.sessionId });
+          sessions.set(scope, sessionKey, evt.sessionId, effectiveCwd);
+          log.info('session', 'set', { sessionId: evt.sessionId, sessionKey });
         }
         const prevFooter = state.footer;
         state = markAgentReady(state);
@@ -1057,8 +1062,8 @@ export async function processAgentStream(
         continue;
       }
       if (evt.type === 'done' && evt.sessionId) {
-        sessions.set(scope, evt.sessionId, cwd);
-        log.info('session', 'set', { sessionId: evt.sessionId });
+        sessions.set(scope, sessionKey, evt.sessionId, cwd);
+        log.info('session', 'set', { sessionId: evt.sessionId, sessionKey });
       }
 
       const prevTerminal = state.terminal;

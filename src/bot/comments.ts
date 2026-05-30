@@ -137,7 +137,7 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
         case 'system':
           if (e.sessionId) {
             const effectiveCwd = e.cwd ?? cwd;
-            sessions.set(synthChatId, e.sessionId, effectiveCwd);
+            sessions.set(synthChatId, agent.sessionKey, e.sessionId, effectiveCwd);
           }
           break;
         case 'error':

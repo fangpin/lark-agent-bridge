@@ -54,6 +54,7 @@ describe('processAgentStream', () => {
       {} as SessionStore,
       'chat-1',
       '/tmp',
+      'agent:test',
       undefined,
       async (state) => {
         flushed.push(state.terminal);
@@ -67,7 +68,7 @@ describe('processAgentStream', () => {
   });
 
   test('persists a replacement session id from a done event', async () => {
-    const setCalls: Array<{ scope: string; sessionId: string; cwd: string }> = [];
+    const setCalls: Array<{ scope: string; sessionKey: string; sessionId: string; cwd: string }> = [];
     const run: AgentRun = {
       events: (async function* (): AsyncGenerator<AgentEvent> {
         yield { type: 'done', sessionId: 'agent-new' };
@@ -81,19 +82,20 @@ describe('processAgentStream', () => {
     await processAgentStream(
       { run, interrupted: false },
       {
-        set(scope: string, sessionId: string, cwd: string) {
-          setCalls.push({ scope, sessionId, cwd });
+        set(scope: string, sessionKey: string, sessionId: string, cwd: string) {
+          setCalls.push({ scope, sessionKey, sessionId, cwd });
         },
       } as SessionStore,
       'chat-1',
       '/tmp/project',
+      'agent:test',
       undefined,
       async () => {},
       5000,
     );
 
     expect(setCalls).toEqual([
-      { scope: 'chat-1', sessionId: 'agent-new', cwd: '/tmp/project' },
+      { scope: 'chat-1', sessionKey: 'agent:test', sessionId: 'agent-new', cwd: '/tmp/project' },
     ]);
   });
 
@@ -115,6 +117,7 @@ describe('processAgentStream', () => {
       {} as SessionStore,
       'chat-1',
       '/tmp/project',
+      'agent:test',
       undefined,
       async (state) => {
         flushed.push({ terminal: state.terminal, errorMsg: state.errorMsg });
@@ -147,6 +150,7 @@ describe('processAgentStream', () => {
         {} as SessionStore,
         'chat-1',
         '/tmp/project',
+        'agent:test',
         undefined,
         async () => {
           flushCalls++;
@@ -186,6 +190,7 @@ describe('processAgentStream', () => {
       {} as SessionStore,
       'chat-1',
       '/tmp/project',
+      'agent:test',
       1000,
       async (state) => {
         flushed.push(state.terminal);
@@ -226,6 +231,7 @@ describe('processAgentStream', () => {
       { set() {} } as unknown as SessionStore,
       'chat-1',
       '/tmp/project',
+      'agent:test',
       undefined,
       async (state) => {
         flushed.push({
@@ -266,6 +272,7 @@ describe('processAgentStream', () => {
       {} as SessionStore,
       'chat-1',
       '/tmp/project',
+      'agent:test',
       undefined,
       async (state) => {
         if (state.terminal === 'done') await new Promise(() => {});
