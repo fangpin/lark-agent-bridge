@@ -31,4 +31,10 @@ describe('CursorAdapter', () => {
     expect(adapter.canResumeSession('bc-example')).toBe(true);
     expect(adapter.canResumeSession('555e5524-3d1e-4efb-9b95-569bb697768f')).toBe(false);
   });
+
+  test('uses the cli session key when sdk pooling is disabled', () => {
+    const adapter = new CursorAdapter({ runtime: 'sdk', sessionPoolSize: 0 });
+
+    expect(adapter.sessionKey).toBe('cursor:cli');
+  });
 });

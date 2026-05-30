@@ -40,16 +40,16 @@ export class CursorAdapter implements AgentAdapter {
     this.command = opts.command ?? 'agent';
     this.prefixArgs = opts.args ?? [];
     this.runtime = opts.runtime ?? 'cli';
-    this.sessionKey = `cursor:${this.runtime}`;
     this.defaultCliModel = opts.defaultCliModel ?? DEFAULT_AGENT_CURSOR_CLI_MODEL;
     this.defaultSdkModel = opts.defaultSdkModel ?? DEFAULT_AGENT_CURSOR_SDK_MODEL;
+    const poolSize = opts.sessionPoolSize ?? 0;
+    this.sessionKey = this.runtime === 'sdk' && poolSize > 0 ? 'cursor:sdk' : 'cursor:cli';
     this.spawnOpts = {
       command: this.command,
       prefixArgs: this.prefixArgs,
       commandLabel: this.commandLabel,
       apiKey: opts.apiKey,
     };
-    const poolSize = opts.sessionPoolSize ?? 0;
     if (this.runtime === 'sdk' && poolSize > 0) {
       const sdkConfig: SdkWorkerConfig = {
         model: this.defaultSdkModel,
