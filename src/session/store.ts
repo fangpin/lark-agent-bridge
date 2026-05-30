@@ -77,14 +77,11 @@ export class SessionStore {
     if (!entry) return undefined;
     if (sessionKey) {
       const agentEntry = entry.agents?.[sessionKey];
+      if (!agentEntry) return undefined;
       return {
-        ...(agentEntry
-          ? {
-              sessionId: agentEntry.sessionId,
-              cwd: fromPortablePath(agentEntry.cwd, this.pathOptions),
-              updatedAt: agentEntry.updatedAt,
-            }
-          : { updatedAt: entry.updatedAt }),
+        sessionId: agentEntry.sessionId,
+        cwd: fromPortablePath(agentEntry.cwd, this.pathOptions),
+        updatedAt: agentEntry.updatedAt,
         ...(entry.idleTimeoutMinutes !== undefined
           ? { idleTimeoutMinutes: entry.idleTimeoutMinutes }
           : {}),

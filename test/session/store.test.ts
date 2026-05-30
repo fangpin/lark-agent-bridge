@@ -56,6 +56,7 @@ describe('SessionStore', () => {
     await store.load();
 
     expect(store.getRaw('chat-1', 'cursor:sdk')?.cwd).toBe(join(currentHome, 'repos', 'bridge'));
+    expect(store.getRaw('chat-1', 'claude')).toBeUndefined();
     expect(store.resumeFor('chat-1', join(currentHome, 'repos', 'bridge'), 'cursor:sdk')).toBe(
       'session-123',
     );
@@ -111,6 +112,7 @@ describe('SessionStore', () => {
     store.clear('chat-1', 'claude');
 
     expect(store.resumeFor('chat-1', cwd, 'claude')).toBeUndefined();
+    expect(store.getRaw('chat-1', 'claude')).toBeUndefined();
     expect(store.resumeFor('chat-1', cwd, 'cursor:sdk')).toBe('cursor-session');
     expect(store.getIdleTimeoutMinutes('chat-1')).toBe(15);
   });
