@@ -4,13 +4,15 @@ import { ensureResumeSession } from '../../src/session/ensure-resume';
 import { SessionStore } from '../../src/session/store';
 
 function mockAgent(
+  sessionKey: string,
   prepare?: (cwd: string) => Promise<string | undefined>,
   canResumeSession?: (sessionId: string) => boolean,
 ): AgentAdapter {
   return {
-    id: 'cursor',
-    displayName: 'Cursor',
-    commandLabel: 'agent',
+    id: sessionKey.split(':')[0] ?? sessionKey,
+    sessionKey,
+    displayName: sessionKey,
+    commandLabel: sessionKey,
     isAvailable: async () => true,
     run: () => {
       throw new Error('not used');
@@ -21,40 +23,55 @@ function mockAgent(
 }
 
 describe('ensureResumeSession', () => {
-  test('returns existing session without calling prepareSession', async () => {
+  test('returns existing session for the active agent without calling prepareSession', async () => {
     const store = new SessionStore('/tmp/unused-sessions.json');
-    store.set('scope-1', 'sess-existing', '/tmp/project');
-    const prepare = async () => 'sess-new';
-    const agent = mockAgent(prepare);
+    store.set('scope-1', 'cursor:sdk', 'sess-existing', '/tmp/project');
+    const prepare = vi.fn(async () => 'sess-new');
+    const agent = mockAgent('cursor:sdk', prepare);
 
     const id = await ensureResumeSession(agent, store, 'scope-1', '/tmp/project');
 
     expect(id).toBe('sess-existing');
+    expect(prepare).not.toHaveBeenCalled();
   });
 
-  test('pre-creates and stores a session when missing', async () => {
+  test('does not return another agent backend session', async () => {
     const store = new SessionStore('/tmp/unused-sessions-2.json');
-    const agent = mockAgent(async () => 'sess-new');
+    store.set('scope-2', 'cursor:sdk', 'cursor-session', '/tmp/project');
+    const agent = mockAgent('claude', async () => 'claude-session');
 
     const id = await ensureResumeSession(agent, store, 'scope-2', '/tmp/project');
 
-    expect(id).toBe('sess-new');
-    expect(store.resumeFor('scope-2', '/tmp/project')).toBe('sess-new');
+    expect(id).toBe('claude-session');
+    expect(store.resumeFor('scope-2', '/tmp/project', 'cursor:sdk')).toBe('cursor-session');
+    expect(store.resumeFor('scope-2', '/tmp/project', 'claude')).toBe('claude-session');
   });
 
-  test('replaces an existing session that the agent cannot resume', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  test('pre-creates and stores a session when missing for active agent', async () => {
     const store = new SessionStore('/tmp/unused-sessions-3.json');
-    store.set('scope-3', 'legacy-cli-session', '/tmp/project');
-    const agent = mockAgent(async () => 'agent-sdk-session', (sessionId) =>
+    const agent = mockAgent('cursor:sdk', async () => 'sess-new');
+
+    const id = await ensureResumeSession(agent, store, 'scope-3', '/tmp/project');
+
+    expect(id).toBe('sess-new');
+    expect(store.resumeFor('scope-3', '/tmp/project', 'cursor:sdk')).toBe('sess-new');
+  });
+
+  test('replaces only the active agent session that the agent cannot resume', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = new SessionStore('/tmp/unused-sessions-4.json');
+    store.set('scope-4', 'cursor:sdk', 'legacy-cli-session', '/tmp/project');
+    store.set('scope-4', 'claude', 'claude-session', '/tmp/project');
+    const agent = mockAgent('cursor:sdk', async () => 'agent-sdk-session', (sessionId) =>
       sessionId.startsWith('agent-'),
     );
 
     try {
-      const id = await ensureResumeSession(agent, store, 'scope-3', '/tmp/project');
+      const id = await ensureResumeSession(agent, store, 'scope-4', '/tmp/project');
 
       expect(id).toBe('agent-sdk-session');
-      expect(store.resumeFor('scope-3', '/tmp/project')).toBe('agent-sdk-session');
+      expect(store.resumeFor('scope-4', '/tmp/project', 'cursor:sdk')).toBe('agent-sdk-session');
+      expect(store.resumeFor('scope-4', '/tmp/project', 'claude')).toBe('claude-session');
     } finally {
       warn.mockRestore();
     }
