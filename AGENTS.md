@@ -71,6 +71,7 @@ Use `npm`, not `pnpm`, unless the user explicitly asks otherwise.
 
 - Persisted `cwd` values must be normalized through the existing portable-path helpers so `/home/...` and `/data00/home/...` do not split the same workspace.
 - Session matching must compare normalized real paths, not raw strings.
+- Session ids are isolated by `AgentAdapter.sessionKey` (`claude`, `cursor:sdk`, `cursor:cli`). Legacy flat `sessions.json` entries are treated as `cursor:sdk`; do not resume or clear another backend's session unless the user explicitly asks for a full reset.
 - Changing `/cd`, `/ws use`, workspace store, or session store behavior should include tests for path normalization and session reset/reuse semantics.
 
 ## UI/Card Stream Notes

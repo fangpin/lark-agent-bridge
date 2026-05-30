@@ -119,7 +119,7 @@ lark-agent-bridge --help                List all commands
 | Path | Content |
 |---|---|
 | `~/.lark-channel/config.json` | App credentials (App ID / Secret), mode 600 |
-| `~/.lark-channel/sessions.json` | Agent session id + cwd per chat / topic (+ optional `/timeout` override) |
+| `~/.lark-channel/sessions.json` | Agent session ids + cwd per chat / topic, isolated by backend/runtime (+ optional `/timeout` override) |
 | `~/.lark-channel/workspaces.json` | Named-workspace map |
 | `~/.lark-channel/processes.json` | Process registry for live `start` instances (used by `ps`/`stop`); dead PIDs are auto-pruned |
 | `~/.lark-channel/media/<chatId>/` | Downloaded images / files, cleaned up after 24h |
@@ -179,6 +179,8 @@ For SDK mode, provide a Cursor API key with `CURSOR_API_KEY`, or store it encryp
 ```
 
 Set `"agentCursorRuntime": "cli"` to force the legacy Cursor CLI path. In CLI mode, make sure the `agent` command is installed, logged in, and available on `PATH`; the bridge runs `agent -p --output-format stream-json --trust --workspace <cwd> ...`. If you intentionally want Cursor to auto-allow commands, add `"-f"` or `"--force"` to `agentCommand.args`.
+
+Sessions are isolated by backend/runtime. A chat can keep separate Claude, Cursor SDK, and Cursor CLI sessions for the same cwd; the bridge resumes only the session matching the backend configured at startup. Existing pre-isolation session files are treated as Cursor SDK sessions during migration.
 
 ## Access control (optional)
 
