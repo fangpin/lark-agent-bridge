@@ -99,6 +99,7 @@ sender_name: ...
 
 export class ClaudeAdapter implements AgentAdapter {
   readonly id = 'claude';
+  readonly sessionKey = 'claude';
   readonly displayName = 'Claude Code';
 
   private readonly command: string;

@@ -64,6 +64,7 @@ export interface WorkerSnapshot {
 
 export interface AgentAdapter {
   readonly id: string;
+  readonly sessionKey: string;
   readonly displayName: string;
   readonly commandLabel: string;
   isAvailable(): Promise<boolean>;

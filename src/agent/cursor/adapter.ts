@@ -26,6 +26,7 @@ export interface CursorAdapterOptions {
 export class CursorAdapter implements AgentAdapter {
   readonly id = 'cursor';
   readonly displayName = 'Cursor Agent';
+  readonly sessionKey: string;
 
   private readonly command: string;
   private readonly prefixArgs: string[];
@@ -39,6 +40,7 @@ export class CursorAdapter implements AgentAdapter {
     this.command = opts.command ?? 'agent';
     this.prefixArgs = opts.args ?? [];
     this.runtime = opts.runtime ?? 'cli';
+    this.sessionKey = `cursor:${this.runtime}`;
     this.defaultCliModel = opts.defaultCliModel ?? DEFAULT_AGENT_CURSOR_CLI_MODEL;
     this.defaultSdkModel = opts.defaultSdkModel ?? DEFAULT_AGENT_CURSOR_SDK_MODEL;
     this.spawnOpts = {
