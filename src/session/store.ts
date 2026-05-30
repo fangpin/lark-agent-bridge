@@ -1,23 +1,41 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
 import { fromPortablePath, toPortablePath, type PortablePathOptions } from '../utils/portable-path';
 
+const LEGACY_SESSION_KEY = 'cursor:sdk';
+
+export interface AgentSessionEntry {
+  sessionId: string;
+  cwd: string;
+  updatedAt: number;
+}
+
 export interface SessionEntry {
-  /** May be absent if the entry was created by /timeout before any run
-   * recorded a session id. Treat absence as "no resumable session". */
+  updatedAt: number;
+  agents?: Record<string, AgentSessionEntry>;
+  idleTimeoutMinutes?: number;
+}
+
+export interface RuntimeSessionEntry {
   sessionId?: string;
-  /** Pinned cwd for the resumable session. Absent for the same reason. */
   cwd?: string;
   updatedAt: number;
-  /** Per-scope idle-timeout override (minutes). 0 = explicitly off for this
-   * scope, undefined = follow global default. /new clears the whole entry,
-   * so this resets to "follow global" when the user starts a new session. */
+  agents?: Record<string, AgentSessionEntry>;
   idleTimeoutMinutes?: number;
 }
 
 type SessionMap = Record<string, SessionEntry>;
+
+type RawSessionEntry = Partial<SessionEntry> & {
+  sessionId?: unknown;
+  cwd?: unknown;
+  updatedAt?: unknown;
+  idleTimeoutMinutes?: unknown;
+  agents?: unknown;
+};
 
 export class SessionStore {
   private data: SessionMap = {};
@@ -33,27 +51,11 @@ export class SessionStore {
   async load(): Promise<void> {
     try {
       const text = await readFile(this.path, 'utf8');
-      const raw = JSON.parse(text) as Record<string, Partial<SessionEntry>>;
+      const raw = JSON.parse(text) as Record<string, RawSessionEntry>;
       this.data = {};
       for (const [chatId, entry] of Object.entries(raw)) {
-        if (!entry || typeof entry.updatedAt !== 'number') continue;
-        // Drop entries without a `cwd`/`sessionId` pair *unless* there's
-        // some other persisted state worth keeping (e.g. an idle-timeout
-        // override). Resuming a session whose cwd we don't know about
-        // would hang claude on a missing jsonl, so resume keys still need
-        // the full pair; but a bare timeout override is fine on its own.
-        const sessionId = typeof entry.sessionId === 'string' ? entry.sessionId : undefined;
-        const cwd = typeof entry.cwd === 'string' ? entry.cwd : undefined;
-        const idleTimeoutMinutes =
-          typeof entry.idleTimeoutMinutes === 'number' ? entry.idleTimeoutMinutes : undefined;
-        const hasSession = sessionId !== undefined && cwd !== undefined;
-        if (!hasSession && idleTimeoutMinutes === undefined) continue;
-        this.data[chatId] = {
-          ...(sessionId !== undefined ? { sessionId } : {}),
-          ...(cwd !== undefined ? { cwd } : {}),
-          updatedAt: entry.updatedAt,
-          ...(idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes } : {}),
-        };
+        const normalized = this.normalizeEntry(entry);
+        if (normalized) this.data[chatId] = normalized;
       }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
@@ -61,40 +63,53 @@ export class SessionStore {
     }
   }
 
-  /**
-   * Return the session id for this chat if it was created in the given cwd.
-   * Sessions recorded in a different cwd are stale — claude can't resume
-   * them from a different working directory.
-   */
-  resumeFor(chatId: string, cwd: string): string | undefined {
-    const entry = this.data[chatId];
+  resumeFor(chatId: string, cwd: string, sessionKey: string): string | undefined {
+    const entry = this.data[chatId]?.agents?.[sessionKey];
     if (!entry) return undefined;
-    if (!entry.cwd) return undefined;
     const storedCwd = fromPortablePath(entry.cwd, this.pathOptions);
     const requestedCwd = fromPortablePath(cwd, this.pathOptions);
     if (storedCwd !== requestedCwd) return undefined;
     return entry.sessionId;
   }
 
-  getRaw(chatId: string): SessionEntry | undefined {
+  getRaw(chatId: string, sessionKey?: string): RuntimeSessionEntry | undefined {
     const entry = this.data[chatId];
     if (!entry) return undefined;
+    if (sessionKey) {
+      const agentEntry = entry.agents?.[sessionKey];
+      return {
+        ...(agentEntry
+          ? {
+              sessionId: agentEntry.sessionId,
+              cwd: fromPortablePath(agentEntry.cwd, this.pathOptions),
+              updatedAt: agentEntry.updatedAt,
+            }
+          : { updatedAt: entry.updatedAt }),
+        ...(entry.idleTimeoutMinutes !== undefined
+          ? { idleTimeoutMinutes: entry.idleTimeoutMinutes }
+          : {}),
+      };
+    }
     return {
-      ...entry,
-      ...(entry.cwd !== undefined
-        ? { cwd: fromPortablePath(entry.cwd, this.pathOptions) }
+      updatedAt: entry.updatedAt,
+      ...(entry.agents ? { agents: this.runtimeAgents(entry.agents) } : {}),
+      ...(entry.idleTimeoutMinutes !== undefined
+        ? { idleTimeoutMinutes: entry.idleTimeoutMinutes }
         : {}),
     };
   }
 
-  set(chatId: string, sessionId: string, cwd: string): void {
-    // Preserve idleTimeoutMinutes across run starts — it's a per-scope
-    // preference, not per-run-instance state. /new (clear) wipes it.
+  set(chatId: string, sessionKey: string, sessionId: string, cwd: string): void {
     const prev = this.data[chatId];
-    this.data[chatId] = {
+    const agents = { ...(prev?.agents ?? {}) };
+    agents[sessionKey] = {
       sessionId,
       cwd: toPortablePath(cwd, this.pathOptions),
       updatedAt: Date.now(),
+    };
+    this.data[chatId] = {
+      updatedAt: Date.now(),
+      agents,
       ...(prev?.idleTimeoutMinutes !== undefined
         ? { idleTimeoutMinutes: prev.idleTimeoutMinutes }
         : {}),
@@ -102,13 +117,31 @@ export class SessionStore {
     this.schedulePersist();
   }
 
-  clear(chatId: string): void {
+  clear(chatId: string, sessionKey?: string): void {
     if (!(chatId in this.data)) return;
-    delete this.data[chatId];
+    if (!sessionKey) {
+      delete this.data[chatId];
+      this.schedulePersist();
+      return;
+    }
+    const prev = this.data[chatId];
+    const agents = { ...(prev.agents ?? {}) };
+    if (!(sessionKey in agents)) return;
+    delete agents[sessionKey];
+    if (Object.keys(agents).length === 0 && prev.idleTimeoutMinutes === undefined) {
+      delete this.data[chatId];
+    } else {
+      this.data[chatId] = {
+        updatedAt: Date.now(),
+        ...(Object.keys(agents).length > 0 ? { agents } : {}),
+        ...(prev.idleTimeoutMinutes !== undefined
+          ? { idleTimeoutMinutes: prev.idleTimeoutMinutes }
+          : {}),
+      };
+    }
     this.schedulePersist();
   }
 
-  /** Per-scope idle-timeout override. `undefined` means no override set. */
   getIdleTimeoutMinutes(chatId: string): number | undefined {
     return this.data[chatId]?.idleTimeoutMinutes;
   }
@@ -117,15 +150,13 @@ export class SessionStore {
     const clamped = Math.min(Math.max(Math.floor(minutes), 0), 120);
     const prev = this.data[chatId];
     this.data[chatId] = {
-      ...(prev ?? { updatedAt: Date.now() }),
-      idleTimeoutMinutes: clamped,
       updatedAt: Date.now(),
+      ...(prev?.agents ? { agents: prev.agents } : {}),
+      idleTimeoutMinutes: clamped,
     };
     this.schedulePersist();
   }
 
-  /** Remove the override so this scope falls back to the global default.
-   * Returns true if something was actually removed. */
   clearIdleTimeoutOverride(chatId: string): boolean {
     const prev = this.data[chatId];
     if (!prev || prev.idleTimeoutMinutes === undefined) return false;
@@ -139,14 +170,69 @@ export class SessionStore {
     await this.saving;
   }
 
+  private normalizeEntry(entry: RawSessionEntry | undefined): SessionEntry | undefined {
+    if (!entry || typeof entry.updatedAt !== 'number') return undefined;
+    const idleTimeoutMinutes =
+      typeof entry.idleTimeoutMinutes === 'number' ? entry.idleTimeoutMinutes : undefined;
+    const agents = this.normalizeAgents(entry);
+    if (Object.keys(agents).length === 0 && idleTimeoutMinutes === undefined) return undefined;
+    return {
+      updatedAt: entry.updatedAt,
+      ...(Object.keys(agents).length > 0 ? { agents } : {}),
+      ...(idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes } : {}),
+    };
+  }
+
+  private normalizeAgents(entry: RawSessionEntry): Record<string, AgentSessionEntry> {
+    const agents: Record<string, AgentSessionEntry> = {};
+    if (entry.agents && typeof entry.agents === 'object') {
+      for (const [key, value] of Object.entries(entry.agents as Record<string, unknown>)) {
+        const normalized = this.normalizeAgentEntry(value);
+        if (normalized) agents[key] = normalized;
+      }
+    }
+    if (typeof entry.sessionId === 'string' && typeof entry.cwd === 'string') {
+      agents[LEGACY_SESSION_KEY] = {
+        sessionId: entry.sessionId,
+        cwd: entry.cwd,
+        updatedAt: typeof entry.updatedAt === 'number' ? entry.updatedAt : Date.now(),
+      };
+    }
+    return agents;
+  }
+
+  private normalizeAgentEntry(value: unknown): AgentSessionEntry | undefined {
+    if (!value || typeof value !== 'object') return undefined;
+    const record = value as Record<string, unknown>;
+    if (typeof record.sessionId !== 'string') return undefined;
+    if (typeof record.cwd !== 'string') return undefined;
+    if (typeof record.updatedAt !== 'number') return undefined;
+    return {
+      sessionId: record.sessionId,
+      cwd: record.cwd,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  private runtimeAgents(
+    agents: Record<string, AgentSessionEntry>,
+  ): Record<string, AgentSessionEntry> {
+    return Object.fromEntries(
+      Object.entries(agents).map(([key, entry]) => [
+        key,
+        { ...entry, cwd: fromPortablePath(entry.cwd, this.pathOptions) },
+      ]),
+    );
+  }
+
   private schedulePersist(): void {
-    this.saving = this.saving
-      .then(async () => {
-        await mkdir(dirname(this.path), { recursive: true });
-        await writeFile(this.path, `${JSON.stringify(this.data, null, 2)}\n`, 'utf8');
-      })
-      .catch((err: unknown) => {
-        log.fail('session', err, { step: 'persist' });
-      });
+    try {
+      mkdirSync(dirname(this.path), { recursive: true });
+      writeFileSync(this.path, `${JSON.stringify(this.data, null, 2)}\n`, 'utf8');
+      this.saving = Promise.resolve();
+    } catch (err) {
+      log.fail('session', err, { step: 'persist' });
+      this.saving = Promise.resolve();
+    }
   }
 }

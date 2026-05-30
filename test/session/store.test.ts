@@ -23,16 +23,21 @@ describe('SessionStore', () => {
     const file = join(root, 'sessions.json');
     const store = new SessionStore(file, { homeDir: home });
 
-    store.set('chat-1', 'session-123', join(home, 'repos', 'bridge'));
+    store.set('chat-1', 'claude', 'session-123', join(home, 'repos', 'bridge'));
     await store.flush();
 
-    const raw = JSON.parse(await readFile(file, 'utf8')) as Record<string, { cwd: string }>;
-    expect(raw['chat-1']?.cwd).toBe('repos/bridge');
-    expect(store.getRaw('chat-1')?.cwd).toBe(join(home, 'repos', 'bridge'));
-    expect(store.resumeFor('chat-1', join(home, 'repos', 'bridge'))).toBe('session-123');
+    const raw = JSON.parse(await readFile(file, 'utf8')) as Record<
+      string,
+      { agents?: Record<string, { cwd: string }> }
+    >;
+    expect(raw['chat-1']?.agents?.claude?.cwd).toBe('repos/bridge');
+    expect(store.getRaw('chat-1', 'claude')?.cwd).toBe(join(home, 'repos', 'bridge'));
+    expect(store.resumeFor('chat-1', join(home, 'repos', 'bridge'), 'claude')).toBe(
+      'session-123',
+    );
   });
 
-  test('matches synced relative session paths against the current machine home', async () => {
+  test('loads legacy flat sessions as cursor sdk sessions', async () => {
     const root = await tempRoot();
     const file = join(root, 'sessions.json');
     const currentHome = join(root, 'linux-home');
@@ -50,8 +55,11 @@ describe('SessionStore', () => {
     const store = new SessionStore(file, { homeDir: currentHome });
     await store.load();
 
-    expect(store.getRaw('chat-1')?.cwd).toBe(join(currentHome, 'repos', 'bridge'));
-    expect(store.resumeFor('chat-1', join(currentHome, 'repos', 'bridge'))).toBe('session-123');
+    expect(store.getRaw('chat-1', 'cursor:sdk')?.cwd).toBe(join(currentHome, 'repos', 'bridge'));
+    expect(store.resumeFor('chat-1', join(currentHome, 'repos', 'bridge'), 'cursor:sdk')).toBe(
+      'session-123',
+    );
+    expect(store.resumeFor('chat-1', join(currentHome, 'repos', 'bridge'), 'claude')).toBeUndefined();
   });
 
   test('normalizes symlinked home paths when reading and matching sessions', async () => {
@@ -65,13 +73,45 @@ describe('SessionStore', () => {
     await symlink(realHome, aliasHome);
     const store = new SessionStore(file, { homeDir: aliasHome });
 
-    store.set('chat-1', 'session-123', aliasCwd);
+    store.set('chat-1', 'claude', 'session-123', aliasCwd);
     await store.flush();
 
-    const raw = JSON.parse(await readFile(file, 'utf8')) as Record<string, { cwd: string }>;
-    expect(raw['chat-1']?.cwd).toBe('repos/bridge');
-    expect(store.getRaw('chat-1')?.cwd).toBe(realCwd);
-    expect(store.resumeFor('chat-1', realCwd)).toBe('session-123');
-    expect(store.resumeFor('chat-1', aliasCwd)).toBe('session-123');
+    const raw = JSON.parse(await readFile(file, 'utf8')) as Record<
+      string,
+      { agents?: Record<string, { cwd: string }> }
+    >;
+    expect(raw['chat-1']?.agents?.claude?.cwd).toBe('repos/bridge');
+    expect(store.getRaw('chat-1', 'claude')?.cwd).toBe(realCwd);
+    expect(store.resumeFor('chat-1', realCwd, 'claude')).toBe('session-123');
+    expect(store.resumeFor('chat-1', aliasCwd, 'claude')).toBe('session-123');
+  });
+
+  test('stores separate backend sessions under one scope', async () => {
+    const root = await tempRoot();
+    const home = join(root, 'machine-a');
+    const store = new SessionStore(join(root, 'sessions.json'), { homeDir: home });
+    const cwd = join(home, 'repos', 'bridge');
+
+    store.set('chat-1', 'cursor:sdk', 'cursor-session', cwd);
+    store.set('chat-1', 'claude', 'claude-session', cwd);
+
+    expect(store.resumeFor('chat-1', cwd, 'cursor:sdk')).toBe('cursor-session');
+    expect(store.resumeFor('chat-1', cwd, 'claude')).toBe('claude-session');
+  });
+
+  test('clears one backend session while preserving other backend sessions and timeout override', async () => {
+    const root = await tempRoot();
+    const home = join(root, 'machine-a');
+    const store = new SessionStore(join(root, 'sessions.json'), { homeDir: home });
+    const cwd = join(home, 'repos', 'bridge');
+
+    store.set('chat-1', 'cursor:sdk', 'cursor-session', cwd);
+    store.set('chat-1', 'claude', 'claude-session', cwd);
+    store.setIdleTimeoutMinutes('chat-1', 15);
+    store.clear('chat-1', 'claude');
+
+    expect(store.resumeFor('chat-1', cwd, 'claude')).toBeUndefined();
+    expect(store.resumeFor('chat-1', cwd, 'cursor:sdk')).toBe('cursor-session');
+    expect(store.getIdleTimeoutMinutes('chat-1')).toBe(15);
   });
 });
