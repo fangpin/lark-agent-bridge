@@ -263,7 +263,7 @@ After a manual edit, **restart the bridge** or send **`/reconnect`** from any al
 
 **How do I debug a stuck card or Cursor SDK worker?** Run `/doctor <what happened>` to analyze recent structured logs. The doctor prompt includes a run timeline covering `intake -> queue -> session -> agent -> card update -> done`, which helps identify whether the run stopped in Lark updates, session setup, or the agent. For Cursor SDK worker health only, run `/workers` or `/doctor workers`.
 
-**Cursor SDK returns `status=error` with no detail.** The bridge treats opaque Cursor SDK run failures as fatal to that SDK worker: it surfaces the final reason, discards the worker, and creates a fresh worker/session on the next run. Recoverable rate-limit, network, and stale-session paths record how many automatic recovery steps happened before the final failure.
+**Cursor SDK returns `status=error` with no detail.** The bridge treats opaque Cursor SDK run failures as fatal to that SDK worker: it surfaces the final reason, discards the worker, and creates a fresh worker/session on the next run. If no newer user message is queued, the bridge also replays the original task once in the same chat/topic; after that it falls back to the one-click retry button. Recoverable rate-limit, network, and stale-session paths record how many automatic recovery steps happened before the final failure.
 
 **Claude says it can't see the image I sent.** Upgrade to the latest version — releases before 0.1.0 had a filename-dedup bug.
 

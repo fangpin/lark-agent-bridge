@@ -53,6 +53,10 @@ export class PendingQueue {
     return entry.messages;
   }
 
+  queuedSize(scope: string): number {
+    return this.map.get(scope)?.messages.length ?? 0;
+  }
+
   cancelAll(): void {
     for (const entry of this.map.values()) {
       if (entry.timer) clearTimeout(entry.timer);

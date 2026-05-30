@@ -55,6 +55,9 @@ const SESSION_PRECREATE_TIMEOUT_MS = 20_000;
 const STREAM_UPDATE_TIMEOUT_MS = 15_000;
 const FINAL_FLUSH_TIMEOUT_MS = 20_000;
 const PROGRESS_REFRESH_MS = 15_000;
+const MAX_AUTO_RETRY_KEYS = 200;
+
+export type AutoRetryKeys = Set<string>;
 
 // Lark SDK logs API errors at error level even when the caller catches them.
 // These specific codes are EXPECTED in our flow (wiki-node lookup that
@@ -133,6 +136,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // with everything else. Topic-mode chats only need one chat.get() call ever.
   const chatModeCache = new ChatModeCache();
   const runHistory = new RunHistory();
+  const autoRetryKeys: AutoRetryKeys = new Set();
   // Concurrency cap — reads `preferences.maxConcurrentRuns` on each acquire,
   // so /config bumps take effect for the next run.
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
@@ -212,6 +216,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           scope,
           mode,
           runHistory,
+          pending,
+          autoRetryKeys,
         });
       } catch (err) {
         log.fail('flush', err);
@@ -475,6 +481,8 @@ interface RunBatchDeps {
   scope: string;
   mode: ChatMode;
   runHistory: RunHistory;
+  pending: PendingQueue;
+  autoRetryKeys: AutoRetryKeys;
 }
 
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
@@ -490,6 +498,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     scope,
     mode,
     runHistory,
+    pending,
+    autoRetryKeys,
   } = deps;
   if (batch.length === 0) return;
   const firstMsg = batch[0];
@@ -799,10 +809,84 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       terminal: finalState.terminal,
       errorMsg: finalState.errorMsg,
     });
+    maybeEnqueueAutoRetryForOpaqueSdkError({
+      scope,
+      batch,
+      finalState,
+      handleInterrupted: handle.interrupted,
+      pending,
+      autoRetryKeys,
+    });
     activeRuns.unregister(scope, run);
     if (reactionId) {
       await removeReaction(channel, lastMsg.messageId, reactionId);
     }
+  }
+}
+
+export function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
+  scope: string;
+  batch: NormalizedMessage[];
+  finalState: RunState;
+  handleInterrupted: boolean;
+  pending: PendingQueue;
+  autoRetryKeys: AutoRetryKeys;
+}): boolean {
+  const { scope, batch, finalState, handleInterrupted, pending, autoRetryKeys } = opts;
+  const key = autoRetryKey(scope, batch);
+  if (
+    !shouldAutoRetryOpaqueSdkError(finalState, handleInterrupted, pending.queuedSize(scope)) ||
+    autoRetryKeys.has(key)
+  ) {
+    return false;
+  }
+
+  rememberAutoRetryKey(autoRetryKeys, key);
+  for (const msg of batch) {
+    pending.push(scope, { ...msg });
+  }
+  log.warn('run', 'auto-retry-opaque-sdk-error', {
+    scope,
+    batchSize: batch.length,
+    runId: finalState.runId,
+    errorMsg: finalState.errorMsg,
+  });
+  return true;
+}
+
+export function shouldAutoRetryOpaqueSdkError(
+  finalState: RunState,
+  handleInterrupted: boolean,
+  queuedPending: number,
+): boolean {
+  return (
+    finalState.terminal === 'error' &&
+    !handleInterrupted &&
+    queuedPending === 0 &&
+    isOpaqueCursorSdkRunError(finalState.errorMsg)
+  );
+}
+
+function isOpaqueCursorSdkRunError(message: string | undefined): boolean {
+  if (!message) return false;
+  return (
+    message.includes('sdk run failed') &&
+    message.includes('status=error') &&
+    message.includes('Cursor returned no error detail')
+  );
+}
+
+function autoRetryKey(scope: string, batch: NormalizedMessage[]): string {
+  const ids = batch.map((msg) => msg.messageId || `${msg.chatId}:${msg.content}`).join(',');
+  return `${scope}:${ids}`;
+}
+
+function rememberAutoRetryKey(keys: AutoRetryKeys, key: string): void {
+  keys.add(key);
+  while (keys.size > MAX_AUTO_RETRY_KEYS) {
+    const oldest = keys.values().next().value;
+    if (!oldest) break;
+    keys.delete(oldest);
   }
 }
 

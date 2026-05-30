@@ -263,7 +263,7 @@ grep '"event":"enter"' ~/.lark-channel/logs/$(date +%Y-%m-%d).log | tail -5
 
 **怎么排查卡片卡住或 Cursor SDK worker 异常？** 运行 `/doctor <现象描述>`，它会把最近结构化日志和 run timeline 喂给 agent 自诊断。timeline 覆盖 `intake -> queue -> session -> agent -> card update -> done`，能帮助判断问题停在 Lark 更新、session 准备还是 agent 本身。只看 Cursor SDK worker 状态可以运行 `/workers` 或 `/doctor workers`。
 
-**Cursor SDK 返回没有细节的 `status=error` 怎么办？** bridge 会把这类不透明 Cursor SDK run 失败视为当前 SDK worker 的 fatal 错误：展示最终原因、丢弃该 worker，并在后续运行中使用新 worker/session。限流、网络和 stale-session 等可恢复路径会记录自动恢复步骤和最终失败原因。
+**Cursor SDK 返回没有细节的 `status=error` 怎么办？** bridge 会把这类不透明 Cursor SDK run 失败视为当前 SDK worker 的 fatal 错误：展示最终原因、丢弃该 worker，并在后续运行中使用新 worker/session。如果同一 chat / 话题里没有更新的用户消息排队，bridge 还会在原范围内自动重放一次原任务；仍失败时再回退到一键重试按钮。限流、网络和 stale-session 等可恢复路径会记录自动恢复步骤和最终失败原因。
 
 **图片发过去 Claude 说看不到**：升级到最新版，0.1.0 之前的版本有文件名去重 bug。
 

@@ -3,7 +3,12 @@ import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import type { AgentEvent, AgentRun } from '../../src/agent/types';
 import type { RunHandle } from '../../src/bot/active-runs';
 import { ActiveRuns } from '../../src/bot/active-runs';
-import { interruptScopeNow, processAgentStream } from '../../src/bot/channel';
+import {
+  interruptScopeNow,
+  maybeEnqueueAutoRetryForOpaqueSdkError,
+  processAgentStream,
+  shouldAutoRetryOpaqueSdkError,
+} from '../../src/bot/channel';
 import { PendingQueue } from '../../src/bot/pending-queue';
 import { createInitialState } from '../../src/card/run-state';
 import type { SessionStore } from '../../src/session/store';
@@ -305,6 +310,63 @@ describe('interruptScopeNow', () => {
 
     expect(stopCount).toBe(1);
     expect(flushCount).toBe(0);
+  });
+});
+
+describe('opaque Cursor SDK auto retry', () => {
+  test('recognizes only uninterrupted opaque SDK status errors with no queued user messages', () => {
+    const state = {
+      ...createInitialState('run-1'),
+      terminal: 'error' as const,
+      errorMsg:
+        'agent 失败:sdk run failed (runId=run-1, status=error); Cursor returned no error detail | result={"status":"error"}',
+    };
+
+    expect(shouldAutoRetryOpaqueSdkError(state, false, 0)).toBe(true);
+    expect(shouldAutoRetryOpaqueSdkError(state, true, 0)).toBe(false);
+    expect(shouldAutoRetryOpaqueSdkError(state, false, 1)).toBe(false);
+    expect(shouldAutoRetryOpaqueSdkError({ ...state, errorMsg: 'Cursor API 鉴权失败' }, false, 0)).toBe(false);
+  });
+
+  test('queues the original batch once for opaque SDK status errors', () => {
+    const flushed: NormalizedMessage[][] = [];
+    const pending = new PendingQueue(1000, (_scope, batch) => {
+      flushed.push(batch);
+    });
+    const batch = [fakeMessage('msg-1'), fakeMessage('msg-2')];
+    const state = {
+      ...createInitialState('run-1'),
+      terminal: 'error' as const,
+      errorMsg:
+        'sdk run failed (runId=run-87dd74df-deb6-45ca-8862-85847622ee9a, status=error); Cursor returned no error detail',
+    };
+    const autoRetryKeys = new Set<string>();
+
+    expect(
+      maybeEnqueueAutoRetryForOpaqueSdkError({
+        scope: 'chat-1',
+        batch,
+        finalState: state,
+        handleInterrupted: false,
+        pending,
+        autoRetryKeys,
+      }),
+    ).toBe(true);
+    expect(pending.queuedSize('chat-1')).toBe(2);
+    pending.cancel('chat-1');
+
+    expect(
+      maybeEnqueueAutoRetryForOpaqueSdkError({
+        scope: 'chat-1',
+        batch,
+        finalState: state,
+        handleInterrupted: false,
+        pending,
+        autoRetryKeys,
+      }),
+    ).toBe(false);
+    expect(pending.queuedSize('chat-1')).toBe(0);
+    expect(flushed).toEqual([]);
   });
 });
 
