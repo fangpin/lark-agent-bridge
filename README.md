@@ -79,6 +79,7 @@ After enabling those, run `lark-agent-bridge start` again. Once you see `✓ Con
 lark-agent-bridge start [-c <config>]   Start the bot
 lark-agent-bridge start --check            Run setup diagnostics and exit
 npx -y lark-agent-bridge@latest start  Start without installing
+lark-agent-bridge migrate                Migrate legacy config/cache paths
 lark-agent-bridge ps                    List all running start processes on this machine
 lark-agent-bridge stop <id|#>           Stop a start process (SIGTERM, SIGKILL after 2s)
 lark-agent-bridge --help                List all commands
@@ -86,7 +87,7 @@ lark-agent-bridge --help                List all commands
 
 > When the same app is started multiple times, Lark's open platform routes events to one of the live WebSocket connections at random. `start` detects existing processes for the same app and (in a TTY) prompts: `[c]ontinue / [k]ill old / [a]bort`. In non-TTY mode it warns and continues.
 
-`handover` / `workspace` / `service` are placeholders, planned for later releases.
+Host CLI entries for `status`, `doctor`, `handover`, `workspace`, and `service` are currently registered placeholders that print `not implemented yet`; use the in-chat slash commands below for the implemented runtime views and controls.
 
 ### Slash commands inside Feishu / Lark
 
@@ -296,6 +297,22 @@ The `/config` form writes to `~/.lark-channel/config.json` under `preferences.ac
 ```
 
 After a manual edit, **restart the bridge** or send **`/reconnect`** from any allowed chat to pick up the changes. The form is usually faster; direct edits make sense mostly for deployment scripts where you want to pre-seed access policy.
+
+## Release Checklist
+
+Publishing uses npmjs, regardless of any local company npm registry:
+
+```bash
+npm test
+npm version patch
+npm run release:check -- --registry https://registry.npmjs.org/
+npm run prepublishOnly
+git push origin main
+git push origin v$(node -p "require('./package.json').version")
+npm publish --access public --registry https://registry.npmjs.org/
+```
+
+`release:check` verifies that `package.json` and `package-lock.json` agree, the release commit is on `main`, `HEAD` matches `origin/main`, and the exact package version is not already present on npmjs. It ignores untracked scratch files by default but fails on tracked worktree changes.
 
 ## FAQ
 

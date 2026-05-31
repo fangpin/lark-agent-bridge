@@ -25,7 +25,8 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "prepublishOnly": "npm run typecheck && npm run build"
+    "prepublishOnly": "npm run typecheck && npm run build",
+    "release:check": "node tools/release-check.mjs"
   },
   "dependencies": {
     "@bufbuild/protobuf": "1.10.0",

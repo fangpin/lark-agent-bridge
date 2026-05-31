@@ -19,10 +19,15 @@ export interface CodexAdapterOptions {
 }
 
 type CodexChild = ChildProcessByStdio<null, Readable, Readable>;
+interface CodexAttempt {
+  child: CodexChild;
+  events: AsyncGenerator<AgentEvent>;
+}
 
 const DEFAULT_AVAILABILITY_TIMEOUT_MS = 5_000;
 const DEFAULT_AVAILABILITY_STOP_GRACE_MS = 1_000;
 const NO_SANDBOX_ARG = '--dangerously-bypass-approvals-and-sandbox';
+const CODEX_RESPONSE_FAILED_ERROR = 'stream disconnected before completion: response.failed event received';
 
 function quoteShellArg(arg: string): string {
   if (arg.length === 0) return "''";
@@ -141,18 +146,13 @@ export class CodexAdapter implements AgentAdapter {
     return sessionId.trim().length > 0;
   }
 
-  run(opts: AgentRunOptions): AgentRun {
-    if (opts.cwd) {
-      const cwdError = validateWorkingDirectory(opts.cwd);
-      if (cwdError) return errorRun(cwdError);
-    }
-
+  private startAttempt(opts: AgentRunOptions, sessionId?: string): CodexAttempt {
     const model = opts.model ?? this.defaultModel;
     const codexArgs = buildCodexExecArgs({
       prompt: opts.prompt,
       cwd: opts.cwd,
       model,
-      sessionId: opts.sessionId,
+      sessionId,
     });
 
     const child = spawn(this.command, this.buildProcessArgs(codexArgs), {
@@ -165,7 +165,7 @@ export class CodexAdapter implements AgentAdapter {
       pid: child.pid ?? null,
       command: this.commandLabel,
       cwd: opts.cwd ?? process.cwd(),
-      hasSession: Boolean(opts.sessionId),
+      hasSession: Boolean(sessionId),
       promptChars: opts.prompt.length,
       model,
       runtime: 'codex',
@@ -193,12 +193,30 @@ export class CodexAdapter implements AgentAdapter {
       log.info('agent', 'exit', { pid: child.pid ?? null, code, signal, runtime: 'codex' });
     });
 
+    return {
+      child,
+      events: createEventStream(child, stderrChunks, () => runtimeError, this.commandLabel),
+    };
+  }
+
+  run(opts: AgentRunOptions): AgentRun {
+    if (opts.cwd) {
+      const cwdError = validateWorkingDirectory(opts.cwd);
+      if (cwdError) return errorRun(cwdError);
+    }
+
     const stopGraceMs = opts.stopGraceMs ?? 5000;
+    let currentChild: CodexChild | undefined;
+    let stopped = false;
 
     return {
-      events: createEventStream(child, stderrChunks, () => runtimeError, this.commandLabel),
+      events: this.createRetryingEventStream(opts, (child) => {
+        currentChild = child;
+      }, () => stopped),
       async stop() {
-        if (child.exitCode !== null || child.signalCode !== null) return;
+        stopped = true;
+        const child = currentChild;
+        if (!child || child.exitCode !== null || child.signalCode !== null) return;
         log.info('agent', 'stop-sigterm', { pid: child.pid ?? null, graceMs: stopGraceMs });
         child.kill('SIGTERM');
         await new Promise<void>((resolve) => {
@@ -220,6 +238,8 @@ export class CodexAdapter implements AgentAdapter {
         });
       },
       waitForExit(timeoutMs: number): Promise<boolean> {
+        const child = currentChild;
+        if (!child) return Promise.resolve(true);
         if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
         return new Promise<boolean>((resolve) => {
           const onExit = (): void => {
@@ -235,6 +255,49 @@ export class CodexAdapter implements AgentAdapter {
       },
     };
   }
+
+  private async *createRetryingEventStream(
+    opts: AgentRunOptions,
+    setCurrentChild: (child: CodexChild) => void,
+    isStopped: () => boolean,
+  ): AsyncGenerator<AgentEvent> {
+    let sessionId = opts.sessionId;
+    for (let attemptIndex = 0; attemptIndex < 2; attemptIndex += 1) {
+      const attempt = this.startAttempt(opts, sessionId);
+      setCurrentChild(attempt.child);
+      let shouldRetry = false;
+
+      for await (const event of attempt.events) {
+        if (event.type === 'system' && event.sessionId) sessionId = event.sessionId;
+        if (
+          event.type === 'error' &&
+          attemptIndex === 0 &&
+          !isStopped() &&
+          isRetryableCodexStreamError(event.message)
+        ) {
+          shouldRetry = true;
+          log.warn('agent', 'codex-auto-retry', {
+            reason: event.message,
+            sessionId: sessionId ?? null,
+            command: this.commandLabel,
+          });
+          break;
+        }
+        yield event;
+      }
+
+      if (!shouldRetry) return;
+      yield {
+        type: 'progress',
+        phase: 'thinking',
+        label: 'Codex stream failed before completion; retrying once.',
+      };
+    }
+  }
+}
+
+function isRetryableCodexStreamError(message: string | undefined): boolean {
+  return Boolean(message?.includes(CODEX_RESPONSE_FAILED_ERROR));
 }
 
 export function validateWorkingDirectory(cwd: string): string | undefined {
@@ -321,6 +384,7 @@ async function* createEventStream(
       } catch {
         continue;
       }
+      logCodexRawError(parsed);
       for (const event of translator.translate(parsed)) {
         if (event.type === 'done' || event.type === 'error') emittedTerminal = true;
         yield event;
@@ -347,5 +411,34 @@ async function* createEventStream(
   });
   if (!emittedTerminal && terminalError) {
     yield { type: 'error', message: terminalError };
+  }
+}
+
+function logCodexRawError(parsed: unknown): void {
+  if (!parsed || typeof parsed !== 'object') return;
+  const record = parsed as Record<string, unknown>;
+  if (record.type !== 'error' && record.type !== 'turn.failed') return;
+  log.warn('agent', 'codex-raw-error', {
+    codexEventType: typeof record.type === 'string' ? record.type : undefined,
+    message: codexRawErrorMessage(record),
+    raw: summarizeCodexRawError(record),
+  });
+}
+
+function codexRawErrorMessage(record: Record<string, unknown>): string | undefined {
+  const value = record.error ?? record.message;
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object' && typeof (value as Record<string, unknown>).message === 'string') {
+    return (value as Record<string, unknown>).message as string;
+  }
+  return undefined;
+}
+
+function summarizeCodexRawError(record: Record<string, unknown>): unknown {
+  try {
+    const json = JSON.stringify(record);
+    return json.length > 2_000 ? `${json.slice(0, 2_000)}…` : record;
+  } catch {
+    return String(record);
   }
 }

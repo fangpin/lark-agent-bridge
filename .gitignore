@@ -16,3 +16,5 @@ cursor-sdk-*.tgz
 # Internal-only: dev smoke scripts and full changelog stay local, do not ship
 scripts/
 CHANGELOG.md
+.claude/worktrees
+docs/superpowers

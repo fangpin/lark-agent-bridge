@@ -291,6 +291,42 @@ describe('CodexAdapter', () => {
     expect(events).toEqual(['authentication required']);
   });
 
+  test('retries codex response.failed stream disconnects once with the active session', async () => {
+    const fake = nodeCommand(`
+      const { readFileSync, writeFileSync } = await import('node:fs');
+      const stateFile = process.argv[3];
+      const args = process.argv.slice(4);
+      const count = Number(readFileSync(stateFile, 'utf8') || '0') + 1;
+      writeFileSync(stateFile, String(count));
+      const resumed = args.includes('resume') ? args[args.indexOf('resume') + 1] : '';
+      console.log(JSON.stringify({ type: 'thread.started', thread_id: 'thread-retry' }));
+      if (count === 1) {
+        console.log(JSON.stringify({ type: 'error', message: 'stream disconnected before completion: response.failed event received' }));
+        process.exit(0);
+      }
+      console.log(JSON.stringify({ type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: 'resumed=' + resumed } }));
+      console.log(JSON.stringify({ type: 'turn.completed' }));
+    `);
+    const stateFile = join(tmpdir(), `codex-retry-${process.pid}-${Date.now()}.txt`);
+    writeFileSync(stateFile, '0');
+    const adapter = new CodexAdapter({ command: fake.command, args: [...fake.args, stateFile] });
+    const run = adapter.run({ prompt: 'hello', cwd: process.cwd(), stopGraceMs: 100 });
+    const events: string[] = [];
+
+    for await (const event of run.events) {
+      if (event.type === 'progress') events.push(`progress:${event.label}`);
+      if (event.type === 'text') events.push(`text:${event.delta}`);
+      if (event.type === 'error') events.push(`error:${event.message}`);
+      if (event.type === 'done') events.push(`done:${event.sessionId ?? ''}`);
+    }
+
+    expect(readFileSync(stateFile, 'utf8')).toBe('2');
+    expect(events).toContain('progress:Codex stream failed before completion; retrying once.');
+    expect(events).toContain('text:resumed=thread-retry');
+    expect(events).toContain('done:thread-retry');
+    expect(events.some((event) => event.startsWith('error:'))).toBe(false);
+  });
+
   test('prefers runtime errors over remembered top-level codex errors', () => {
     expect(
       chooseCodexTerminalError({

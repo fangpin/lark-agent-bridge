@@ -79,6 +79,7 @@ npx -y lark-agent-bridge@latest start
 lark-agent-bridge start [-c <config>]   启动 bot
 lark-agent-bridge start --check            只做 setup 自检，不启动 bot
 npx -y lark-agent-bridge@latest start  不安装，直接启动
+lark-agent-bridge migrate                迁移旧版 config/cache 路径
 lark-agent-bridge ps                    列出本机所有正在跑的 start 进程
 lark-agent-bridge stop <id|#>           终止指定 start 进程（SIGTERM，2s 后 SIGKILL）
 lark-agent-bridge --help                列所有命令
@@ -86,7 +87,7 @@ lark-agent-bridge --help                列所有命令
 
 > 多开同一个 app 时，开放平台会把事件随机推到其中一个长连接。`start` 启动前会检测同 app 已有的进程，TTY 下提示 `[c]ontinue / [k]ill old / [a]bort` 三选；非 TTY 只 warn 并继续。
 
-其它命令（`status` / `doctor` / `handover` / `workspace` / `service`）是占位，后续版本补。
+Host CLI 里的 `status` / `doctor` / `handover` / `workspace` / `service` 目前只是已注册的占位命令，会输出 `not implemented yet`；运行时状态和管理能力请使用下面已实现的聊天内斜杠命令。
 
 ### 在飞书里用的斜杠命令
 
@@ -296,6 +297,22 @@ grep '"event":"enter"' ~/.lark-channel/logs/$(date +%Y-%m-%d).log | tail -5
 ```
 
 手改完之后**重启 bridge** 或者**找一个被允许的会话发 `/reconnect`** 让新配置生效。日常调整还是用 `/config` 表单更省事，直接改文件主要用在"部署脚本里预填"之类的场景。
+
+## 发布检查清单
+
+发布使用 npmjs，不受本机公司 npm registry 配置影响：
+
+```bash
+npm test
+npm version patch
+npm run release:check -- --registry https://registry.npmjs.org/
+npm run prepublishOnly
+git push origin main
+git push origin v$(node -p "require('./package.json').version")
+npm publish --access public --registry https://registry.npmjs.org/
+```
+
+`release:check` 会确认 `package.json` 和 `package-lock.json` 版本一致、release commit 在 `main` 上、`HEAD` 与 `origin/main` 一致，并且相同版本还没有发布到 npmjs。默认忽略未跟踪的临时文件，但如果存在已跟踪文件改动会失败。
 
 ## 常见问题
 
