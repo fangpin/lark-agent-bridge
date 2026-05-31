@@ -28,16 +28,25 @@ interface CodexItem {
 
 export interface CodexTranslator {
   translate(raw: unknown): Generator<AgentEvent>;
+  lastTopLevelError(): string | undefined;
 }
 
 export function createCodexTranslator(): CodexTranslator {
   let sessionId: string | undefined;
+  let lastTopLevelError: string | undefined;
   return {
     *translate(raw: unknown): Generator<AgentEvent> {
+      if (raw && typeof raw === 'object') {
+        const evt = raw as CodexRawEvent;
+        if (evt.type === 'error') lastTopLevelError = errorMessage(evt.error ?? evt.message);
+      }
       for (const event of translateCodexEvent(raw, sessionId)) {
         if (event.type === 'system' && event.sessionId) sessionId = event.sessionId;
         yield event;
       }
+    },
+    lastTopLevelError() {
+      return lastTopLevelError;
     },
   };
 }
@@ -51,7 +60,7 @@ export function* translateCodexEvent(raw: unknown, rememberedSessionId?: string)
     return;
   }
 
-  if (evt.type === 'item.started' || evt.type === 'item.completed') {
+  if (evt.type === 'item.started' || evt.type === 'item.updated' || evt.type === 'item.completed') {
     yield* translateItemEvent(evt);
     return;
   }
@@ -92,6 +101,13 @@ function* translateItemEvent(evt: CodexRawEvent): Generator<AgentEvent> {
   if (item.type === 'command_execution') {
     if (evt.type === 'item.started') {
       yield { type: 'tool_use', id, name: 'Bash', input: { command: item.command ?? '' } };
+    } else if (evt.type === 'item.updated') {
+      yield {
+        type: 'progress',
+        phase: 'tool_running',
+        label: item.command ?? 'Codex command',
+        detail: summarizeText(stringifyOutput(item.aggregated_output ?? item.output)),
+      };
     } else if (evt.type === 'item.completed') {
       yield {
         type: 'tool_result',
@@ -123,6 +139,12 @@ function stringifyOutput(output: unknown): string {
   } catch {
     return String(output);
   }
+}
+
+function summarizeText(text: string): string | undefined {
+  const compact = text.replace(/\s+/g, ' ').trim();
+  if (!compact) return undefined;
+  return compact.length > 120 ? `${compact.slice(0, 120)}…` : compact;
 }
 
 function errorMessage(value: unknown): string {

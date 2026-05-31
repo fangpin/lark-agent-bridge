@@ -118,6 +118,24 @@ describe('translateCodexEvent', () => {
     ]);
   });
 
+  test('translates command item updates into progress to refresh activity', () => {
+    expect([
+      ...translateCodexEvent({
+        type: 'item.updated',
+        item: { id: 'cmd-1', type: 'command_execution', command: 'npm test', aggregated_output: 'still running' },
+      }),
+    ]).toEqual([{ type: 'progress', phase: 'tool_running', label: 'npm test', detail: 'still running' }]);
+  });
+
+  test('records top-level codex errors without making them terminal immediately', () => {
+    const translator = createCodexTranslator();
+
+    expect([...translator.translate({ type: 'error', message: 'authentication required' })]).toEqual([
+      { type: 'progress', phase: 'thinking', label: 'authentication required' },
+    ]);
+    expect(translator.lastTopLevelError()).toBe('authentication required');
+  });
+
   test('ignores unknown shapes', () => {
     expect([...translateCodexEvent({ type: 'unknown', item: { type: 'mystery' } })]).toEqual([]);
     expect([...translateCodexEvent(null)]).toEqual([]);

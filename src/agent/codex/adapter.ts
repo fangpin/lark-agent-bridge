@@ -1,9 +1,11 @@
 import type { ChildProcessByStdio } from 'node:child_process';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import type { Readable } from 'node:stream';
 import { log } from '../../core/logger';
+import { BRIDGE_SYSTEM_PROMPT } from '../claude/adapter';
 import type { AgentAdapter, AgentDescriptor, AgentEvent, AgentRun, AgentRunOptions } from '../types';
 import { createCodexTranslator } from './stream-json';
 
@@ -12,9 +14,14 @@ export interface CodexAdapterOptions {
   args?: string[];
   codexArgsOption?: string;
   defaultModel?: string;
+  availabilityTimeoutMs?: number;
+  availabilityStopGraceMs?: number;
 }
 
 type CodexChild = ChildProcessByStdio<null, Readable, Readable>;
+
+const DEFAULT_AVAILABILITY_TIMEOUT_MS = 5_000;
+const DEFAULT_AVAILABILITY_STOP_GRACE_MS = 1_000;
 
 function quoteShellArg(arg: string): string {
   if (arg.length === 0) return "''";
@@ -26,21 +33,38 @@ function joinShellArgs(args: string[]): string {
   return args.map(quoteShellArg).join(' ');
 }
 
+export function buildCodexPrompt(prompt: string): string {
+  return `<bridge_system_prompt>\n${BRIDGE_SYSTEM_PROMPT}\n</bridge_system_prompt>\n\n<user_prompt>\n${prompt}\n</user_prompt>`;
+}
+
+function codexSessionKey(command: string, args: string[], codexArgsOption: string | undefined): string {
+  const hash = createHash('sha1')
+    .update(JSON.stringify({ command, args, codexArgsOption: codexArgsOption ?? '' }))
+    .digest('hex')
+    .slice(0, 10);
+  return `codex:${hash}`;
+}
+
 export class CodexAdapter implements AgentAdapter {
   readonly id = 'codex';
-  readonly sessionKey = 'codex';
+  readonly sessionKey: string;
   readonly displayName = 'Codex CLI';
 
   private readonly command: string;
   private readonly prefixArgs: string[];
   private readonly codexArgsOption?: string;
   private readonly defaultModel?: string;
+  private readonly availabilityTimeoutMs: number;
+  private readonly availabilityStopGraceMs: number;
 
   constructor(opts: CodexAdapterOptions = {}) {
     this.command = opts.command ?? 'codex';
     this.prefixArgs = opts.args ?? [];
     this.codexArgsOption = opts.codexArgsOption;
     this.defaultModel = opts.defaultModel;
+    this.availabilityTimeoutMs = opts.availabilityTimeoutMs ?? DEFAULT_AVAILABILITY_TIMEOUT_MS;
+    this.availabilityStopGraceMs = opts.availabilityStopGraceMs ?? DEFAULT_AVAILABILITY_STOP_GRACE_MS;
+    this.sessionKey = codexSessionKey(this.command, this.prefixArgs, this.codexArgsOption);
   }
 
   get commandLabel(): string {
@@ -62,8 +86,38 @@ export class CodexAdapter implements AgentAdapter {
   async isAvailable(): Promise<boolean> {
     return new Promise((resolve) => {
       const child = spawn(this.command, this.buildProcessArgs(['--version']), { stdio: 'ignore' });
-      child.on('error', () => resolve(false));
-      child.on('exit', (code) => resolve(code === 0));
+      let settled = false;
+      let timedOut = false;
+      let timeoutTimer: NodeJS.Timeout | undefined;
+      let graceTimer: NodeJS.Timeout | undefined;
+
+      const cleanup = (): void => {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        if (graceTimer) clearTimeout(graceTimer);
+        child.removeListener('error', onError);
+        child.removeListener('exit', onExit);
+      };
+      const finish = (available: boolean): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(available);
+      };
+      const onError = (): void => finish(false);
+      const onExit = (code: number | null): void => finish(timedOut ? false : code === 0);
+
+      timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGTERM');
+        graceTimer = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) {
+            child.kill('SIGKILL');
+          }
+        }, this.availabilityStopGraceMs);
+      }, this.availabilityTimeoutMs);
+
+      child.on('error', onError);
+      child.on('exit', onExit);
     });
   }
 
@@ -83,11 +137,12 @@ export class CodexAdapter implements AgentAdapter {
     }
 
     const model = opts.model ?? this.defaultModel;
+    const prompt = buildCodexPrompt(opts.prompt);
     const codexArgs = ['exec', '--json'];
     if (opts.cwd) codexArgs.push('-C', opts.cwd);
     if (model) codexArgs.push('--model', model);
-    if (opts.sessionId) codexArgs.push('resume', opts.sessionId, opts.prompt);
-    else codexArgs.push(opts.prompt);
+    if (opts.sessionId) codexArgs.push('resume', opts.sessionId, '--', prompt);
+    else codexArgs.push('--', prompt);
 
     const child = spawn(this.command, this.buildProcessArgs(codexArgs), {
       cwd: opts.cwd,
@@ -185,6 +240,20 @@ export function validateWorkingDirectory(cwd: string): string | undefined {
   return undefined;
 }
 
+export function chooseCodexTerminalError(opts: {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stderr: string;
+  runtimeError: Error | null;
+  topLevelError?: string;
+}): string | undefined {
+  const detail = opts.stderr ? `: ${opts.stderr.slice(0, 500)}` : '';
+  if (opts.code !== 0 && opts.code !== null) return `codex exited with code ${opts.code}${detail}`;
+  if (opts.signal !== null) return `codex exited with signal ${opts.signal}${detail}`;
+  if (opts.runtimeError) return `codex runtime error: ${opts.runtimeError.message}`;
+  return opts.topLevelError;
+}
+
 function errorRun(message: string): AgentRun {
   return {
     events: (async function* (): AsyncGenerator<AgentEvent> {
@@ -258,16 +327,14 @@ async function* createEventStream(
     }
   });
 
-  const runtimeError = getError();
-  if (!emittedTerminal && code !== 0 && code !== null) {
-    const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
-    const detail = stderr ? `: ${stderr.slice(0, 500)}` : '';
-    yield { type: 'error', message: `codex exited with code ${code}${detail}` };
-  } else if (!emittedTerminal && signal !== null) {
-    const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
-    const detail = stderr ? `: ${stderr.slice(0, 500)}` : '';
-    yield { type: 'error', message: `codex exited with signal ${signal}${detail}` };
-  } else if (!emittedTerminal && runtimeError) {
-    yield { type: 'error', message: `codex runtime error: ${runtimeError.message}` };
+  const terminalError = chooseCodexTerminalError({
+    code,
+    signal,
+    stderr: Buffer.concat(stderrChunks).toString('utf8').trim(),
+    runtimeError: getError(),
+    topLevelError: translator.lastTopLevelError(),
+  });
+  if (!emittedTerminal && terminalError) {
+    yield { type: 'error', message: terminalError };
   }
 }

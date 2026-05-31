@@ -24,7 +24,7 @@ describe('createAgentAdapter', () => {
     );
 
     expect(adapter.id).toBe('codex');
-    expect(adapter.sessionKey).toBe('codex');
+    expect(adapter.sessionKey).toMatch(/^codex:/);
     expect(adapter.commandLabel).toBe('codex-wrapper --sandbox workspace-write');
     expect(adapter.descriptor).toMatchObject({
       id: 'codex',

@@ -1,14 +1,28 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { CodexAdapter } from '../../../src/agent/codex/adapter';
+import { CodexAdapter, chooseCodexTerminalError } from '../../../src/agent/codex/adapter';
 
 function nodeCommand(script: string): { command: string; args: string[] } {
   const dir = mkdtempSync(join(tmpdir(), 'codex-adapter-'));
   const file = join(dir, 'fake-codex.mjs');
   writeFileSync(file, script);
   return { command: process.execPath, args: [file, file] };
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    throw err;
+  }
+}
+
+async function delay(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function collectText(adapter: CodexAdapter, cwd: string, sessionId?: string): Promise<string[]> {
@@ -60,7 +74,9 @@ describe('CodexAdapter', () => {
     const events = await collectText(adapter, process.cwd(), 'thread-existing');
 
     expect(events[1]).toContain('--sandbox workspace-write exec --json -C');
-    expect(events[1]).toContain('resume thread-existing hello');
+    expect(events[1]).toContain('resume thread-existing --');
+    expect(events[1]).toContain('<user_prompt>');
+    expect(events[1]).toContain('hello');
   });
 
   test('passes generated codex args through wrapper option when configured', async () => {
@@ -84,7 +100,9 @@ describe('CodexAdapter', () => {
     expect(argv[4]).toContain('exec --json');
     expect(argv[4]).toContain('-C');
     expect(argv[4]).toContain('--model gpt-test');
-    expect(argv[4]).toContain('resume thread-existing hello');
+    expect(argv[4]).toContain('resume thread-existing --');
+    expect(argv[4]).toContain('<user_prompt>');
+    expect(argv[4]).toContain('hello');
   });
 
   test('checks wrapper availability by passing version through codex args option', async () => {
@@ -100,6 +118,30 @@ describe('CodexAdapter', () => {
     });
 
     await expect(adapter.isAvailable()).resolves.toBe(true);
+  });
+
+  test('availability check kills codex wrapper that ignores SIGTERM', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'codex-adapter-'));
+    const pidFile = join(dir, 'pid.txt');
+    const file = join(dir, 'fake-codex.mjs');
+    writeFileSync(
+      file,
+      `import { writeFileSync } from 'node:fs';\nprocess.on('SIGTERM', () => {});\nconst pidFile = process.argv.find((arg) => arg.endsWith('/pid.txt'));\nif (!pidFile) throw new Error('missing pid file argument');\nwriteFileSync(pidFile, String(process.pid));\nsetTimeout(() => {}, 10_000);\n`,
+    );
+    const adapter = new CodexAdapter({
+      command: process.execPath,
+      args: [file, pidFile],
+      availabilityTimeoutMs: 30,
+      availabilityStopGraceMs: 30,
+    });
+
+    const startedAt = Date.now();
+    await expect(adapter.isAvailable()).resolves.toBe(false);
+    const elapsedMs = Date.now() - startedAt;
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    await delay(80);
+    expect(isPidAlive(pid)).toBe(false);
+    expect(elapsedMs).toBeLessThan(250);
   });
 
   test('reports a missing working directory before spawning codex', async () => {
@@ -167,5 +209,104 @@ describe('CodexAdapter', () => {
 
     expect(adapter.canResumeSession?.('thread-1')).toBe(true);
     expect(adapter.canResumeSession?.('')).toBe(false);
+  });
+
+  test('wraps prompts with the bridge system prompt contract', async () => {
+    const fake = nodeCommand(`
+      const args = process.argv.slice(2);
+      console.log(JSON.stringify({ type: 'thread.started', thread_id: 'thread-prompt' }));
+      console.log(JSON.stringify({ type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: args.at(-1) } }));
+      console.log(JSON.stringify({ type: 'turn.completed' }));
+    `);
+    const adapter = new CodexAdapter({ command: fake.command, args: fake.args });
+
+    const events = await collectText(adapter, process.cwd());
+
+    expect(events[1]).toContain('<bridge_system_prompt>');
+    expect(events[1]).toContain('<user_prompt>');
+    expect(events[1]).toContain('hello');
+    expect(events[1]).toContain('__claude_cb');
+  });
+
+  test('separates resume prompts that start with dash from codex options', async () => {
+    const fake = nodeCommand(`
+      const args = process.argv.slice(2);
+      console.log(JSON.stringify({ type: 'thread.started', thread_id: 'thread-dash' }));
+      console.log(JSON.stringify({ type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: JSON.stringify(args) } }));
+      console.log(JSON.stringify({ type: 'turn.completed' }));
+    `);
+    const adapter = new CodexAdapter({ command: fake.command, args: fake.args });
+    const run = adapter.run({ prompt: '--help', cwd: process.cwd(), sessionId: 'thread-existing', stopGraceMs: 100 });
+    const out: string[] = [];
+    for await (const event of run.events) {
+      if (event.type === 'text') out.push(event.delta);
+    }
+
+    const argv = JSON.parse(out[0]!) as string[];
+    const resumeIndex = argv.indexOf('resume');
+    expect(argv.slice(resumeIndex, resumeIndex + 4)).toEqual([
+      'resume',
+      'thread-existing',
+      '--',
+      expect.stringContaining('--help'),
+    ]);
+  });
+
+  test('isolates codex sessions by command, wrapper args, and args option', () => {
+    const direct = new CodexAdapter({ command: 'codex' });
+    const wrappedA = new CodexAdapter({ command: 'ttadk', args: ['--profile', 'a'], codexArgsOption: '--claude-args' });
+    const wrappedB = new CodexAdapter({ command: 'ttadk', args: ['--profile', 'b'], codexArgsOption: '--claude-args' });
+
+    expect(direct.sessionKey).toMatch(/^codex:/);
+    expect(wrappedA.sessionKey).toMatch(/^codex:/);
+    expect(new Set([direct.sessionKey, wrappedA.sessionKey, wrappedB.sessionKey]).size).toBe(3);
+  });
+
+  test('surfaces top-level codex errors as terminal when no completion follows', async () => {
+    const fake = nodeCommand(`
+      console.log(JSON.stringify({ type: 'error', message: 'authentication required' }));
+    `);
+    const adapter = new CodexAdapter({ command: fake.command, args: fake.args });
+    const run = adapter.run({ prompt: 'hello', cwd: process.cwd(), stopGraceMs: 100 });
+    const events: string[] = [];
+
+    for await (const event of run.events) {
+      if (event.type === 'error') events.push(event.message);
+    }
+
+    expect(events).toEqual(['authentication required']);
+  });
+
+  test('prefers runtime errors over remembered top-level codex errors', () => {
+    expect(
+      chooseCodexTerminalError({
+        code: 0,
+        signal: null,
+        stderr: '',
+        runtimeError: new Error('stream exploded'),
+        topLevelError: 'transient reconnect',
+      }),
+    ).toBe('codex runtime error: stream exploded');
+  });
+
+  test('prefers process exit diagnostics over remembered top-level codex errors', () => {
+    expect(
+      chooseCodexTerminalError({
+        code: 7,
+        signal: null,
+        stderr: 'auth failed',
+        runtimeError: new Error('later'),
+        topLevelError: 'transient reconnect',
+      }),
+    ).toBe('codex exited with code 7: auth failed');
+    expect(
+      chooseCodexTerminalError({
+        code: null,
+        signal: 'SIGTERM',
+        stderr: '',
+        runtimeError: new Error('later'),
+        topLevelError: 'transient reconnect',
+      }),
+    ).toBe('codex exited with signal SIGTERM');
   });
 });

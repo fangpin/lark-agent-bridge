@@ -129,7 +129,7 @@ lark-agent-bridge --help                List all commands
 
 ### Setup diagnostics
 
-Use `lark-agent-bridge start --check` before starting the bot, or `/doctor setup` in chat, to verify local setup without sending a prompt to the agent. The check reports config completeness, backend command availability, cwd accessibility, Codex wrapper mode, Cursor runtime settings, chat access allowlists, and duplicate bot processes. It does not perform a real model call, so it can catch wrapper/auth/PATH issues without consuming tokens.
+Use `lark-agent-bridge start --check` before starting the bot, or `/doctor setup` in chat, to verify local setup without sending a prompt to the agent. The check reports config completeness, app-secret resolvability, backend command availability, cwd accessibility, Codex wrapper mode, Cursor runtime settings, chat access allowlists, and duplicate bot processes. Checks are bounded and do not perform a real model call, so they can catch wrapper/auth/PATH/secret issues without consuming tokens.
 
 > Upgrading from before 0.1.11? Run `lark-agent-bridge migrate` once — it moves anything under the legacy `~/.config/lark-channel-bridge/` and `~/.cache/lark-channel-bridge/` paths to the new location and upgrades `config.json` to the new schema.
 

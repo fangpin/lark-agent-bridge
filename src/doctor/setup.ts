@@ -1,5 +1,6 @@
 import { stat } from 'node:fs/promises';
 import type { AgentAdapter } from '../agent/types';
+import { resolveAppSecret } from '../config/secret-resolver';
 import type { AppConfig } from '../config/schema';
 import {
   getAgentCommand,
@@ -33,7 +34,12 @@ export interface SetupDiagnosticsInput {
   cwd: string;
   chat?: { chatId: string; chatMode: 'p2p' | 'group' | 'topic'; senderId: string };
   sameAppProcesses: ProcessEntry[];
+  timeouts?: { agentAvailableMs?: number; secretResolveMs?: number };
+  resolveAppSecret?: (cfg: AppConfig) => Promise<string>;
 }
+
+const DEFAULT_AGENT_AVAILABLE_TIMEOUT_MS = 5_000;
+const DEFAULT_SECRET_RESOLVE_TIMEOUT_MS = 5_000;
 
 export function runIncompleteSetupDiagnostics(input: { configPath: string }): SetupDiagnosticsResult {
   const checks: SetupDiagnosticCheck[] = [
@@ -67,12 +73,29 @@ export async function runSetupDiagnostics(input: SetupDiagnosticsInput): Promise
     detail: `${input.agent.descriptor.label} / ${input.agent.descriptor.runtime} / ${input.agent.descriptor.sessionKey}`,
   });
 
-  const available = await input.agent.isAvailable().catch(() => false);
+  const secretResolver = input.resolveAppSecret ?? resolveAppSecret;
+  const secretResult = await withTimeoutResult(
+    secretResolver(input.cfg),
+    input.timeouts?.secretResolveMs ?? DEFAULT_SECRET_RESOLVE_TIMEOUT_MS,
+  );
+  checks.push({
+    id: 'app.secret',
+    status: secretResult.ok ? 'pass' : 'fail',
+    title: 'App secret',
+    detail: secretResult.ok ? 'Secret resolved.' : 'Secret resolution failed.',
+    suggestion: secretResult.ok ? undefined : 'Check accounts.app.secret, env vars, file refs, or exec secret provider.',
+  });
+
+  const availability = await withTimeoutResult(
+    input.agent.isAvailable(),
+    input.timeouts?.agentAvailableMs ?? DEFAULT_AGENT_AVAILABLE_TIMEOUT_MS,
+  );
+  const available = availability.ok ? availability.value : false;
   checks.push({
     id: 'agent.available',
     status: available ? 'pass' : 'fail',
     title: 'Agent command available',
-    detail: input.agent.commandLabel,
+    detail: availability.ok ? input.agent.commandLabel : `${input.agent.commandLabel}: ${availability.error.message}`,
     suggestion: available ? undefined : 'Check preferences.agentCommand.command, wrapper args, PATH, or backend login/auth.',
   });
 
@@ -81,7 +104,7 @@ export async function runSetupDiagnostics(input: SetupDiagnosticsInput): Promise
   if (command.backend === 'codex') {
     checks.push({
       id: 'codex.wrapper',
-      status: command.codexArgsOption ? 'info' : 'warn',
+      status: 'info',
       title: 'Codex wrapper mode',
       detail: command.codexArgsOption
         ? `codexArgsOption=${command.codexArgsOption}; availability check uses the wrapper path.`
@@ -131,6 +154,22 @@ export async function runSetupDiagnostics(input: SetupDiagnosticsInput): Promise
   });
 
   return { summary: summarize(checks), checks };
+}
+
+async function withTimeoutResult<T>(promise: Promise<T>, timeoutMs: number): Promise<{ ok: true; value: T } | { ok: false; error: Error }> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise
+        .then((value) => ({ ok: true as const, value }))
+        .catch((err) => ({ ok: false as const, error: err instanceof Error ? err : new Error(String(err)) })),
+      new Promise<{ ok: false; error: Error }>((resolve) => {
+        timer = setTimeout(() => resolve({ ok: false, error: new Error(`timed out after ${timeoutMs}ms`) }), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function cwdCheck(cwd: string): Promise<SetupDiagnosticCheck> {

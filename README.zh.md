@@ -129,7 +129,7 @@ lark-agent-bridge --help                列所有命令
 
 ### Setup 自检
 
-启动前可以用 `lark-agent-bridge start --check`，聊天里可以用 `/doctor setup`，在不向 agent 发送真实 prompt 的情况下检查本地配置。自检会报告 config 是否完整、backend 命令是否可运行、cwd 是否可访问、Codex wrapper 模式、Cursor runtime 设置、当前 chat 权限白名单，以及是否有重复 bot 进程。它不会发起真实模型调用，所以适合排查 wrapper/auth/PATH 问题且不消耗 token。
+启动前可以用 `lark-agent-bridge start --check`，聊天里可以用 `/doctor setup`，在不向 agent 发送真实 prompt 的情况下检查本地配置。自检会报告 config 是否完整、App Secret 是否能解析、backend 命令是否可运行、cwd 是否可访问、Codex wrapper 模式、Cursor runtime 设置、当前 chat 权限白名单，以及是否有重复 bot 进程。检查有超时边界，且不会发起真实模型调用，所以适合排查 wrapper/auth/PATH/secret 问题且不消耗 token。
 
 > 升级自 0.1.11 之前的版本？跑一次 `lark-agent-bridge migrate` —— 自动把旧路径 `~/.config/lark-channel-bridge/` 和 `~/.cache/lark-channel-bridge/` 下的内容搬到新位置，并把 `config.json` 升级到新结构。
 
