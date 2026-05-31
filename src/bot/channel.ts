@@ -469,6 +469,16 @@ export function interruptScopeNow(
   return { interrupted, droppedPending: dropped.length };
 }
 
+export function summarizeBatchForHistory(batch: NormalizedMessage[]): string {
+  const text = batch
+    .map((msg) => msg.content.trim())
+    .filter(Boolean)
+    .join(' / ')
+    .replace(/\s+/g, ' ');
+  if (!text) return batch.length > 1 ? `${batch.length} 条消息` : '空消息';
+  return text.length > 80 ? `${text.slice(0, 80)}…` : text;
+}
+
 interface RunBatchDeps {
   channel: LarkChannel;
   agent: AgentAdapter;
@@ -508,7 +518,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const chatId = firstMsg.chatId;
   const threadId = firstMsg.threadId;
-  const historyEntry = runHistory.create(scope, batch);
+  const cwd = workspaces.cwdFor(scope) ?? homedir();
+  const historyEntry = runHistory.create(scope, batch, {
+    cwd,
+    agent: agent.descriptor,
+    summary: summarizeBatchForHistory(batch),
+  });
   log.info('run', 'timeline', { runId: historyEntry.runId, step: 'intake', batchSize: batch.length });
   log.info('run', 'timeline', { runId: historyEntry.runId, step: 'queue', scope, batchSize: batch.length });
 
@@ -575,7 +590,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     quotes: quotes.length,
   });
 
-  const cwd = workspaces.cwdFor(scope) ?? homedir();
   const sessionKey = agent.sessionKey;
   let resumeFrom = sessions.resumeFor(scope, cwd, sessionKey);
   if (resumeFrom && agent.canResumeSession?.(resumeFrom) === false) {
@@ -703,6 +717,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         sendOpts,
       );
       streamMessageId = result.messageId;
+      runHistory.update(historyEntry.runId, { streamMessageId });
       log.info('run', 'timeline', {
         runId: historyEntry.runId,
         step: 'card-stream-done',
@@ -744,6 +759,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         sendOpts,
       );
       streamMessageId = result.messageId;
+      runHistory.update(historyEntry.runId, { streamMessageId });
       log.info('run', 'timeline', {
         runId: historyEntry.runId,
         step: 'card-stream-done',
@@ -770,7 +786,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       );
       const body = renderText(filterForPrefs(finalState));
       if (body.trim()) {
-        await channel.send(chatId, { markdown: body }, sendOpts);
+        const sent = (await channel.send(chatId, { markdown: body }, sendOpts)) as { messageId?: string };
+        if (sent.messageId) runHistory.update(historyEntry.runId, { streamMessageId: sent.messageId });
       }
     }
   } catch (err) {
@@ -800,9 +817,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           step: 'fallback-send',
           reason: message,
         });
-        await channel.send(chatId, { markdown: fallback }, sendOpts).catch((sendErr) => {
+        const sent = await channel.send(chatId, { markdown: fallback }, sendOpts).catch((sendErr) => {
           log.fail('stream', sendErr, { step: 'fallback-send' });
+          return undefined;
         });
+        if (sent?.messageId) runHistory.update(historyEntry.runId, { streamMessageId: sent.messageId });
       }
     }
   } finally {

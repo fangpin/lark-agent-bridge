@@ -122,6 +122,7 @@ export class SessionStore {
       return;
     }
     const prev = this.data[chatId];
+    if (!prev) return;
     const agents = { ...(prev.agents ?? {}) };
     if (!(sessionKey in agents)) return;
     delete agents[sessionKey];

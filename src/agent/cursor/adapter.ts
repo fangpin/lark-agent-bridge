@@ -1,6 +1,13 @@
 import { spawn } from 'node:child_process';
 import { log } from '../../core/logger';
-import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions, WorkerSnapshot } from '../types';
+import type {
+  AgentAdapter,
+  AgentDescriptor,
+  AgentEvent,
+  AgentRun,
+  AgentRunOptions,
+  WorkerSnapshot,
+} from '../types';
 import { spawnCreateChat } from './create-chat';
 import { CursorSdkPool } from './sdk-pool';
 import { spawnCursorRun, type CursorSpawnOptions } from './spawn-run';
@@ -31,6 +38,7 @@ export class CursorAdapter implements AgentAdapter {
   private readonly command: string;
   private readonly prefixArgs: string[];
   private readonly runtime: 'sdk' | 'cli';
+  private readonly effectiveRuntime: 'sdk' | 'cli';
   private readonly defaultCliModel: string;
   private readonly defaultSdkModel: CursorSdkModelSelection;
   private readonly sdkPool: CursorSdkPool | undefined;
@@ -43,14 +51,15 @@ export class CursorAdapter implements AgentAdapter {
     this.defaultCliModel = opts.defaultCliModel ?? DEFAULT_AGENT_CURSOR_CLI_MODEL;
     this.defaultSdkModel = opts.defaultSdkModel ?? DEFAULT_AGENT_CURSOR_SDK_MODEL;
     const poolSize = opts.sessionPoolSize ?? 0;
-    this.sessionKey = this.runtime === 'sdk' && poolSize > 0 ? 'cursor:sdk' : 'cursor:cli';
+    this.effectiveRuntime = this.runtime === 'sdk' && poolSize > 0 ? 'sdk' : 'cli';
+    this.sessionKey = this.effectiveRuntime === 'sdk' ? 'cursor:sdk' : 'cursor:cli';
     this.spawnOpts = {
       command: this.command,
       prefixArgs: this.prefixArgs,
       commandLabel: this.commandLabel,
       apiKey: opts.apiKey,
     };
-    if (this.runtime === 'sdk' && poolSize > 0) {
+    if (this.effectiveRuntime === 'sdk') {
       const sdkConfig: SdkWorkerConfig = {
         model: this.defaultSdkModel,
         ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
@@ -60,13 +69,25 @@ export class CursorAdapter implements AgentAdapter {
   }
 
   get commandLabel(): string {
-    return this.runtime === 'sdk'
+    return this.effectiveRuntime === 'sdk'
       ? `@cursor/sdk (${this.command})`
       : [this.command, ...this.prefixArgs].join(' ');
   }
 
+  get descriptor(): AgentDescriptor {
+    return {
+      id: this.id,
+      label: this.displayName,
+      runtime: this.effectiveRuntime,
+      sessionKey: this.sessionKey,
+      commandLabel: this.commandLabel,
+      supportsRetry: true,
+      supportsWorkers: this.effectiveRuntime === 'sdk',
+    };
+  }
+
   async isAvailable(): Promise<boolean> {
-    if (this.runtime === 'sdk') {
+    if (this.effectiveRuntime === 'sdk') {
       try {
         await import('@cursor/sdk');
         return true;

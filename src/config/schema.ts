@@ -89,13 +89,14 @@ export interface AppAccess {
   admins?: string[];
 }
 
-export type AgentBackend = 'claude' | 'cursor';
+export type AgentBackend = 'claude' | 'cursor' | 'codex';
 
 export interface AgentCommandConfig {
   backend?: AgentBackend;
   command?: string;
   args?: string[];
   claudeArgsOption?: string;
+  codexArgsOption?: string;
 }
 
 export interface AppPreferences {
@@ -177,6 +178,8 @@ export interface AppPreferences {
    * or `{ source: "exec", id: "cursor-api-key", ... }` in the keystore.
    */
   agentCursorApiKey?: SecretInput;
+  /** Default Codex model passed to `codex exec --model` when using the Codex backend. */
+  agentCodexModel?: string;
   /**
    * Grace period (ms) between SIGTERM and SIGKILL when killing the claude
    * subprocess. Bumped from a hardcoded 500ms because claude often has its
@@ -287,6 +290,11 @@ export function getAgentCursorModel(cfg: AppConfig): string {
   return raw || DEFAULT_AGENT_CURSOR_MODEL;
 }
 
+export function getAgentCodexModel(cfg: AppConfig): string | undefined {
+  const raw = cfg.preferences?.agentCodexModel?.trim();
+  return raw || undefined;
+}
+
 export function getAgentSessionPoolSize(cfg: AppConfig): number {
   const backend = getAgentCommand(cfg).backend;
   const runtime = getAgentCursorRuntime(cfg);
@@ -300,21 +308,36 @@ export function getAgentSessionPoolSize(cfg: AppConfig): number {
 
 export function getAgentCommand(
   cfg: AppConfig,
-): { backend: AgentBackend; command: string; args: string[]; claudeArgsOption?: string } {
+): { backend: AgentBackend; command: string; args: string[]; claudeArgsOption?: string; codexArgsOption?: string } {
   const raw = cfg.preferences?.agentCommand;
-  const backend = raw?.backend === 'cursor' ? 'cursor' : 'claude';
+  const backend: AgentBackend = raw?.backend === 'cursor'
+    ? 'cursor'
+    : raw?.backend === 'codex'
+      ? 'codex'
+      : 'claude';
   const command = typeof raw?.command === 'string' && raw.command.trim()
     ? raw.command.trim()
     : backend === 'cursor'
       ? 'agent'
-      : 'claude';
+      : backend === 'codex'
+        ? 'codex'
+        : 'claude';
   const args = Array.isArray(raw?.args)
     ? raw.args.filter((arg): arg is string => typeof arg === 'string')
     : [];
   const claudeArgsOption = backend === 'claude' && typeof raw?.claudeArgsOption === 'string' && raw.claudeArgsOption.trim()
     ? raw.claudeArgsOption.trim()
     : undefined;
-  return { backend, command, args, ...(claudeArgsOption ? { claudeArgsOption } : {}) };
+  const codexArgsOption = backend === 'codex' && typeof raw?.codexArgsOption === 'string' && raw.codexArgsOption.trim()
+    ? raw.codexArgsOption.trim()
+    : undefined;
+  return {
+    backend,
+    command,
+    args,
+    ...(claudeArgsOption ? { claudeArgsOption } : {}),
+    ...(codexArgsOption ? { codexArgsOption } : {}),
+  };
 }
 
 /**

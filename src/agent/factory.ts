@@ -5,11 +5,13 @@ import {
   getAgentCursorSdkModel,
 } from './cursor/model-selection';
 import {
+  getAgentCodexModel,
   getAgentCommand,
   getAgentCursorRuntime,
   getAgentSessionPoolSize,
 } from '../config/schema';
 import { ClaudeAdapter } from './claude/adapter';
+import { CodexAdapter } from './codex/adapter';
 import { CursorAdapter } from './cursor/adapter';
 import type { AgentAdapter } from './types';
 
@@ -25,6 +27,14 @@ export async function createAgentAdapter(cfg: AppConfig): Promise<AgentAdapter> 
       defaultCliModel: getAgentCursorCliModel(cfg),
       defaultSdkModel: getAgentCursorSdkModel(cfg),
       apiKey,
+    });
+  }
+  if (command.backend === 'codex') {
+    return new CodexAdapter({
+      command: command.command,
+      args: command.args,
+      codexArgsOption: command.codexArgsOption,
+      defaultModel: getAgentCodexModel(cfg),
     });
   }
   return new ClaudeAdapter(command);

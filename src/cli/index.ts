@@ -21,7 +21,8 @@ program
   .command('start')
   .description('Start the bot (runs first-run wizard if bot config is missing)')
   .option('-c, --config <path>', 'path to config file')
-  .action(async (opts: { config?: string }) => {
+  .option('--check', 'run setup diagnostics and exit without starting the bot')
+  .action(async (opts: { config?: string; check?: boolean }) => {
     await runStart(opts);
   });
 

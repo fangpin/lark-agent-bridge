@@ -13,6 +13,15 @@ function mockAgent(
     sessionKey,
     displayName: sessionKey,
     commandLabel: sessionKey,
+    descriptor: {
+      id: sessionKey.split(':')[0] ?? sessionKey,
+      label: sessionKey,
+      runtime: 'test',
+      sessionKey,
+      commandLabel: sessionKey,
+      supportsRetry: true,
+      supportsWorkers: false,
+    },
     isAvailable: async () => true,
     run: () => {
       throw new Error('not used');

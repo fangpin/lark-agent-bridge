@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { Readable } from 'node:stream';
 import { log } from '../../core/logger';
-import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../types';
+import type { AgentAdapter, AgentDescriptor, AgentEvent, AgentRun, AgentRunOptions } from '../types';
 import { translateEvent } from './stream-json';
 
 export interface ClaudeAdapterOptions {
@@ -114,6 +114,18 @@ export class ClaudeAdapter implements AgentAdapter {
 
   get commandLabel(): string {
     return [this.command, ...this.prefixArgs].join(' ');
+  }
+
+  get descriptor(): AgentDescriptor {
+    return {
+      id: this.id,
+      label: this.displayName,
+      runtime: 'cli',
+      sessionKey: this.sessionKey,
+      commandLabel: this.commandLabel,
+      supportsRetry: true,
+      supportsWorkers: false,
+    };
   }
 
   async isAvailable(): Promise<boolean> {

@@ -32,9 +32,16 @@ describe('CursorAdapter', () => {
     expect(adapter.canResumeSession('555e5524-3d1e-4efb-9b95-569bb697768f')).toBe(false);
   });
 
-  test('uses the cli session key when sdk pooling is disabled', () => {
-    const adapter = new CursorAdapter({ runtime: 'sdk', sessionPoolSize: 0 });
+  test('uses the cli runtime metadata when sdk pooling is disabled', () => {
+    const adapter = new CursorAdapter({ runtime: 'sdk', sessionPoolSize: 0, command: 'agent' });
 
     expect(adapter.sessionKey).toBe('cursor:cli');
+    expect(adapter.commandLabel).toBe('agent');
+    expect(adapter.descriptor).toMatchObject({
+      runtime: 'cli',
+      sessionKey: 'cursor:cli',
+      commandLabel: 'agent',
+      supportsWorkers: false,
+    });
   });
 });

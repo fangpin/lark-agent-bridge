@@ -15,7 +15,7 @@ import {
 } from '../card/account-cards';
 import { configCancelledCard, configFormCard, configSavedCard } from '../card/config-card';
 import { forgetManagedCard, sendManagedCard, updateManagedCard } from '../card/managed';
-import { helpCard, resumeCard, statusCard, workspacesCard } from '../card/templates';
+import { helpCard, resumeCard, runDetailCard, runsCard, setupDiagnosticsCard, statusCard, workspacesCard } from '../card/templates';
 import type { AppConfig, MessageReplyMode, TenantBrand } from '../config/schema';
 import {
   getAgentStopGraceMs,
@@ -30,6 +30,7 @@ import {
 import { setSecret } from '../config/keystore';
 import { buildEncryptedAccountConfig, saveConfig } from '../config/store';
 import { log, readRecentLogs, sanitizeLogsForDoctor } from '../core/logger';
+import { runSetupDiagnostics } from '../doctor/setup';
 import { renderCard } from '../card/run-renderer';
 import {
   finalizeIfRunning,
@@ -40,7 +41,7 @@ import {
 } from '../card/run-state';
 import { formatRelTime, listRecentSessions } from '../session/history';
 import { ensureResumeSession } from '../session/ensure-resume';
-import { isAlive, readAndPrune, resolveTarget } from '../runtime/registry';
+import { isAlive, readAndPrune, resolveTarget, sameAppOthers } from '../runtime/registry';
 import type { SessionStore } from '../session/store';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import type { WorkspaceStore } from '../workspace/store';
@@ -104,6 +105,7 @@ const handlers: Record<string, Handler> = {
   '/ws': handleWs,
   '/resume': handleResume,
   '/status': handleStatus,
+  '/runs': handleRuns,
   '/help': handleHelp,
   '/account': handleAccount,
   '/config': handleConfig,
@@ -205,9 +207,16 @@ export async function runCommandHandler(
  * handlers where a failed reply shouldn't bubble up and crash the bot —
  * losing the message is better than dying.
  */
+function replyOptions(ctx: CommandContext): { replyTo: string; replyInThread?: true } {
+  return {
+    replyTo: ctx.msg.messageId,
+    ...(ctx.chatMode === 'topic' && ctx.msg.threadId ? { replyInThread: true as const } : {}),
+  };
+}
+
 async function reply(ctx: CommandContext, markdown: string): Promise<void> {
   try {
-    await ctx.channel.send(ctx.msg.chatId, { markdown }, { replyTo: ctx.msg.messageId });
+    await ctx.channel.send(ctx.msg.chatId, { markdown }, replyOptions(ctx));
   } catch (err) {
     log.fail('command', err, { step: 'reply' });
   }
@@ -215,7 +224,7 @@ async function reply(ctx: CommandContext, markdown: string): Promise<void> {
 
 async function replyCard(ctx: CommandContext, card: object): Promise<void> {
   try {
-    await ctx.channel.send(ctx.msg.chatId, { card }, { replyTo: ctx.msg.messageId });
+    await ctx.channel.send(ctx.msg.chatId, { card }, replyOptions(ctx));
   } catch (err) {
     log.fail('command', err, { step: 'reply-card' });
   }
@@ -470,9 +479,36 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
   );
 }
 
+async function handleRuns(args: string, ctx: CommandContext): Promise<void> {
+  if (!ctx.runHistory) {
+    await reply(ctx, '当前运行环境不支持运行记录。');
+    return;
+  }
+  const trimmed = args.trim();
+  const parts = trimmed.split(/\s+/);
+  const runId = parts[0] === 'detail' ? parts.slice(1).join(' ') : trimmed;
+  if (runId) {
+    const entry = ctx.runHistory.get(runId);
+    if (!entry) {
+      await reply(ctx, `找不到运行记录：\`${runId}\`（只保留最近若干小时的任务）。`);
+      return;
+    }
+    if (entry.scope !== ctx.scope) {
+      await reply(ctx, '这个任务属于另一个会话/话题，不能在当前会话查看。');
+      return;
+    }
+    await replyCard(ctx, runDetailCard(entry));
+    return;
+  }
+
+  const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  await replyCard(ctx, runsCard({ cwd, entries: ctx.runHistory.list(ctx.scope, 10) }));
+}
+
 async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
   const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
   const sess = ctx.sessions.getRaw(ctx.scope, ctx.agent.sessionKey);
+  const latestRun = ctx.runHistory?.list(ctx.scope, 1)[0];
   const card = statusCard({
     cwd,
     sessionId: sess?.sessionId,
@@ -480,8 +516,10 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
     agentName: ctx.agent.displayName,
     scope: ctx.scope,
     chatMode: ctx.chatMode,
+    agent: ctx.agent.descriptor,
+    latestRun,
   });
-  await ctx.channel.send(ctx.msg.chatId, { card }, { replyTo: ctx.msg.messageId });
+  await replyCard(ctx, card);
 }
 
 async function handleStop(_args: string, ctx: CommandContext): Promise<void> {
@@ -651,6 +689,19 @@ async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
   }
   if (entry.scope !== ctx.scope) {
     await reply(ctx, '这个任务属于另一个会话/话题，不能在当前会话重试。');
+    return;
+  }
+  if (entry.terminal !== 'error' && entry.terminal !== 'idle_timeout') {
+    await reply(ctx, '这个任务状态不能重试；只有失败或超时的任务可以重试。');
+    return;
+  }
+  const currentCwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  if (entry.cwd !== currentCwd) {
+    await reply(ctx, '这个任务属于另一个工作目录，不能在当前 cwd 重试。');
+    return;
+  }
+  if (entry.agent.sessionKey !== ctx.agent.sessionKey) {
+    await reply(ctx, '这个任务属于另一个 agent 后端，不能用当前 agent 重试。');
     return;
   }
   ctx.activeRuns.interrupt(ctx.scope);
@@ -1026,6 +1077,19 @@ function isCardOrStreamFailure(entry: Record<string, unknown>): boolean {
 async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
   if (args.trim().toLowerCase() === 'workers') {
     return handleWorkers('', ctx);
+  }
+  if (args.trim().toLowerCase() === 'setup') {
+    const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+    const result = await runSetupDiagnostics({
+      cfg: ctx.controls.cfg,
+      configPath: ctx.controls.configPath,
+      agent: ctx.agent,
+      cwd,
+      chat: { chatId: ctx.msg.chatId, chatMode: ctx.chatMode, senderId: ctx.msg.senderId },
+      sameAppProcesses: sameAppOthers(ctx.controls.cfg.accounts.app.id),
+    });
+    await replyCard(ctx, setupDiagnosticsCard(result));
+    return;
   }
   log.info('command', 'doctor', {
     hasDescription: args.trim().length > 0,

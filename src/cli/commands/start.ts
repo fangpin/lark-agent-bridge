@@ -16,6 +16,7 @@ import {
   saveConfig,
 } from '../../config/store';
 import { gcOldLogs, log } from '../../core/logger';
+import { renderSetupDiagnosticsText, runIncompleteSetupDiagnostics, runSetupDiagnostics } from '../../doctor/setup';
 import { gcMediaCache } from '../../media/cache';
 import {
   cleanupTmpFiles,
@@ -50,11 +51,34 @@ const MEDIA_GC_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface StartOptions {
   config?: string;
+  check?: boolean;
+}
+
+export function shouldSkipConfigMutationForCheck(opts: StartOptions): boolean {
+  return opts.check === true;
 }
 
 export async function runStart(opts: StartOptions): Promise<void> {
   const configPath = opts.config ?? paths.configFile;
   const existing = await loadConfig(configPath);
+
+  if (shouldSkipConfigMutationForCheck(opts)) {
+    if (!isComplete(existing)) {
+      console.log(renderSetupDiagnosticsText(runIncompleteSetupDiagnostics({ configPath })));
+      process.exit(1);
+    }
+    const cfg = existing;
+    const agent = await createAgentAdapter(cfg);
+    const result = await runSetupDiagnostics({
+      cfg,
+      configPath,
+      agent,
+      cwd: process.cwd(),
+      sameAppProcesses: sameAppOthers(cfg.accounts.app.id),
+    });
+    console.log(renderSetupDiagnosticsText(result));
+    process.exit(result.summary.status === 'fail' ? 1 : 0);
+  }
 
   let cfg: AppConfig;
   if (isComplete(existing)) {

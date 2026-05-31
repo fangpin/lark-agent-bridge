@@ -18,7 +18,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local coding-ag
 ## Prerequisites
 
 - Node.js **>= 20**
-- A supported coding-agent command installed and logged in. By default the bridge runs `claude`; it can also use compatible wrappers through `agentCommand`, or Cursor CLI's `agent` command.
+- A supported coding-agent command installed and logged in. By default the bridge runs `claude`; it can also use compatible wrappers through `agentCommand`, Cursor CLI's `agent` command, or Codex CLI's `codex` command.
 - A Lark / Feishu **PersonalAgent** app (the QR-code wizard on first launch can create one for you).
 
 ## Install
@@ -77,6 +77,7 @@ After enabling those, run `lark-agent-bridge start` again. Once you see `✓ Con
 
 ```
 lark-agent-bridge start [-c <config>]   Start the bot
+lark-agent-bridge start --check            Run setup diagnostics and exit
 npx -y lark-agent-bridge@latest start  Start without installing
 lark-agent-bridge ps                    List all running start processes on this machine
 lark-agent-bridge stop <id|#>           Stop a start process (SIGTERM, SIGKILL after 2s)
@@ -97,7 +98,8 @@ lark-agent-bridge --help                List all commands
 | `/ws save <name>` | Save current cwd as a named workspace |
 | `/ws use <name>` | Switch to a named workspace |
 | `/ws remove <name>` | Delete a named workspace |
-| `/status` | Current cwd / session / agent (card + buttons) |
+| `/status` | Current cwd / session / agent / latest run (card + buttons) |
+| `/runs [run-id]` | Show recent runs for the current chat/topic, including status, failure reason, retry/stop buttons, and per-run details. |
 | `/config` | Adjust preferences (reply style, tool-call display, ...) |
 | `/stop` | Stop the run in progress (also the `⏹` button on the card) |
 | `/timeout [N\|off\|default]` | Idle-watchdog (minutes) for the current session. `/config` sets the global default. See FAQ below. |
@@ -107,7 +109,7 @@ lark-agent-bridge --help                List all commands
 | `/ps` | List all `start` processes on this host, marking the one replying |
 | `/exit <id\|#>` | Stop a `start` process (your own → graceful; another's → SIGTERM) |
 | `/reconnect` | Force a WebSocket reconnect (use when the bot stops responding after a network blip) |
-| `/doctor [description]` | Feed recent logs, run timeline, and your description back to the agent for self-diagnosis |
+| `/doctor [description]` | Feed recent logs, run timeline, and your description back to the agent for self-diagnosis. `/doctor setup` runs non-mutating setup diagnostics. |
 | `/doctor workers` | Shortcut for the live SDK worker-pool view |
 | `/help` | Help card |
 | Any other `/xxx` | Forwarded verbatim to the agent |
@@ -124,6 +126,10 @@ lark-agent-bridge --help                List all commands
 | `~/.lark-channel/processes.json` | Process registry for live `start` instances (used by `ps`/`stop`); dead PIDs are auto-pruned |
 | `~/.lark-channel/media/<chatId>/` | Downloaded images / files, cleaned up after 24h |
 | `~/.lark-channel/logs/YYYY-MM-DD.log` | Structured run logs (JSONL), rotated daily; older than 7 days are pruned at startup (`LARK_CHANNEL_LOG_DAYS` env var overrides). `/doctor` reads these. |
+
+### Setup diagnostics
+
+Use `lark-agent-bridge start --check` before starting the bot, or `/doctor setup` in chat, to verify local setup without sending a prompt to the agent. The check reports config completeness, backend command availability, cwd accessibility, Codex wrapper mode, Cursor runtime settings, chat access allowlists, and duplicate bot processes. It does not perform a real model call, so it can catch wrapper/auth/PATH issues without consuming tokens.
 
 > Upgrading from before 0.1.11? Run `lark-agent-bridge migrate` once — it moves anything under the legacy `~/.config/lark-channel-bridge/` and `~/.cache/lark-channel-bridge/` paths to the new location and upgrades `config.json` to the new schema.
 
@@ -179,6 +185,43 @@ For SDK mode, provide a Cursor API key with `CURSOR_API_KEY`, or store it encryp
 ```
 
 Set `"agentCursorRuntime": "cli"` to force the legacy Cursor CLI path. In CLI mode, make sure the `agent` command is installed, logged in, and available on `PATH`; the bridge runs `agent -p --output-format stream-json --trust --workspace <cwd> ...`. If you intentionally want Cursor to auto-allow commands, add `"-f"` or `"--force"` to `agentCommand.args`.
+
+### Codex backend (`codex exec --json`)
+
+To use Codex CLI, configure the Codex backend. The bridge runs `codex exec --json` non-interactively, translates Codex JSONL events into streaming cards, and stores the Codex `thread_id` as the chat session id so follow-up messages resume with `codex exec resume`.
+
+```json
+{
+  "preferences": {
+    "agentCommand": {
+      "backend": "codex",
+      "command": "codex",
+      "args": ["--sandbox", "workspace-write", "--ask-for-approval", "never"]
+    },
+    "agentCodexModel": "gpt-5.1-codex"
+  }
+}
+```
+
+For wrappers such as `ttadk` that accept the generated Codex argv through one option, set `codexArgsOption`. The option name is whatever your wrapper expects; if it reuses the Claude-compatible entrypoint, use the same value you use for `claudeArgsOption`:
+
+```json
+{
+  "preferences": {
+    "agentCommand": {
+      "backend": "codex",
+      "command": "ttadk",
+      "args": ["--profile", "dev"],
+      "codexArgsOption": "--claude-args"
+    },
+    "agentCodexModel": "gpt-5.1-codex"
+  }
+}
+```
+
+With `codexArgsOption`, the bridge safely joins Codex arguments and runs commands like `ttadk --profile dev --claude-args "exec --json -C /repo --model gpt-5.1-codex ..."`.
+
+The bridge cannot answer Codex's interactive approval prompts mid-run. For unattended chat use, configure Codex with non-interactive approval behavior such as `--ask-for-approval never`; keep sandboxing conservative (`workspace-write`) unless the host is externally sandboxed and you explicitly accept the risk of broader access.
 
 Sessions are isolated by backend/runtime. A chat can keep separate Claude, Cursor SDK, and Cursor CLI sessions for the same cwd; the bridge resumes only the session matching the backend configured at startup. Existing pre-isolation session files are treated as Cursor SDK sessions during migration.
 

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
-import type { AgentEvent, AgentRun } from '../../src/agent/types';
+import type { LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
+import { createLarkChannel } from '@larksuiteoapi/node-sdk';
+import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../../src/agent/types';
 import type { RunHandle } from '../../src/bot/active-runs';
 import { ActiveRuns } from '../../src/bot/active-runs';
 import {
@@ -8,10 +9,28 @@ import {
   maybeEnqueueAutoRetryForOpaqueSdkError,
   processAgentStream,
   shouldAutoRetryOpaqueSdkError,
+  startChannel,
+  summarizeBatchForHistory,
 } from '../../src/bot/channel';
 import { PendingQueue } from '../../src/bot/pending-queue';
+import { RunHistory } from '../../src/bot/run-history';
 import { createInitialState } from '../../src/card/run-state';
+import type { AppConfig } from '../../src/config/schema';
+import type { Controls } from '../../src/commands';
 import type { SessionStore } from '../../src/session/store';
+import type { WorkspaceStore } from '../../src/workspace/store';
+
+vi.mock('@larksuiteoapi/node-sdk', async () => {
+  const actual = await vi.importActual<typeof import('@larksuiteoapi/node-sdk')>('@larksuiteoapi/node-sdk');
+  return {
+    ...actual,
+    createLarkChannel: vi.fn(),
+  };
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function runWithNaturalExitAfter(timeoutNeededMs: number): {
   handle: RunHandle;
@@ -39,6 +58,98 @@ function runWithNaturalExitAfter(timeoutNeededMs: number): {
     stopCalls: () => stopCount,
   };
 }
+
+describe('summarizeBatchForHistory', () => {
+  test('collapses whitespace and truncates long message content', () => {
+    const batch = [
+      fakeMessage('msg-1', `请帮我看看这个报错\n第二行细节 ${'x'.repeat(100)}`),
+    ];
+
+    const summary = summarizeBatchForHistory(batch);
+
+    expect(summary).toMatch(/^请帮我看看这个报错 第二行细节 x+/);
+    expect(summary).not.toContain('\n');
+    expect(summary).toHaveLength(81);
+    expect(summary.endsWith('…')).toBe(true);
+  });
+});
+
+describe('channel streamMessageId persistence', () => {
+  test('text replies persist sent message ids in run history', async () => {
+    let persistedStreamMessageId: string | undefined;
+    const originalUpdate = RunHistory.prototype.update;
+    const update = vi.spyOn(RunHistory.prototype, 'update').mockImplementation(function (
+      this: RunHistory,
+      runId,
+      changes,
+    ) {
+      originalUpdate.call(this, runId, changes);
+      persistedStreamMessageId = this.get(runId)?.streamMessageId;
+    });
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent(() => {}),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('om_original', 'original prompt'));
+
+    await vi.waitFor(() =>
+      expect(update).toHaveBeenCalledWith(expect.any(String), { streamMessageId: 'om_sent_text' }),
+    );
+    expect(persistedStreamMessageId).toBe('om_sent_text');
+  });
+
+  test('fallback replies persist sent message ids in run history when streaming fails before returning', async () => {
+    let persistedStreamMessageId: string | undefined;
+    const originalUpdate = RunHistory.prototype.update;
+    const update = vi.spyOn(RunHistory.prototype, 'update').mockImplementation(function (
+      this: RunHistory,
+      runId,
+      changes,
+    ) {
+      originalUpdate.call(this, runId, changes);
+      persistedStreamMessageId = this.get(runId)?.streamMessageId;
+    });
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const fakeChannel = {
+      ...createFakeChannel(messages),
+      async stream() {
+        throw new Error('stream failed before message id');
+      },
+      async send() {
+        return { messageId: 'om_fallback' };
+      },
+    } as unknown as LarkChannel;
+    const cfg = cardReplyConfig();
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg,
+      agent: fakeAgent(() => {}),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(cfg),
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('om_original', 'original prompt'));
+
+    await vi.waitFor(() =>
+      expect(update).toHaveBeenCalledWith(expect.any(String), { streamMessageId: 'om_fallback' }),
+    );
+    expect(persistedStreamMessageId).toBe('om_fallback');
+  });
+});
 
 describe('processAgentStream', () => {
   afterEach(() => {
@@ -377,13 +488,13 @@ describe('opaque Cursor SDK auto retry', () => {
   });
 });
 
-function fakeMessage(messageId: string): NormalizedMessage {
+function fakeMessage(messageId: string, content = 'queued'): NormalizedMessage {
   return {
     messageId,
     chatId: 'chat-1',
     chatType: 'group',
     senderId: 'ou_user',
-    content: 'queued',
+    content,
     rawContentType: 'text',
     resources: [],
     mentions: [],
@@ -391,4 +502,126 @@ function fakeMessage(messageId: string): NormalizedMessage {
     mentionedBot: true,
     createTime: Date.now(),
   };
+}
+
+function createFakeChannel(handlers: Record<string, (msg: NormalizedMessage) => Promise<void>>): LarkChannel {
+  return {
+    botIdentity: { name: 'bot', openId: 'ou_bot' },
+    on(registered: Record<string, unknown>) {
+      Object.assign(handlers, registered);
+    },
+    async connect() {},
+    async disconnect() {},
+    async send(_chatId: string, payload: unknown) {
+      const markdown = (payload as { markdown?: string }).markdown;
+      return { messageId: markdown?.includes('agent reply') ? 'om_sent_text' : 'om_command_reply' };
+    },
+    async getChatMode() {
+      return 'group';
+    },
+    rawClient: {
+      im: {
+        v1: {
+          messageReaction: {
+            async create() {
+              return { data: { reaction_id: 'reaction-1' } };
+            },
+            async delete() {},
+          },
+        },
+      },
+    },
+  } as unknown as LarkChannel;
+}
+
+function fakeAgent(onRun: (opts: AgentRunOptions) => void): AgentAdapter {
+  const descriptor = {
+    id: 'fake',
+    label: 'Fake Agent',
+    runtime: 'test',
+    sessionKey: 'fake:test',
+    commandLabel: 'fake',
+    supportsRetry: true,
+    supportsWorkers: false,
+  };
+  return {
+    id: descriptor.id,
+    sessionKey: descriptor.sessionKey,
+    displayName: descriptor.label,
+    commandLabel: descriptor.commandLabel,
+    descriptor,
+    async isAvailable() {
+      return true;
+    },
+    run(opts: AgentRunOptions): AgentRun {
+      onRun(opts);
+      return {
+        events: (async function* (): AsyncGenerator<AgentEvent> {
+          yield { type: 'text', delta: 'agent reply' };
+          yield { type: 'done' };
+        })(),
+        async stop() {},
+        async waitForExit() {
+          return true;
+        },
+      };
+    },
+  };
+}
+
+function textReplyConfig(): AppConfig {
+  return {
+    accounts: { app: { id: 'app-id', secret: 'app-secret', tenant: 'feishu' } },
+    preferences: {
+      messageReply: 'text',
+      messageReplyMigrated: true,
+      requireMentionInGroup: false,
+    },
+  };
+}
+
+function cardReplyConfig(): AppConfig {
+  return {
+    ...textReplyConfig(),
+    preferences: {
+      ...textReplyConfig().preferences,
+      messageReply: 'card',
+    },
+  };
+}
+
+function fakeControls(cfg: AppConfig): Controls {
+  return {
+    cfg,
+    processId: 'test-process',
+    configPath: '/tmp/config.json',
+    async restart() {},
+    async exit() {},
+  };
+}
+
+function fakeSessions(): SessionStore {
+  return {
+    resumeFor() {
+      return undefined;
+    },
+    getRaw() {
+      return undefined;
+    },
+    clear() {},
+    set() {},
+    getIdleTimeoutMinutes() {
+      return undefined;
+    },
+    async flush() {},
+  } as unknown as SessionStore;
+}
+
+function fakeWorkspaces(cwd: string): WorkspaceStore {
+  return {
+    cwdFor() {
+      return cwd;
+    },
+    async flush() {},
+  } as unknown as WorkspaceStore;
 }

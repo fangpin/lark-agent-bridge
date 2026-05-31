@@ -1,3 +1,7 @@
+import type { AgentDescriptor } from '../agent/types';
+import type { RunHistoryEntry } from '../bot/run-history';
+import type { DiagnosticStatus, SetupDiagnosticsResult } from '../doctor/setup';
+
 interface ButtonSpec {
   text: string;
   value: Record<string, unknown>;
@@ -70,6 +74,13 @@ export interface StatusInfo {
   scope: string;
   /** Chat mode — used to label scope. */
   chatMode: 'p2p' | 'group' | 'topic';
+  agent?: AgentDescriptor;
+  latestRun?: RunHistoryEntry;
+}
+
+export interface RunsCardInfo {
+  cwd: string;
+  entries: RunHistoryEntry[];
 }
 
 export function statusCard(info: StatusInfo): object {
@@ -88,16 +99,145 @@ export function statusCard(info: StatusInfo): object {
     `🔗 **session**: ${sessionLine}`,
     `🤖 **agent**: ${escapeMd(info.agentName)}`,
   ];
+  if (info.agent) {
+    lines.push(`🧩 **runtime**: ${escapeMd(info.agent.runtime)} · \`${escapeCode(info.agent.sessionKey)}\``);
+    const capabilities = [
+      info.agent.supportsRetry ? 'retry' : '',
+      info.agent.supportsWorkers ? 'workers' : '',
+    ].filter(Boolean);
+    if (capabilities.length > 0) lines.push(`🛠 **能力**: ${capabilities.join(', ')}`);
+  }
+  if (info.latestRun) {
+    lines.push(
+      `🧭 **最近运行**: ${terminalIcon(info.latestRun.terminal)} ${escapeMd(info.latestRun.summary)} (${formatAge(Date.now() - info.latestRun.createdAt)}前)`,
+    );
+    if (info.latestRun.errorMsg) lines.push(`⚠️ **最近失败**: ${escapeMd(info.latestRun.errorMsg)}`);
+  }
+  const buttons: ButtonSpec[] = [
+    { text: '🆕 新会话', value: { cmd: 'new' }, style: 'primary' },
+    { text: '🔁 恢复会话', value: { cmd: 'resume' } },
+    { text: '📂 工作空间', value: { cmd: 'ws.list' } },
+    { text: '🧭 最近运行', value: { cmd: 'runs' } },
+  ];
+  if (info.latestRun) {
+    buttons.push({ text: '运行详情', value: { cmd: 'runs.detail', run_id: info.latestRun.runId } });
+  }
   return shell('📊 当前状态', [
     divMd(lines.join('\n')),
     HR,
-    actions([
-      { text: '🆕 新会话', value: { cmd: 'new' }, style: 'primary' },
-      { text: '🔁 恢复会话', value: { cmd: 'resume' } },
-      { text: '📂 工作空间', value: { cmd: 'ws.list' } },
-      { text: '💡 帮助', value: { cmd: 'help' } },
-    ]),
+    actions(buttons),
   ]);
+}
+
+export function runsCard(info: RunsCardInfo): object {
+  const elements: object[] = [divMd(`当前 cwd：\`${escapeCode(info.cwd)}\``)];
+  if (info.entries.length === 0) {
+    elements.push(HR);
+    elements.push(divMd('暂无运行记录。发送一条消息让 agent 开始工作，之后可在这里查看最近任务。'));
+    elements.push(divMd('需要命令列表可发送 `/help`。'));
+    return shell('🧭 最近运行', elements);
+  }
+
+  elements.push(HR);
+  info.entries.forEach((entry, index) => {
+    elements.push(runEntryLine(entry));
+    const buttons: ButtonSpec[] = [
+      { text: '详情', value: { cmd: 'runs.detail', run_id: entry.runId } },
+    ];
+    if (entry.terminal === 'running') {
+      buttons.unshift({ text: '终止', value: { cmd: 'stop' }, style: 'danger' });
+    } else if (entry.terminal === 'error' || entry.terminal === 'idle_timeout') {
+      buttons.unshift({ text: '重试', value: { cmd: 'retry', run_id: entry.runId }, style: 'primary' });
+    }
+    elements.push(actions(buttons));
+    if (index < info.entries.length - 1) elements.push(HR);
+  });
+  return shell('🧭 最近运行', elements);
+}
+
+export function runDetailCard(entry: RunHistoryEntry): object {
+  const lines = [
+    `**run**: \`${escapeCode(entry.runId)}\``,
+    `**状态**: ${terminalText(entry.terminal)}`,
+    `**agent**: ${escapeMd(entry.agent.label)} · ${escapeMd(entry.agent.runtime)} · \`${escapeCode(entry.agent.sessionKey)}\``,
+    `**cwd**: \`${escapeCode(entry.cwd)}\``,
+    `**创建**: ${timeText(entry.createdAt)} · **更新**: ${timeText(entry.updatedAt)}`,
+    `**摘要**: ${escapeMd(entry.summary)}`,
+    entry.streamMessageId ? `**消息**: \`${escapeCode(entry.streamMessageId)}\`` : '',
+    entry.errorMsg ? `**失败原因**: ${escapeMd(entry.errorMsg)}` : '',
+  ].filter(Boolean);
+  const buttons: ButtonSpec[] = [{ text: '返回最近运行', value: { cmd: 'runs' } }];
+  if (entry.terminal === 'running') {
+    buttons.unshift({ text: '终止', value: { cmd: 'stop' }, style: 'danger' });
+  } else if (entry.terminal === 'error' || entry.terminal === 'idle_timeout') {
+    buttons.unshift({ text: '重试', value: { cmd: 'retry', run_id: entry.runId }, style: 'primary' });
+  }
+  return shell('🧭 运行详情', [divMd(lines.join('\n')), HR, actions(buttons)]);
+}
+
+export function setupDiagnosticsCard(result: SetupDiagnosticsResult): object {
+  const elements: object[] = [divMd(`**${escapeMd(result.summary.title)}**`)];
+  elements.push(HR);
+  result.checks.forEach((check, index) => {
+    const lines = [
+      `${diagnosticIcon(check.status)} **${escapeMd(check.title)}**`,
+      escapeMd(check.detail),
+      check.suggestion ? `建议：${escapeMd(check.suggestion)}` : '',
+    ].filter(Boolean);
+    elements.push(divMd(lines.join('\n')));
+    if (index < result.checks.length - 1) elements.push(HR);
+  });
+  return shell('🩺 Setup 自检', elements);
+}
+
+function runEntryLine(entry: RunHistoryEntry): object {
+  const pieces = [
+    `${terminalIcon(entry.terminal)} ${terminalText(entry.terminal)} · **${escapeMd(entry.summary)}**`,
+    `\`${escapeCode(shortRunId(entry.runId))}\` · ${escapeMd(entry.agent.label)} / ${escapeMd(entry.agent.runtime)} · ${formatAge(Date.now() - entry.createdAt)}前`,
+  ];
+  if (entry.errorMsg) pieces.push(`失败原因：${escapeMd(entry.errorMsg)}`);
+  return divMd(pieces.join('\n'));
+}
+
+function terminalIcon(terminal: RunHistoryEntry['terminal']): string {
+  if (terminal === 'done') return '✅';
+  if (terminal === 'running') return '⏳';
+  if (terminal === 'interrupted') return '⏹';
+  if (terminal === 'idle_timeout') return '⏱';
+  return '⚠️';
+}
+
+function diagnosticIcon(status: DiagnosticStatus): string {
+  if (status === 'pass') return '✅';
+  if (status === 'warn') return '⚠️';
+  if (status === 'fail') return '❌';
+  return 'ℹ️';
+}
+
+function terminalText(terminal: RunHistoryEntry['terminal']): string {
+  if (terminal === 'done') return '已完成';
+  if (terminal === 'running') return '运行中';
+  if (terminal === 'interrupted') return '已中断';
+  if (terminal === 'idle_timeout') return '已超时';
+  return '出错';
+}
+
+function shortRunId(runId: string): string {
+  return runId.length > 16 ? `${runId.slice(0, 13)}…` : runId;
+}
+
+function timeText(ts: number): string {
+  return new Date(ts).toLocaleString('zh-CN', { hour12: false });
+}
+
+function formatAge(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
 }
 
 export interface ResumeEntry {
@@ -155,6 +295,7 @@ export function helpCard(): object {
         '- `/account` — 查看当前应用；`/account change` 换 appId/secret 并重连',
         '- `/config` — 调整偏好（消息回复方式、工具调用显示）',
         '- `/status` — 当前状态',
+        '- `/runs` — 查看当前 chat 最近运行、失败原因、重试/终止入口',
         '- `/stop` — 结束当前正在跑的任务（也可点卡片底部 ⏹ 终止 按钮）',
         '- `/timeout [N|off|default]` — 当前 session 的探活分钟数,`/config` 改全局默认',
         '- `/ps` — 列出本机所有 bot,标识当前正在回复的那个',
@@ -177,7 +318,7 @@ export function helpCard(): object {
 }
 
 function escapeMd(s: string): string {
-  return s.replace(/([*_`\\])/g, '\\$1');
+  return s.replace(/([\\*_`\[\]()<>])/g, '\\$1');
 }
 
 function escapeCode(s: string): string {

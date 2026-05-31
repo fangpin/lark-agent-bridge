@@ -32,6 +32,16 @@ export interface AgentRunOptions {
   stopGraceMs?: number;
 }
 
+export interface AgentDescriptor {
+  id: string;
+  label: string;
+  runtime: string;
+  sessionKey: string;
+  commandLabel: string;
+  supportsRetry: boolean;
+  supportsWorkers: boolean;
+}
+
 export interface AgentRun {
   readonly events: AsyncIterable<AgentEvent>;
   stop(): Promise<void>;
@@ -67,6 +77,7 @@ export interface AgentAdapter {
   readonly sessionKey: string;
   readonly displayName: string;
   readonly commandLabel: string;
+  readonly descriptor: AgentDescriptor;
   isAvailable(): Promise<boolean>;
   run(opts: AgentRunOptions): AgentRun;
   /** Optional: pre-create a backend session id (Cursor CLI create-chat or SDK agent). */

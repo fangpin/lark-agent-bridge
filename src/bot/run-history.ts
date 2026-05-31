@@ -1,8 +1,20 @@
 import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
+import type { AgentDescriptor } from '../agent/types';
 import type { Terminal } from '../card/run-state';
 
 const MAX_RUNS = 50;
 const TTL_MS = 6 * 60 * 60 * 1000;
+
+export interface RunHistoryCreateMeta {
+  cwd: string;
+  agent: AgentDescriptor;
+  summary: string;
+}
+
+export interface RunHistoryUpdate {
+  streamMessageId?: string;
+  summary?: string;
+}
 
 export interface RunHistoryEntry {
   runId: string;
@@ -10,17 +22,45 @@ export interface RunHistoryEntry {
   chatId: string;
   threadId?: string;
   batch: NormalizedMessage[];
+  cwd: string;
+  agent: AgentDescriptor;
+  summary: string;
   createdAt: number;
   updatedAt: number;
   terminal: Terminal;
   errorMsg?: string;
+  streamMessageId?: string;
+}
+
+function clonePlainData<T>(value: T): T {
+  if (typeof structuredClone === 'function') {
+    return structuredClone(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => clonePlainData(item)) as T;
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, clonePlainData(item)]),
+    ) as T;
+  }
+  return value;
+}
+
+function cloneMessage(msg: NormalizedMessage): NormalizedMessage {
+  return {
+    ...msg,
+    resources: clonePlainData(msg.resources),
+    mentions: clonePlainData(msg.mentions),
+    raw: clonePlainData(msg.raw),
+  };
 }
 
 export class RunHistory {
   private readonly entries = new Map<string, RunHistoryEntry>();
   private nextId = 1;
 
-  create(scope: string, batch: NormalizedMessage[]): RunHistoryEntry {
+  create(scope: string, batch: NormalizedMessage[], meta: RunHistoryCreateMeta): RunHistoryEntry {
     const first = batch[0];
     const now = Date.now();
     const entry: RunHistoryEntry = {
@@ -28,14 +68,25 @@ export class RunHistory {
       scope,
       chatId: first?.chatId ?? '',
       threadId: first?.threadId,
-      batch: batch.map((msg) => ({ ...msg })),
+      batch: batch.map((msg) => cloneMessage(msg)),
+      cwd: meta.cwd,
+      agent: { ...meta.agent },
+      summary: meta.summary,
       createdAt: now,
       updatedAt: now,
       terminal: 'running',
     };
     this.entries.set(entry.runId, entry);
     this.prune(now);
-    return entry;
+    return this.cloneEntry(entry);
+  }
+
+  update(runId: string, update: RunHistoryUpdate): void {
+    const entry = this.entries.get(runId);
+    if (!entry) return;
+    if (update.streamMessageId !== undefined) entry.streamMessageId = update.streamMessageId;
+    if (update.summary !== undefined) entry.summary = update.summary;
+    entry.updatedAt = Date.now();
   }
 
   finish(runId: string, terminal: Terminal, errorMsg?: string): void {
@@ -50,7 +101,28 @@ export class RunHistory {
     this.prune(Date.now());
     const entry = this.entries.get(runId);
     if (!entry) return undefined;
-    return { ...entry, batch: entry.batch.map((msg) => ({ ...msg })) };
+    return this.cloneEntry(entry);
+  }
+
+  list(scope: string, limit = 10): RunHistoryEntry[] {
+    this.prune(Date.now());
+    return Array.from(this.entries.values())
+      .filter((entry) => entry.scope === scope)
+      .sort((a, b) => b.createdAt - a.createdAt || this.runSequence(b.runId) - this.runSequence(a.runId))
+      .slice(0, Math.max(0, limit))
+      .map((entry) => this.cloneEntry(entry));
+  }
+
+  private cloneEntry(entry: RunHistoryEntry): RunHistoryEntry {
+    return {
+      ...entry,
+      agent: { ...entry.agent },
+      batch: entry.batch.map((msg) => cloneMessage(msg)),
+    };
+  }
+
+  private runSequence(runId: string): number {
+    return Number(runId.slice(runId.lastIndexOf('-') + 1));
   }
 
   private prune(now: number): void {
