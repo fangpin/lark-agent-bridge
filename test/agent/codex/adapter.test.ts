@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { CodexAdapter, chooseCodexTerminalError } from '../../../src/agent/codex/adapter';
+import { buildCodexExecArgs, CodexAdapter, chooseCodexTerminalError } from '../../../src/agent/codex/adapter';
 
 function nodeCommand(script: string): { command: string; args: string[] } {
   const dir = mkdtempSync(join(tmpdir(), 'codex-adapter-'));
@@ -37,6 +37,20 @@ async function collectText(adapter: CodexAdapter, cwd: string, sessionId?: strin
 }
 
 describe('CodexAdapter', () => {
+  test('builds no-sandbox exec args by default', () => {
+    expect(buildCodexExecArgs({ prompt: 'hello', cwd: '/repo', model: 'gpt-test' })).toEqual([
+      'exec',
+      '--json',
+      '--dangerously-bypass-approvals-and-sandbox',
+      '-C',
+      '/repo',
+      '--model',
+      'gpt-test',
+      '--',
+      expect.stringContaining('hello'),
+    ]);
+  });
+
   test('spawns codex exec json for a fresh run', async () => {
     const fake = nodeCommand(`
       const args = process.argv.slice(2);
@@ -52,7 +66,7 @@ describe('CodexAdapter', () => {
     const events = await collectText(adapter, process.cwd());
 
     expect(events[0]).toBe('session:thread-1');
-    expect(events[1]).toContain('--sandbox workspace-write exec --json -C');
+    expect(events[1]).toContain('--sandbox workspace-write exec --json --dangerously-bypass-approvals-and-sandbox -C');
     expect(events[1]).toContain('gpt-test');
     expect(events[1]).toContain('hello');
     expect(events[1]).not.toContain('resume thread-1');
@@ -73,7 +87,7 @@ describe('CodexAdapter', () => {
 
     const events = await collectText(adapter, process.cwd(), 'thread-existing');
 
-    expect(events[1]).toContain('--sandbox workspace-write exec --json -C');
+    expect(events[1]).toContain('--sandbox workspace-write exec --json --dangerously-bypass-approvals-and-sandbox -C');
     expect(events[1]).toContain('resume thread-existing --');
     expect(events[1]).toContain('<user_prompt>');
     expect(events[1]).toContain('hello');

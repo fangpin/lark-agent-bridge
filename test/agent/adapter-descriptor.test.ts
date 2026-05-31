@@ -46,13 +46,16 @@ describe('agent descriptors', () => {
   });
 
   test('describes Codex CLI json backend', () => {
-    const adapter = new CodexAdapter({ command: 'codex-wrapper', args: ['--sandbox', 'workspace-write'] });
+    const adapter = new CodexAdapter({
+      command: 'codex-wrapper',
+      args: ['--profile', 'dev'],
+    });
 
     expect(adapter.descriptor).toMatchObject({
       id: 'codex',
       label: 'Codex CLI',
       runtime: 'json',
-      commandLabel: 'codex-wrapper --sandbox workspace-write',
+      commandLabel: 'codex-wrapper --profile dev',
       supportsRetry: true,
       supportsWorkers: false,
     });

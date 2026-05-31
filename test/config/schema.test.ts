@@ -24,14 +24,14 @@ describe('agent command config', () => {
           agentCommand: {
             backend: 'codex',
             command: 'codex-wrapper',
-            args: ['--sandbox', 'workspace-write'],
+            args: ['--profile', 'dev'],
           },
         }),
       ),
     ).toEqual({
       backend: 'codex',
       command: 'codex-wrapper',
-      args: ['--sandbox', 'workspace-write'],
+      args: ['--profile', 'dev'],
     });
   });
 

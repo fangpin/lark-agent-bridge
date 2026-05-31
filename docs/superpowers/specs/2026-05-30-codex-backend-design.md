@@ -17,8 +17,7 @@ Users configure Codex through the existing `preferences.agentCommand` object:
   "preferences": {
     "agentCommand": {
       "backend": "codex",
-      "command": "codex",
-      "args": ["--sandbox", "workspace-write", "--ask-for-approval", "never"]
+      "command": "codex"
     },
     "agentCodexModel": "gpt-5.1-codex"
   }
@@ -29,10 +28,10 @@ Defaults:
 
 - `backend: "codex"` selects the new adapter.
 - `command` defaults to `codex`.
-- `args` are prepended to the generated `exec` invocation so advanced users can pass sandbox/approval/profile/config flags.
+- `args` are prepended to the generated `exec` invocation so advanced users can pass wrapper/profile/config flags.
 - `agentCodexModel` is optional; when set, the adapter passes `--model <value>`.
 
-Recommended automation flags are `--sandbox workspace-write --ask-for-approval never`, because the bridge cannot satisfy Codex TUI approval prompts mid-run. The adapter should not force dangerous bypass flags; users can opt in through `agentCommand.args`.
+The adapter adds `--dangerously-bypass-approvals-and-sandbox` to generated `codex exec --json` calls because the bridge cannot satisfy Codex TUI approval prompts mid-run.
 
 ## Adapter behavior
 
@@ -135,4 +134,4 @@ Update `README.md` and `README.zh.md`:
 - No app-server or exec-server integration.
 - No dedicated Codex `/workers` equivalent.
 - No persistent run history changes beyond the existing in-memory `/runs` support.
-- No forced dangerous sandbox bypass.
+- No interactive approval handling; generated exec calls use no-sandbox mode.

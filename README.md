@@ -195,8 +195,7 @@ To use Codex CLI, configure the Codex backend. The bridge runs `codex exec --jso
   "preferences": {
     "agentCommand": {
       "backend": "codex",
-      "command": "codex",
-      "args": ["--sandbox", "workspace-write", "--ask-for-approval", "never"]
+      "command": "codex"
     },
     "agentCodexModel": "gpt-5.1-codex"
   }
@@ -221,7 +220,7 @@ For wrappers such as `ttadk` that accept the generated Codex argv through one op
 
 With `codexArgsOption`, the bridge safely joins Codex arguments and runs commands like `ttadk --profile dev --claude-args "exec --json -C /repo --model gpt-5.1-codex ..."`.
 
-The bridge cannot answer Codex's interactive approval prompts mid-run. For unattended chat use, configure Codex with non-interactive approval behavior such as `--ask-for-approval never`; keep sandboxing conservative (`workspace-write`) unless the host is externally sandboxed and you explicitly accept the risk of broader access.
+The bridge cannot answer Codex's interactive approval prompts mid-run. For unattended chat use, the Codex backend adds `--dangerously-bypass-approvals-and-sandbox` to the generated `codex exec --json` invocation. This lets Codex execute without approval prompts or sandbox restrictions, so use this backend only on hosts where you accept that level of local command access.
 
 Sessions are isolated by backend/runtime. A chat can keep separate Claude, Cursor SDK, and Cursor CLI sessions for the same cwd; the bridge resumes only the session matching the backend configured at startup. Existing pre-isolation session files are treated as Cursor SDK sessions during migration.
 

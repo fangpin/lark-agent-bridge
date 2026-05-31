@@ -22,6 +22,7 @@ type CodexChild = ChildProcessByStdio<null, Readable, Readable>;
 
 const DEFAULT_AVAILABILITY_TIMEOUT_MS = 5_000;
 const DEFAULT_AVAILABILITY_STOP_GRACE_MS = 1_000;
+const NO_SANDBOX_ARG = '--dangerously-bypass-approvals-and-sandbox';
 
 function quoteShellArg(arg: string): string {
   if (arg.length === 0) return "''";
@@ -35,6 +36,16 @@ function joinShellArgs(args: string[]): string {
 
 export function buildCodexPrompt(prompt: string): string {
   return `<bridge_system_prompt>\n${BRIDGE_SYSTEM_PROMPT}\n</bridge_system_prompt>\n\n<user_prompt>\n${prompt}\n</user_prompt>`;
+}
+
+export function buildCodexExecArgs(opts: { prompt: string; cwd?: string; model?: string; sessionId?: string }): string[] {
+  const prompt = buildCodexPrompt(opts.prompt);
+  const codexArgs = ['exec', '--json', NO_SANDBOX_ARG];
+  if (opts.cwd) codexArgs.push('-C', opts.cwd);
+  if (opts.model) codexArgs.push('--model', opts.model);
+  if (opts.sessionId) codexArgs.push('resume', opts.sessionId, '--', prompt);
+  else codexArgs.push('--', prompt);
+  return codexArgs;
 }
 
 function codexSessionKey(command: string, args: string[], codexArgsOption: string | undefined): string {
@@ -137,12 +148,12 @@ export class CodexAdapter implements AgentAdapter {
     }
 
     const model = opts.model ?? this.defaultModel;
-    const prompt = buildCodexPrompt(opts.prompt);
-    const codexArgs = ['exec', '--json'];
-    if (opts.cwd) codexArgs.push('-C', opts.cwd);
-    if (model) codexArgs.push('--model', model);
-    if (opts.sessionId) codexArgs.push('resume', opts.sessionId, '--', prompt);
-    else codexArgs.push('--', prompt);
+    const codexArgs = buildCodexExecArgs({
+      prompt: opts.prompt,
+      cwd: opts.cwd,
+      model,
+      sessionId: opts.sessionId,
+    });
 
     const child = spawn(this.command, this.buildProcessArgs(codexArgs), {
       cwd: opts.cwd,

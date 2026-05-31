@@ -16,7 +16,7 @@ describe('createAgentAdapter', () => {
         agentCommand: {
           backend: 'codex',
           command: 'codex-wrapper',
-          args: ['--sandbox', 'workspace-write'],
+          args: ['--profile', 'dev'],
           codexArgsOption: '--claude-args',
         },
         agentCodexModel: 'gpt-5.1-codex',
@@ -25,7 +25,7 @@ describe('createAgentAdapter', () => {
 
     expect(adapter.id).toBe('codex');
     expect(adapter.sessionKey).toMatch(/^codex:/);
-    expect(adapter.commandLabel).toBe('codex-wrapper --sandbox workspace-write');
+    expect(adapter.commandLabel).toBe('codex-wrapper --profile dev');
     expect(adapter.descriptor).toMatchObject({
       id: 'codex',
       label: 'Codex CLI',
