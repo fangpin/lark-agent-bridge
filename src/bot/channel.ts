@@ -53,6 +53,9 @@ const MEDIA_RESOLVE_TIMEOUT_MS = 20_000;
 const QUOTE_FETCH_TIMEOUT_MS = 10_000;
 const SESSION_PRECREATE_TIMEOUT_MS = 20_000;
 const STREAM_UPDATE_TIMEOUT_MS = 15_000;
+const MARKDOWN_REFRESH_CUTOFF_MS = 10 * 60_000;
+const MARKDOWN_REFRESH_CUTOFF_NOTE =
+  '_已运行超过 10 分钟，飞书卡片将停止自动刷新；Agent 会继续在后台工作，完成后会更新最终结果。_';
 const FINAL_FLUSH_TIMEOUT_MS = 20_000;
 const PROGRESS_REFRESH_MS = 15_000;
 const MAX_AUTO_RETRY_KEYS = 200;
@@ -727,37 +730,46 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       await forceFinalCardUpdate(channel, streamMessageId, filterForPrefs(finalState), 'card');
     } else if (replyMode === 'markdown') {
       log.info('run', 'timeline', { runId: historyEntry.runId, step: 'card-stream-start', mode: 'markdown' });
-      const result = await channel.stream(
-        chatId,
-        {
-          markdown: async (ctrl) => {
-            await withTimeout(
-              'markdown.initial-flush',
-              STREAM_UPDATE_TIMEOUT_MS,
-              ctrl.setContent(renderText(filterForPrefs(finalState))),
-            );
-            finalState = await processAgentStream(
-              handle,
-              sessions,
-              scope,
-              cwd,
-              agent.sessionKey,
-              idleTimeoutMs,
-              async (state) => {
-                finalState = state;
-                await withTimeout(
-                  'markdown.update',
-                  STREAM_UPDATE_TIMEOUT_MS,
-                  ctrl.setContent(renderText(filterForPrefs(state))),
-                );
-              },
-              agentStopGraceMs,
-              finalState,
-            );
+      let cutoff: MarkdownRefreshCutoff | undefined;
+      let result: { messageId: string };
+      try {
+        result = await channel.stream(
+          chatId,
+          {
+            markdown: async (ctrl) => {
+              cutoff = createMarkdownRefreshCutoff((markdown) => ctrl.setContent(markdown));
+              await withTimeout(
+                'markdown.initial-flush',
+                STREAM_UPDATE_TIMEOUT_MS,
+                cutoff.flush(renderText(filterForPrefs(finalState))),
+              );
+              finalState = await processAgentStream(
+                handle,
+                sessions,
+                scope,
+                cwd,
+                agent.sessionKey,
+                idleTimeoutMs,
+                async (state) => {
+                  finalState = state;
+                  const markdownCutoff = cutoff;
+                  if (!markdownCutoff) throw new Error('markdown refresh cutoff was not initialized');
+                  await withTimeout(
+                    'markdown.update',
+                    STREAM_UPDATE_TIMEOUT_MS,
+                    markdownCutoff.flush(renderText(filterForPrefs(state)), { final: state.terminal !== 'running' }),
+                  );
+                },
+                agentStopGraceMs,
+                finalState,
+              );
+            },
           },
-        },
-        sendOpts,
-      );
+          sendOpts,
+        );
+      } finally {
+        cutoff?.dispose();
+      }
       streamMessageId = result.messageId;
       runHistory.update(historyEntry.runId, { streamMessageId });
       log.info('run', 'timeline', {
@@ -766,7 +778,21 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         mode: 'markdown',
         messageId: streamMessageId,
       });
-      await forceFinalCardUpdate(channel, streamMessageId, filterForPrefs(finalState), 'markdown');
+      const finalMarkdownState = filterForPrefs(finalState);
+      await forceFinalCardUpdate(channel, streamMessageId, finalMarkdownState, 'markdown');
+      const pendingCutoffUpdate = cutoff?.pendingCutoffUpdate();
+      if (pendingCutoffUpdate && streamMessageId) {
+        void pendingCutoffUpdate
+          .then(() => forceFinalCardUpdate(channel, streamMessageId, finalMarkdownState, 'markdown'))
+          .catch((err) => {
+            log.fail('card', err, {
+              step: 'final-update-after-cutoff',
+              messageId: streamMessageId,
+              mode: 'markdown',
+              terminal: finalMarkdownState.terminal,
+            });
+          });
+      }
     } else {
       // text mode: drain the agent stream without sending anything during
       // the run, then post the final rendered text once as a plain markdown
@@ -845,6 +871,97 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       await removeReaction(channel, lastMsg.messageId, reactionId);
     }
   }
+}
+
+export interface MarkdownRefreshCutoff {
+  flush(markdown: string, opts?: { final?: boolean }): Promise<void>;
+  pendingCutoffUpdate(): Promise<void> | undefined;
+  dispose(): void;
+}
+
+export function createMarkdownRefreshCutoff(
+  setContent: (markdown: string) => Promise<void>,
+  now: () => number = Date.now,
+): MarkdownRefreshCutoff {
+  let disposed = false;
+  let finalizing = false;
+  let cutoffReached = false;
+  let cutoffNoticeSent = false;
+  let latestMarkdown = '';
+  let tail: Promise<void> = Promise.resolve();
+  let cutoffUpdate: Promise<void> | undefined;
+  const startedAt = now();
+  const timer = setTimeout(() => {
+    if (disposed || finalizing || cutoffNoticeSent) return;
+    cutoffReached = true;
+    void Promise.resolve().then(() => sendCutoffNotice());
+  }, MARKDOWN_REFRESH_CUTOFF_MS);
+
+  const isAtOrAfterCutoff = (): boolean => cutoffReached || now() - startedAt >= MARKDOWN_REFRESH_CUTOFF_MS;
+
+  const clearCutoffTimer = (): void => {
+    clearTimeout(timer);
+  };
+
+  const warnAndContinue = (err: unknown): void => {
+    log.warn('markdown', 'refresh-cutoff-update-failed', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  };
+
+  const enqueue = (operation: () => Promise<void>): Promise<void> => {
+    const task = tail.then(operation, operation);
+    tail = task.catch(() => {
+      /* keep later markdown updates moving after a failed update */
+    });
+    return task;
+  };
+
+  async function sendCutoffNotice(markdown: string = latestMarkdown): Promise<void> {
+    if (disposed || finalizing || cutoffNoticeSent) return;
+    cutoffNoticeSent = true;
+    if (disposed || finalizing) return;
+    const rawUpdate = setContent(withMarkdownRefreshCutoffNote(markdown)).catch((err) => {
+      warnAndContinue(err);
+    });
+    cutoffUpdate = rawUpdate;
+    try {
+      await withTimeout('markdown.refresh-cutoff-update', STREAM_UPDATE_TIMEOUT_MS, rawUpdate);
+    } catch (err) {
+      warnAndContinue(err);
+    }
+  }
+
+  return {
+    async flush(markdown: string, opts?: { final?: boolean }): Promise<void> {
+      latestMarkdown = markdown;
+      if (opts?.final) {
+        clearCutoffTimer();
+        finalizing = true;
+        await setContent(markdown);
+        disposed = true;
+        return;
+      }
+      if (!isAtOrAfterCutoff()) {
+        await enqueue(() => setContent(markdown));
+        return;
+      }
+      cutoffReached = true;
+      clearCutoffTimer();
+      await sendCutoffNotice(markdown);
+    },
+    pendingCutoffUpdate(): Promise<void> | undefined {
+      return cutoffUpdate;
+    },
+    dispose(): void {
+      disposed = true;
+      clearCutoffTimer();
+    },
+  };
+}
+
+function withMarkdownRefreshCutoffNote(markdown: string): string {
+  return `${markdown.trimEnd()}\n\n${MARKDOWN_REFRESH_CUTOFF_NOTE}`;
 }
 
 export function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
