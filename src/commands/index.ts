@@ -48,8 +48,16 @@ import { isAlive, readAndPrune, resolveTarget, sameAppOthers } from '../runtime/
 import type { SessionStore } from '../session/store';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import type { WorkspaceStore } from '../workspace/store';
-import { backendChatName, backendLabel, createBoundChat, nameWithBackend, renameChatForBackend } from '../bot/group';
-import { createGitWorktree, validateWorktreeName } from '../git/worktree';
+import { dissolveChat, backendChatName, backendLabel, createBoundChat, nameWithBackend, renameChatForBackend } from '../bot/group';
+import {
+  createGitWorktree,
+  inspectWorktreeClearTarget,
+  removeGitWorktreeAndBranch,
+  validateWorktreeName,
+  WorktreeClearError,
+  type WorktreeClearTarget,
+} from '../git/worktree';
+import { removeLocalAgentHistory } from '../session/local-history';
 
 export interface Controls {
   /** Restart the bridge in-process: disconnect WS, kill claude runs, reload
@@ -108,6 +116,7 @@ interface ParsedCommand {
 const handlers: Record<string, Handler> = {
   '/new': handleNew,
   '/reset': handleNew,
+  '/clear': handleClear,
   '/cd': handleCd,
   '/ws': handleWs,
   '/resume': handleResume,
@@ -137,6 +146,7 @@ const handlers: Record<string, Handler> = {
 const ADMIN_COMMANDS = new Set([
   '/account',
   '/config',
+  '/clear',
   '/exit',
   '/reconnect',
   '/doctor',
@@ -1011,6 +1021,115 @@ function escapeInlineCode(text: string): string {
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function parseClearForce(args: string): boolean | undefined {
+  const trimmed = args.trim();
+  if (!trimmed) return false;
+  if (trimmed === '--force') return true;
+  return undefined;
+}
+
+function formatClearSafetyIssues(target: WorktreeClearTarget): string {
+  return target.safetyIssues.map((issue) => `- ${issue}`).join('\n');
+}
+
+function formatWorktreeClearError(err: unknown): string {
+  if (err instanceof WorktreeClearError) return err.message;
+  return err instanceof Error ? err.message : String(err);
+}
+
+function formatClearSuccess(target: WorktreeClearTarget, force: boolean, interrupted: boolean, historyPaths: string[]): string {
+  const lines = [
+    '✓ 本地清理已完成，即将解散当前群聊。',
+    '',
+    `worktree：\`${target.path}\``,
+    `branch：\`${target.branch}\``,
+    force ? '模式：force（已允许丢弃未提交/未合并内容）' : '模式：安全清理',
+    interrupted ? '已请求终止当前运行中的任务。' : '',
+    historyPaths.length > 0 ? `已清理本地历史：${historyPaths.map((p) => `\`${p}\``).join(', ')}` : '',
+  ];
+  return lines.filter(Boolean).join('\n');
+}
+
+function formatCleanupFailure(step: string, err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return `❌ 清理失败（${step}）：${message}\n当前群聊保留，方便你处理后重试。`;
+}
+
+async function handleClear(args: string, ctx: CommandContext): Promise<void> {
+  const force = parseClearForce(args);
+  if (force === undefined) {
+    await reply(ctx, '用法：`/clear [--force]`');
+    return;
+  }
+  if (ctx.chatMode !== 'group') {
+    await reply(ctx, '❌ `/clear` 只能在 worktree 专属群聊中使用，不能在私聊或话题里使用。');
+    return;
+  }
+
+  const cwd = ctx.workspaces.cwdFor(ctx.scope);
+  if (!cwd) {
+    await reply(ctx, '❌ 当前群没有绑定 cwd，无法判断要清理哪个 worktree。');
+    return;
+  }
+
+  let target: WorktreeClearTarget;
+  try {
+    target = await inspectWorktreeClearTarget(cwd);
+  } catch (err) {
+    await reply(ctx, `❌ 当前 cwd 不是可清理的 worktree：${formatWorktreeClearError(err)}`);
+    return;
+  }
+
+  if (!force && target.safetyIssues.length > 0) {
+    await reply(
+      ctx,
+      [
+        '❌ 当前 worktree 仍有未保存或未合并内容，已停止清理。',
+        '',
+        formatClearSafetyIssues(target),
+        '',
+        '确认要丢弃这些内容时再执行：`/clear --force`',
+      ].join('\n'),
+    );
+    return;
+  }
+
+  const logMeta = {
+    scope: ctx.scope,
+    chatId: ctx.msg.chatId,
+    cwd,
+    branch: target.branch,
+    force,
+  };
+
+  let interrupted = false;
+  let historyPaths: string[] = [];
+  try {
+    log.info('command', 'clear-start', logMeta);
+    interrupted = ctx.activeRuns.interrupt(ctx.scope);
+    await ctx.agent.evictScope?.(ctx.scope, cwd);
+    ctx.sessions.clear(ctx.scope);
+    ctx.workspaces.clearCwd(ctx.scope);
+    ctx.backendStore?.clear(ctx.scope);
+    historyPaths = await removeLocalAgentHistory(cwd);
+    await removeGitWorktreeAndBranch(target, force);
+  } catch (err) {
+    log.fail('command', err, { ...logMeta, step: 'cleanup' });
+    await reply(ctx, formatCleanupFailure('本地清理', err));
+    return;
+  }
+
+  await reply(ctx, formatClearSuccess(target, force, interrupted, historyPaths));
+
+  try {
+    await dissolveChat(ctx.channel, ctx.msg.chatId);
+    log.info('command', 'clear-dissolved', logMeta);
+  } catch (err) {
+    log.fail('command', err, { ...logMeta, step: 'dissolve' });
+    await reply(ctx, `⚠️ 本地清理已完成，但解散群聊失败：${err instanceof Error ? err.message : String(err)}\n请确认 bot 具备解散/删除群聊权限。`);
+  }
 }
 
 async function handleExit(args: string, ctx: CommandContext): Promise<void> {

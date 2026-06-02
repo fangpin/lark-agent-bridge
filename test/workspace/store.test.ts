@@ -81,4 +81,31 @@ describe('WorkspaceStore', () => {
     expect(store.getNamed('bridge')).toBe(realCwd);
     expect(store.listNamed()).toEqual({ bridge: realCwd });
   });
+
+  test('clears one chat cwd while preserving named workspaces', async () => {
+    const root = await tempRoot();
+    const home = join(root, 'machine-a');
+    const file = join(root, 'workspaces.json');
+    const store = new WorkspaceStore(file, { homeDir: home });
+    const cwd = join(home, 'repos', 'bridge_pin_abc');
+
+    store.setCwd('chat-1', cwd);
+    store.setCwd('chat-2', join(home, 'repos', 'other'));
+    store.saveNamed('saved-worktree', cwd);
+    expect(store.clearCwd('chat-1')).toBe(true);
+    expect(store.clearCwd('missing-chat')).toBe(false);
+    await store.flush();
+
+    expect(store.cwdFor('chat-1')).toBeUndefined();
+    expect(store.cwdFor('chat-2')).toBe(join(home, 'repos', 'other'));
+    expect(store.getNamed('saved-worktree')).toBe(cwd);
+
+    const raw = JSON.parse(await readFile(file, 'utf8')) as {
+      chats: Record<string, { cwd: string }>;
+      named: Record<string, string>;
+    };
+    expect(raw.chats['chat-1']).toBeUndefined();
+    expect(raw.chats['chat-2']?.cwd).toBe('repos/other');
+    expect(raw.named['saved-worktree']).toBe('repos/bridge_pin_abc');
+  });
 });
