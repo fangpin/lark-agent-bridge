@@ -48,7 +48,7 @@ import { isAlive, readAndPrune, resolveTarget, sameAppOthers } from '../runtime/
 import type { SessionStore } from '../session/store';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import type { WorkspaceStore } from '../workspace/store';
-import { backendChatName, backendLabel, createBoundChat, renameChatForBackend } from '../bot/group';
+import { backendChatName, backendLabel, createBoundChat, nameWithBackend, renameChatForBackend } from '../bot/group';
 import { createGitWorktree, validateWorktreeName } from '../git/worktree';
 
 export interface Controls {
@@ -343,7 +343,7 @@ async function handleNewWorktree(name: string, ctx: CommandContext): Promise<voi
   try {
     createdChat = await createBoundChat({
       channel: ctx.channel,
-      name: `${backendLabel(ctx.backendKey)} · ${name}`,
+      name: nameWithBackend(name, ctx.backendKey),
       inviteOpenId: ctx.msg.senderId,
     });
   } catch (err) {
@@ -599,7 +599,7 @@ async function handleBackend(args: string, ctx: CommandContext): Promise<void> {
   if (ctx.chatMode === 'group') {
     try {
       await renameChatForBackend(ctx.channel, ctx.msg.chatId, 'Chat', nextKey);
-      renameStatus = `\n群名已更新为 ${backendLabel(nextKey)} 前缀。`;
+      renameStatus = `\n群名已更新为 ${backendLabel(nextKey)} 后缀。`;
     } catch {
       renameStatus = '\nbackend 已切换；群名更新失败，请确认 bot 具备 chat 更新权限。';
     }

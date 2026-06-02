@@ -67,7 +67,7 @@ describe('/backend command', () => {
     expect(commandCtx.channel.send).not.toHaveBeenCalledWith('chat-1', { markdown: expect.stringContaining('session 已重置') }, { replyTo: 'msg-1' });
   });
 
-  test('preserves the current group name when adding backend prefix', async () => {
+  test('preserves the current group name when adding backend suffix', async () => {
     const commandCtx = ctx('/backend codex');
 
     await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
@@ -77,7 +77,7 @@ describe('/backend command', () => {
     });
     expect(commandCtx.channel.rawClient.im.v1.chat.update).toHaveBeenCalledWith({
       path: { chat_id: 'chat-1' },
-      data: { name: 'Codex · draft' },
+      data: { name: 'draft · Codex' },
     });
   });
 

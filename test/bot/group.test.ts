@@ -1,17 +1,23 @@
 import { describe, expect, test, vi } from 'vitest';
-import { backendChatName, backendLabel, renameChatForBackend } from '../../src/bot/group';
+import { backendChatName, backendLabel, nameWithBackend, renameChatForBackend } from '../../src/bot/group';
 
 describe('backend chat naming', () => {
   test('uses backend labels in generated chat names', () => {
     const date = new Date('2026-06-02T13:20:00+08:00');
 
-    expect(backendChatName('codex', date)).toMatch(/^Codex · /);
-    expect(backendChatName('cursor', date)).toMatch(/^Cursor · /);
-    expect(backendChatName('claude', date)).toMatch(/^Claude · /);
+    expect(backendChatName('codex', date)).toMatch(/ · Codex$/);
+    expect(backendChatName('cursor', date)).toMatch(/ · Cursor$/);
+    expect(backendChatName('claude', date)).toMatch(/ · Claude$/);
     expect(backendLabel('claude-fast')).toBe('Claude-fast');
   });
 
-  test('renames a chat with backend prefix while replacing an existing prefix', async () => {
+  test('appends backend label while replacing an existing backend label', () => {
+    expect(nameWithBackend('Claude · Existing', 'codex')).toBe('Existing · Codex');
+    expect(nameWithBackend('Existing · Claude', 'codex')).toBe('Existing · Codex');
+    expect(nameWithBackend('Codex · Existing · Claude', 'cursor')).toBe('Existing · Cursor');
+  });
+
+  test('renames a chat with backend suffix while replacing an existing label', async () => {
     const update = vi.fn(async () => ({}));
     const channel = {
       rawClient: {
@@ -27,7 +33,7 @@ describe('backend chat naming', () => {
 
     expect(update).toHaveBeenCalledWith({
       path: { chat_id: 'chat-1' },
-      data: { name: 'Codex · Existing' },
+      data: { name: 'Existing · Codex' },
     });
   });
 });
