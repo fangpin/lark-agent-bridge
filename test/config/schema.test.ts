@@ -5,6 +5,7 @@ import {
   getAgentCodexModel,
   getAgentCursorLocalSettings,
   getDefaultAgentBackendKey,
+  getMarkGroupUnreadOnFinalCard,
   getWorktreeBranchPrefix,
   type AppConfig,
 } from '../../src/config/schema';
@@ -15,6 +16,20 @@ function cfg(preferences: AppConfig['preferences']): AppConfig {
     preferences,
   };
 }
+
+describe('getMarkGroupUnreadOnFinalCard', () => {
+  test('defaults to enabled', () => {
+    expect(getMarkGroupUnreadOnFinalCard(cfg({}))).toBe(true);
+  });
+
+  test('can be disabled explicitly', () => {
+    expect(getMarkGroupUnreadOnFinalCard(cfg({ markGroupUnreadOnFinalCard: false }))).toBe(false);
+  });
+
+  test('stays enabled when explicitly true', () => {
+    expect(getMarkGroupUnreadOnFinalCard(cfg({ markGroupUnreadOnFinalCard: true }))).toBe(true);
+  });
+});
 
 describe('agent command config', () => {
   test('defaults codex backend command to codex', () => {
