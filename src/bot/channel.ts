@@ -24,6 +24,7 @@ import { isStopCommandText, tryHandleCommand, type Controls } from '../commands'
 import type { AppConfig } from '../config/schema';
 import {
   getAgentStopGraceMs,
+  getMarkGroupUnreadOnFinalCard,
   getMaxConcurrentRuns,
   getMessageReplyMode,
   getRequireMentionInGroup,
@@ -762,7 +763,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         mode: 'card',
         messageId: streamMessageId,
       });
-      await forceFinalCardUpdate(channel, streamMessageId, filterForPrefs(finalState), 'card');
+      await forceFinalCardUpdate(channel, streamMessageId, filterForPrefs(finalState), 'card', {
+        chatId,
+        mode,
+        cfg: controls.cfg,
+      });
     } else if (replyMode === 'markdown') {
       log.info('run', 'timeline', { runId: historyEntry.runId, step: 'card-stream-start', mode: 'markdown' });
       let cutoff: MarkdownRefreshCutoff | undefined;
@@ -827,11 +832,19 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         messageId: streamMessageId,
       });
       const finalMarkdownState = filterForPrefs(finalState);
-      await forceFinalCardUpdate(channel, streamMessageId, finalMarkdownState, 'markdown');
+      await forceFinalCardUpdate(channel, streamMessageId, finalMarkdownState, 'markdown', {
+        chatId,
+        mode,
+        cfg: controls.cfg,
+      });
       const pendingCutoffUpdate = cutoff?.pendingCutoffUpdate();
       if (pendingCutoffUpdate && streamMessageId) {
         void pendingCutoffUpdate
-          .then(() => forceFinalCardUpdate(channel, streamMessageId, finalMarkdownState, 'markdown'))
+          .then(() => forceFinalCardUpdate(channel, streamMessageId, finalMarkdownState, 'markdown', {
+            chatId,
+            mode,
+            cfg: controls.cfg,
+          }))
           .catch((err) => {
             log.fail('card', err, {
               step: 'final-update-after-cutoff',
@@ -1131,11 +1144,18 @@ function rememberAutoRetryKey(keys: AutoRetryKeys, key: string): void {
   }
 }
 
+interface FinalCardUpdateOptions {
+  chatId: string;
+  mode: ChatMode;
+  cfg: AppConfig;
+}
+
 async function forceFinalCardUpdate(
   channel: LarkChannel,
   messageId: string | undefined,
   state: RunState,
   mode: 'card' | 'markdown',
+  opts: FinalCardUpdateOptions,
 ): Promise<void> {
   if (!messageId || state.terminal === 'running') return;
   const card = mode === 'markdown' ? markdownFinalCard(renderText(state), state) : renderCard(state);
@@ -1147,8 +1167,68 @@ async function forceFinalCardUpdate(
       terminal: state.terminal,
       chars: mode === 'markdown' ? renderText(state).length : undefined,
     });
+    await markGroupChatUnreadAfterFinalCard(channel, opts.chatId, opts.mode, opts.cfg);
   } catch (err) {
     log.fail('card', err, { step: 'final-update', messageId, mode, terminal: state.terminal });
+  }
+}
+
+async function markGroupChatUnreadAfterFinalCard(
+  channel: LarkChannel,
+  chatId: string,
+  mode: ChatMode,
+  cfg: AppConfig,
+): Promise<void> {
+  if (!getMarkGroupUnreadOnFinalCard(cfg) || mode === 'p2p') return;
+  const rawClient = channel.rawClient as typeof channel.rawClient & {
+    formatPayload?: (payload?: {
+      path?: Record<string, unknown>;
+      data?: Record<string, unknown>;
+    }) => Promise<{
+      headers: Record<string, unknown>;
+      params: Record<string, unknown>;
+      data: Record<string, unknown>;
+      path: Record<string, unknown>;
+    }>;
+    httpInstance?: {
+      request(opts: {
+        url: string;
+        method: string;
+        headers?: Record<string, unknown>;
+        params?: Record<string, unknown>;
+        data?: Record<string, unknown>;
+      }): Promise<unknown>;
+    };
+    domain?: string;
+  };
+  const chat = (rawClient.im.v1 as { chat?: typeof rawClient.im.v1.chat & {
+    membersMePatch?: (payload: { path: { chat_id: string }; data: { unread: boolean } }) => Promise<unknown>;
+  } }).chat;
+  try {
+    if (chat?.membersMePatch) {
+      await withTimeout('mark-chat-unread', FINAL_FLUSH_TIMEOUT_MS, chat.membersMePatch({
+        path: { chat_id: chatId },
+        data: { unread: true },
+      }));
+    } else if (rawClient.formatPayload && rawClient.httpInstance && rawClient.domain) {
+      const { headers, params, data, path } = await rawClient.formatPayload({
+        path: { chat_id: chatId },
+        data: { unread: true },
+      });
+      await withTimeout('mark-chat-unread', FINAL_FLUSH_TIMEOUT_MS, rawClient.httpInstance.request({
+        url: `${rawClient.domain}/open-apis/im/v1/chats/${encodeURIComponent(String(path.chat_id))}/members/me`,
+        method: 'PATCH',
+        headers,
+        params,
+        data,
+      }));
+    } else {
+      log.warn('card', 'mark-chat-unread-unavailable', { chatId, mode });
+      return;
+    }
+    log.info('card', 'mark-chat-unread', { chatId, mode });
+  } catch (err) {
+    log.fail('card', err, { step: 'mark-chat-unread', chatId, mode });
   }
 }
 

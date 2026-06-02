@@ -177,6 +177,108 @@ describe('channel streamMessageId persistence', () => {
     expect(persistedStreamMessageId).toBe('om_fallback');
   });
 
+  test('marks group chat unread after successful final card update by default', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const markUnread = vi.fn(async () => {});
+    const fakeChannel = createFinalCardChannel(messages, { markUnread });
+    const cfg = cardReplyConfig();
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg,
+      agent: fakeAgent(() => {}),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(cfg),
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('om_original', 'original prompt'));
+
+    await vi.waitFor(() => expect(markUnread).toHaveBeenCalledOnce());
+  });
+
+  test('does not mark group chat unread when final-card unread preference is disabled', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const markUnread = vi.fn(async () => {});
+    const updateCard = vi.fn(async () => {});
+    const fakeChannel = createFinalCardChannel(messages, { markUnread, updateCard });
+    const cfg: AppConfig = {
+      ...cardReplyConfig(),
+      preferences: {
+        ...cardReplyConfig().preferences,
+        markGroupUnreadOnFinalCard: false,
+      },
+    };
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg,
+      agent: fakeAgent(() => {}),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(cfg),
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('om_original', 'original prompt'));
+
+    await vi.waitFor(() => expect(updateCard).toHaveBeenCalledOnce());
+    expect(markUnread).not.toHaveBeenCalled();
+  });
+
+  test('does not mark p2p chats unread after final card update', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const markUnread = vi.fn(async () => {});
+    const updateCard = vi.fn(async () => {});
+    const fakeChannel = createFinalCardChannel(messages, { chatMode: 'p2p', markUnread, updateCard });
+    const cfg = cardReplyConfig();
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg,
+      agent: fakeAgent(() => {}),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(cfg),
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('om_original', 'original prompt'));
+
+    await vi.waitFor(() => expect(updateCard).toHaveBeenCalledOnce());
+    expect(markUnread).not.toHaveBeenCalled();
+  });
+
+  test('mark-unread failure does not prevent run completion', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const updateCard = vi.fn(async () => {});
+    const markUnread = vi.fn(async () => {
+      throw new Error('mark unread failed');
+    });
+    const fakeChannel = createFinalCardChannel(messages, { markUnread, updateCard });
+    const cfg = cardReplyConfig();
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg,
+      agent: fakeAgent(() => {}),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(cfg),
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('om_original', 'original prompt'));
+
+    await vi.waitFor(() => expect(updateCard).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(markUnread).toHaveBeenCalledOnce());
+  });
+
   test('markdown reply mode shows a cutoff note after 10 minutes and still final-updates the card', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
@@ -1322,6 +1424,44 @@ function fakeMessage(messageId: string, content = 'queued'): NormalizedMessage {
     mentionedBot: true,
     createTime: Date.now(),
   };
+}
+
+function createFinalCardChannel(
+  handlers: Record<string, (msg: NormalizedMessage) => Promise<void>>,
+  opts: {
+    chatMode?: 'p2p' | 'group' | 'topic';
+    markUnread?: () => Promise<void>;
+    updateCard?: (messageId: string, card: unknown) => Promise<void>;
+  } = {},
+): LarkChannel {
+  const base = createFakeChannel(handlers);
+  return {
+    ...base,
+    async getChatMode() {
+      return opts.chatMode ?? 'group';
+    },
+    async stream(_chatId: string, payload: { card?: { producer(ctrl: { update(card: unknown): Promise<void> }): Promise<void> } }) {
+      if (!payload.card) throw new Error('card stream producer was not registered');
+      await payload.card.producer({ update: async () => {} });
+      return { messageId: 'om_card_stream' };
+    },
+    async updateCard(messageId: string, card: unknown) {
+      await opts.updateCard?.(messageId, card);
+    },
+    rawClient: {
+      im: {
+        v1: {
+          ...base.rawClient.im.v1,
+          chat: {
+            ...(base.rawClient.im.v1 as { chat?: object }).chat,
+            async membersMePatch() {
+              await opts.markUnread?.();
+            },
+          },
+        },
+      },
+    },
+  } as unknown as LarkChannel;
 }
 
 function createFakeChannel(handlers: Record<string, (msg: NormalizedMessage) => Promise<void>>): LarkChannel {
