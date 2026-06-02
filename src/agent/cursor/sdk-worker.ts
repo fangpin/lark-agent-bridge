@@ -18,7 +18,7 @@ export interface SdkWorkerConfig {
   localSettingSources?: CursorSdkLocalSettingSources;
 }
 
-export type CursorSdkLocalSettingSources = 'all';
+export type CursorSdkLocalSettingSources = Array<'all'>;
 
 type WorkerRequest =
   | { type: 'ensure'; id: string; cwd: string; agentId?: string; allowReplacement?: boolean }
