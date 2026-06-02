@@ -113,7 +113,7 @@ Host CLI entries for `status`, `doctor`, `handover`, `workspace`, and `service` 
 | `/stop` | Stop the run in progress (also the `⏹` button on the card) |
 | `/timeout [N\|off\|default]` | Idle-watchdog (minutes) for the current session. `/config` sets the global default. See FAQ below. |
 | `/retry <run-id>` | Replay a recent failed or timed-out run. Failed cards include a one-click retry button. |
-| `/shell <command>` | Run a shell command in the current cwd and return stdout/stderr. Admin-only when admins are configured; capped at 30s and 12k chars. |
+| `/shell <command>` | Run a shell command in the current cwd and return stdout/stderr. Admin-only when admins are configured; capped at 10 min and 12k chars. |
 | `/workers` | Show Cursor SDK worker-pool health: status, queue count, current run, session/cwd, and recent error. |
 | `/ps` | List all `start` processes on this host, marking the one replying |
 | `/exit <id\|#>` | Stop a `start` process (your own → graceful; another's → SIGTERM) |

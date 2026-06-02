@@ -824,7 +824,7 @@ async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
   await reply(ctx, `已重新排队上次任务（${entry.batch.length} 条消息，当前队列 ${size}）。`);
 }
 
-const SHELL_TIMEOUT_MS = 30_000;
+const SHELL_TIMEOUT_MS = 10 * 60_000;
 const SHELL_OUTPUT_MAX_CHARS = 12_000;
 
 interface ShellRunResult {
