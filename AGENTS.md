@@ -40,6 +40,7 @@ Use `npm`, not `pnpm`, unless the user explicitly asks otherwise.
 - Preserve strict TypeScript settings. Prefer explicit types at module boundaries and for test doubles that model production interfaces.
 - Use existing adapters, stores, renderers, and logger helpers instead of introducing parallel abstractions.
 - After code changes, especially behavior or feature changes, explicitly consider whether `README.md`, `README.zh.md`, or `AGENTS.md` need updates before declaring the work complete.
+- After adding, renaming, or changing any in-chat slash command, review `/help` output and update `helpCard()` if the user-facing command list or descriptions need to change.
 - Do not commit local credentials or runtime state. Files under `~/.lark-channel/` are user data, not repository fixtures.
 - Treat `dist/`, `node_modules/`, local logs, and generated runtime data as build/runtime artifacts.
 - Keep host-executing slash commands such as `/shell` admin-gated, bounded by time/output limits, and careful about logs: record diagnostic metadata, not full command output.

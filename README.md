@@ -96,12 +96,15 @@ Host CLI entries for `status`, `doctor`, `handover`, `workspace`, and `service` 
 | Command | Effect |
 |---|---|
 | `/new`, `/reset` | Clear the current chat's session |
+| `/new chat [name]` | Create a new group chat, invite you, and bind it to a fresh session |
 | `/new worktree <name>` | Create a new git worktree from `origin/main` (or `origin/master` fallback), create a backend-labeled group chat, and bind that chat cwd to the worktree. |
+| `/resume [N]` | List and restore recent local agent sessions for the current cwd |
 | `/cd <path>` | Switch working directory (resets session) |
 | `/ws list` | List named workspaces (card + buttons) |
 | `/ws save <name>` | Save current cwd as a named workspace |
 | `/ws use <name>` | Switch to a named workspace |
 | `/ws remove <name>` | Delete a named workspace |
+| `/account` | Show the current Lark app binding; `/account change` updates appId/secret and reconnects |
 | `/status` | Current cwd / session / agent / latest run (card + buttons) |
 | `/runs [run-id]` | Show recent runs for the current chat/topic, including status, failure reason, retry/stop buttons, and per-run details. |
 | `/backend [key\|default]` | Show or switch the current chat/topic's agent backend. |
