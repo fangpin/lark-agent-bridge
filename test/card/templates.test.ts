@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from 'vitest';
 import type { RunHistoryEntry } from '../../src/bot/run-history';
-import { runsCard, runDetailCard, setupDiagnosticsCard, statusCard } from '../../src/card/templates';
+import { helpCard, runsCard, runDetailCard, setupDiagnosticsCard, statusCard } from '../../src/card/templates';
 import type { SetupDiagnosticsResult } from '../../src/doctor/setup';
 
 const agent = {
@@ -30,6 +30,43 @@ function entry(overrides: Partial<RunHistoryEntry>): RunHistoryEntry {
 }
 
 describe('runs cards', () => {
+  test('help card lists current in-chat slash commands', () => {
+    const json = JSON.stringify(helpCard());
+
+    [
+      '/new',
+      '/reset',
+      '/new chat [name]',
+      '/new worktree <name>',
+      '/resume [N]',
+      '/cd <path>',
+      '/ws list',
+      '/ws save <name>',
+      '/ws use <name>',
+      '/ws remove <name>',
+      '/account',
+      '/account change',
+      '/config',
+      '/status',
+      '/runs [run-id]',
+      '/backend [key|default]',
+      '/stop',
+      '/timeout [N|off|default]',
+      '/retry <run-id>',
+      '/shell <command>',
+      '/workers',
+      '/ps',
+      '/exit <id|#>',
+      '/reconnect',
+      '/doctor [description]',
+      '/doctor setup',
+      '/doctor workers',
+      '/help',
+    ].forEach((command) => {
+      expect(json).toContain(command);
+    });
+  });
+
   test('renders recent run status, summary, errors, and safe actions', () => {
     vi.setSystemTime(10_000);
     const card = runsCard({
