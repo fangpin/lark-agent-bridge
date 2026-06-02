@@ -172,6 +172,24 @@ describe('/clear', () => {
     expect(group.dissolveChat).toHaveBeenCalledWith(commandCtx.channel, 'chat-1');
   });
 
+  test('short force flag continues through unsafe state and removes with force', async () => {
+    const unsafe = clearTarget({
+      dirty: true,
+      unmerged: true,
+      safetyIssues: ['worktree has uncommitted or untracked changes'],
+    });
+    vi.spyOn(worktree, 'inspectWorktreeClearTarget').mockResolvedValue(unsafe);
+    vi.spyOn(worktree, 'removeGitWorktreeAndBranch').mockResolvedValue(undefined);
+    vi.spyOn(localHistory, 'removeLocalAgentHistory').mockResolvedValue([]);
+    vi.spyOn(group, 'dissolveChat').mockResolvedValue(undefined);
+    const commandCtx = ctx('/clear -f');
+
+    await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
+
+    expect(worktree.removeGitWorktreeAndBranch).toHaveBeenCalledWith(unsafe, true);
+    expect(group.dissolveChat).toHaveBeenCalledWith(commandCtx.channel, 'chat-1');
+  });
+
   test('reports Lark dissolution failure after local cleanup', async () => {
     vi.spyOn(worktree, 'inspectWorktreeClearTarget').mockResolvedValue(clearTarget());
     vi.spyOn(worktree, 'removeGitWorktreeAndBranch').mockResolvedValue(undefined);

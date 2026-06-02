@@ -1026,7 +1026,7 @@ function formatDuration(ms: number): string {
 function parseClearForce(args: string): boolean | undefined {
   const trimmed = args.trim();
   if (!trimmed) return false;
-  if (trimmed === '--force') return true;
+  if (trimmed === '--force' || trimmed === '-f') return true;
   return undefined;
 }
 
@@ -1060,7 +1060,7 @@ function formatCleanupFailure(step: string, err: unknown): string {
 async function handleClear(args: string, ctx: CommandContext): Promise<void> {
   const force = parseClearForce(args);
   if (force === undefined) {
-    await reply(ctx, '用法：`/clear [--force]`');
+    await reply(ctx, '用法：`/clear [--force|-f]`');
     return;
   }
   if (ctx.chatMode !== 'group') {
@@ -1090,7 +1090,7 @@ async function handleClear(args: string, ctx: CommandContext): Promise<void> {
         '',
         formatClearSafetyIssues(target),
         '',
-        '确认要丢弃这些内容时再执行：`/clear --force`',
+        '确认要丢弃这些内容时再执行：`/clear --force` 或 `/clear -f`',
       ].join('\n'),
     );
     return;
