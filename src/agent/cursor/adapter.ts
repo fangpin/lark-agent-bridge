@@ -11,7 +11,7 @@ import type {
 import { spawnCreateChat } from './create-chat';
 import { CursorSdkPool } from './sdk-pool';
 import { spawnCursorRun, type CursorSpawnOptions } from './spawn-run';
-import type { SdkWorkerConfig } from './sdk-worker';
+import type { CursorSdkLocalSettingSources, SdkWorkerConfig } from './sdk-worker';
 import type { CursorSdkModelSelection } from './model-selection';
 import {
   DEFAULT_AGENT_CURSOR_CLI_MODEL,
@@ -28,6 +28,7 @@ export interface CursorAdapterOptions {
   /** SDK `ModelSelection` (e.g. `gpt-5.5` + reasoning/fast params). */
   defaultSdkModel?: CursorSdkModelSelection;
   apiKey?: string;
+  localSettingSources?: CursorSdkLocalSettingSources | 'none';
 }
 
 export class CursorAdapter implements AgentAdapter {
@@ -60,9 +61,11 @@ export class CursorAdapter implements AgentAdapter {
       apiKey: opts.apiKey,
     };
     if (this.effectiveRuntime === 'sdk') {
+      const localSettingSources = opts.localSettingSources ?? 'all';
       const sdkConfig: SdkWorkerConfig = {
         model: this.defaultSdkModel,
         ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
+        ...(localSettingSources === 'all' ? { localSettingSources } : {}),
       };
       this.sdkPool = new CursorSdkPool(this.spawnOpts, sdkConfig, poolSize);
     }

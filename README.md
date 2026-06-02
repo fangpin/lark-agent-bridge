@@ -165,6 +165,7 @@ To use Cursor Agent, configure the Cursor backend. The default runtime is `@curs
       "command": "agent"
     },
     "agentCursorRuntime": "sdk",
+    "agentCursorLocalSettings": "all",
     "agentSessionPoolSize": 10,
     "agentCursorApiKey": "${CURSOR_API_KEY}",
     "agentCursorModel": "gpt-5.5-extra-high-fast"
@@ -173,6 +174,8 @@ To use Cursor Agent, configure the Cursor backend. The default runtime is `@curs
 ```
 
 For SDK mode, provide a Cursor API key with `CURSOR_API_KEY`, or store it encrypted with `lark-agent-bridge secrets set --id cursor-api-key` and reference it from `agentCursorApiKey`. `agentCursorModel` uses Cursor CLI-style model ids; the bridge maps known variants to the SDK model-selection shape. For full control, set `agentCursorSdkModel` directly:
+
+SDK mode loads local Cursor settings by default (`"agentCursorLocalSettings": "all"`), so local MCP servers, hooks/subagents, plugins, and skills configured for Cursor are visible to the SDK agent. Set `"agentCursorLocalSettings": "none"` to keep SDK runs isolated to bridge-provided inline config.
 
 ```json
 {

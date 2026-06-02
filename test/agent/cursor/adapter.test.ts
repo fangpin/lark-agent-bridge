@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, test } from 'vitest';
 import { CursorAdapter } from '../../../src/agent/cursor/adapter';
+import type { SdkWorkerConfig } from '../../../src/agent/cursor/sdk-worker';
 
 async function collectEvents(adapter: CursorAdapter, cwd: string): Promise<string[]> {
   const run = adapter.run({ prompt: 'hello', cwd });
@@ -13,6 +14,14 @@ async function collectEvents(adapter: CursorAdapter, cwd: string): Promise<strin
 }
 
 describe('CursorAdapter', () => {
+  function sdkWorkerConfig(adapter: CursorAdapter): SdkWorkerConfig | undefined {
+    return (
+      adapter as unknown as {
+        sdkPool?: { sdkConfig: SdkWorkerConfig };
+      }
+    ).sdkPool?.sdkConfig;
+  }
+
   test('reports a missing working directory before spawning the cursor command', async () => {
     const missingCwd = join(tmpdir(), `lark-agent-missing-cwd-${process.pid}-${Date.now()}`);
     const adapter = new CursorAdapter({ command: process.execPath });
@@ -43,5 +52,21 @@ describe('CursorAdapter', () => {
       commandLabel: 'agent',
       supportsWorkers: false,
     });
+  });
+
+  test('loads local Cursor settings by default in SDK runtime', () => {
+    const adapter = new CursorAdapter({ runtime: 'sdk', sessionPoolSize: 1 });
+
+    expect(sdkWorkerConfig(adapter)?.localSettingSources).toBe('all');
+  });
+
+  test('can disable local Cursor settings in SDK runtime', () => {
+    const adapter = new CursorAdapter({
+      runtime: 'sdk',
+      sessionPoolSize: 1,
+      localSettingSources: 'none',
+    });
+
+    expect(sdkWorkerConfig(adapter)?.localSettingSources).toBeUndefined();
   });
 });

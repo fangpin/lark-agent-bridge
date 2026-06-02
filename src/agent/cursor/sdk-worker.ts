@@ -15,7 +15,10 @@ import type { AgentEvent } from '../types';
 export interface SdkWorkerConfig {
   model: { id: string; params?: Array<{ id: string; value: string }> };
   apiKey?: string;
+  localSettingSources?: CursorSdkLocalSettingSources;
 }
+
+export type CursorSdkLocalSettingSources = 'all';
 
 type WorkerRequest =
   | { type: 'ensure'; id: string; cwd: string; agentId?: string; allowReplacement?: boolean }
@@ -103,12 +106,14 @@ async function withRecoverableRetry<T>(
 function agentOptions(cwd: string): {
   model: SdkWorkerConfig['model'];
   apiKey?: string;
-  local: { cwd: string };
+  local: { cwd: string; settingSources?: CursorSdkLocalSettingSources };
 } {
+  const local: { cwd: string; settingSources?: CursorSdkLocalSettingSources } = { cwd };
+  if (config?.localSettingSources) local.settingSources = config.localSettingSources;
   return {
     ...(config?.apiKey ? { apiKey: config.apiKey } : {}),
     model: config!.model,
-    local: { cwd },
+    local,
   };
 }
 

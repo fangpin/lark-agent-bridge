@@ -7,6 +7,7 @@ import {
 import {
   getAgentCodexModel,
   getAgentCommand,
+  getAgentCursorLocalSettings,
   getAgentCursorRuntime,
   getAgentSessionPoolSize,
 } from '../config/schema';
@@ -27,6 +28,7 @@ export async function createAgentAdapter(cfg: AppConfig): Promise<AgentAdapter> 
       defaultCliModel: getAgentCursorCliModel(cfg),
       defaultSdkModel: getAgentCursorSdkModel(cfg),
       apiKey,
+      localSettingSources: getAgentCursorLocalSettings(cfg),
     });
   }
   if (command.backend === 'codex') {
