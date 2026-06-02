@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'vitest';
 import {
+  getAgentBackendConfigs,
   getAgentCommand,
   getAgentCodexModel,
   getAgentCursorLocalSettings,
+  getDefaultAgentBackendKey,
   type AppConfig,
 } from '../../src/config/schema';
 
@@ -81,5 +83,42 @@ describe('agent command config', () => {
   test('loads local Cursor settings by default for SDK runtime', () => {
     expect(getAgentCursorLocalSettings(cfg({}))).toBe('all');
     expect(getAgentCursorLocalSettings(cfg({ agentCursorLocalSettings: 'none' }))).toBe('none');
+  });
+
+  test('normalizes legacy single backend as the default backend config', () => {
+    const config = cfg({ agentCommand: { backend: 'codex', command: 'codex' } });
+
+    expect(getDefaultAgentBackendKey(config)).toBe('codex');
+    expect(getAgentBackendConfigs(config)).toEqual({
+      codex: { backend: 'codex', command: 'codex', args: [] },
+    });
+  });
+
+  test('normalizes configured backend registry and default backend', () => {
+    const config = cfg({
+      defaultBackend: 'claude-fast',
+      agentBackends: {
+        'claude-fast': { backend: 'claude', command: 'claude', args: ['--fast'] },
+        codex: { backend: 'codex', command: 'codex' },
+      },
+    });
+
+    expect(getDefaultAgentBackendKey(config)).toBe('claude-fast');
+    expect(getAgentBackendConfigs(config)).toEqual({
+      'claude-fast': { backend: 'claude', command: 'claude', args: ['--fast'] },
+      codex: { backend: 'codex', command: 'codex', args: [] },
+    });
+  });
+
+  test('falls back to the first configured backend when default backend is missing', () => {
+    const config = cfg({
+      defaultBackend: 'missing',
+      agentBackends: {
+        cursor: { backend: 'cursor', command: 'agent' },
+        codex: { backend: 'codex', command: 'codex' },
+      },
+    });
+
+    expect(getDefaultAgentBackendKey(config)).toBe('cursor');
   });
 });

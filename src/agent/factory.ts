@@ -5,19 +5,28 @@ import {
   getAgentCursorSdkModel,
 } from './cursor/model-selection';
 import {
+  getAgentBackendConfigs,
   getAgentCodexModel,
   getAgentCommand,
   getAgentCursorLocalSettings,
   getAgentCursorRuntime,
   getAgentSessionPoolSize,
+  getDefaultAgentBackendKey,
+  normalizeAgentCommand,
 } from '../config/schema';
 import { ClaudeAdapter } from './claude/adapter';
 import { CodexAdapter } from './codex/adapter';
 import { CursorAdapter } from './cursor/adapter';
+import { AgentRegistry } from './registry';
 import type { AgentAdapter } from './types';
 
-export async function createAgentAdapter(cfg: AppConfig): Promise<AgentAdapter> {
-  const command = getAgentCommand(cfg);
+type NormalizedAgentCommand = ReturnType<typeof normalizeAgentCommand>;
+
+export async function createAgentAdapterFromCommand(
+  cfg: AppConfig,
+  command: NormalizedAgentCommand,
+  backendKey: string = command.backend,
+): Promise<AgentAdapter> {
   if (command.backend === 'cursor') {
     const apiKey = await resolveAgentCursorApiKey(cfg);
     return new CursorAdapter({
@@ -37,7 +46,18 @@ export async function createAgentAdapter(cfg: AppConfig): Promise<AgentAdapter> 
       args: command.args,
       codexArgsOption: command.codexArgsOption,
       defaultModel: getAgentCodexModel(cfg),
+      backendKey,
     });
   }
   return new ClaudeAdapter(command);
+}
+
+export async function createAgentAdapter(cfg: AppConfig): Promise<AgentAdapter> {
+  return createAgentAdapterFromCommand(cfg, getAgentCommand(cfg));
+}
+
+export async function createAgentRegistry(cfg: AppConfig): Promise<AgentRegistry> {
+  const configs = getAgentBackendConfigs(cfg);
+  const defaultKey = getDefaultAgentBackendKey(cfg);
+  return new AgentRegistry(Object.keys(configs), defaultKey, (key) => createAgentAdapterFromCommand(cfg, configs[key]!, key));
 }

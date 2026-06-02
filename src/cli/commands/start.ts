@@ -1,8 +1,10 @@
 import dns from 'node:dns';
 import { createInterface } from 'node:readline';
 import pkg from '../../../package.json';
-import { createAgentAdapter } from '../../agent/factory';
+import { createAgentAdapter, createAgentRegistry } from '../../agent/factory';
+import type { AgentRegistry } from '../../agent/registry';
 import type { AgentAdapter, AgentAvailability } from '../../agent/types';
+import { BackendStore } from '../../backend/store';
 import { startChannel, type BridgeChannel } from '../../bot/channel';
 import { runRegistrationWizard } from '../../bot/wizard';
 import type { Controls } from '../../commands';
@@ -103,7 +105,8 @@ export async function runStart(opts: StartOptions): Promise<void> {
     printScopeReminder();
   }
 
-  let agent = await createAgentAdapter(cfg);
+  let agentRegistry = await createAgentRegistry(cfg);
+  let agent = await agentRegistry.getDefault();
   const availability = await checkAgentAvailability(agent);
   if (!availability.ok) {
     console.error(`✗ agent 命令可用性检查失败: ${agent.commandLabel}`);
@@ -116,6 +119,8 @@ export async function runStart(opts: StartOptions): Promise<void> {
   await sessions.load();
   const workspaces = new WorkspaceStore();
   await workspaces.load();
+  const backendStore = new BackendStore();
+  await backendStore.load();
 
   await gcMediaCache(MEDIA_GC_MAX_AGE_MS);
   await gcOldLogs();
@@ -155,7 +160,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
     stopping = true;
     console.log(`\n收到 ${sig}，正在关闭...`);
     try {
-      await agent.shutdown?.();
+      await agentRegistry.shutdown();
       await bridge.disconnect();
     } catch (err) {
       console.error('[disconnect-failed]', err);
@@ -178,18 +183,20 @@ export async function runStart(opts: StartOptions): Promise<void> {
       try {
         const next = await loadConfig(configPath);
         if (!isComplete(next)) throw new Error('config incomplete after change');
-        const nextAgent = await createAgentAdapter(next);
+        const nextRegistry = await createAgentRegistry(next);
+        const nextAgent = await nextRegistry.getDefault();
         if (!(await nextAgent.isAvailable())) {
           throw new Error(`configured agent command is not runnable: ${nextAgent.commandLabel}`);
         }
         console.log('[restart] disconnecting old bridge...');
         try {
-          await agent.shutdown?.();
+          await agentRegistry.shutdown();
           await bridge.disconnect();
         } catch (err) {
           console.warn('[restart] disconnect failed:', err);
         }
         controls.cfg = next;
+        agentRegistry = nextRegistry;
         agent = nextAgent;
         // Keep the registry in sync so /ps reflects the new app after an
         // /account change. Same process id, new app fields. botName is
@@ -205,7 +212,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
         console.log(
           `[restart] reconnecting with appId=${next.accounts.app.id} tenant=${next.accounts.app.tenant}...`,
         );
-        bridge = await startChannel({ cfg: next, agent, sessions, workspaces, controls });
+        bridge = await startChannel({ cfg: next, agentRegistry, backendStore, sessions, workspaces, controls });
         const restartedBotName = bridge.channel.botIdentity?.name;
         if (restartedBotName) {
           await updateEntry(entry.id, { botName: restartedBotName }).catch((err) =>
@@ -219,7 +226,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
     },
   };
 
-  bridge = await startChannel({ cfg, agent, sessions, workspaces, controls });
+  bridge = await startChannel({ cfg, agentRegistry, backendStore, sessions, workspaces, controls });
 
   // Backfill the bot's display name into the registry once WS handshake is
   // done — future starts conflicting on this app can show it in the prompt

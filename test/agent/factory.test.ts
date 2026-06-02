@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { createAgentAdapter } from '../../src/agent/factory';
+import { createAgentAdapter, createAgentRegistry } from '../../src/agent/factory';
 import type { AppConfig } from '../../src/config/schema';
 
 function cfg(preferences: AppConfig['preferences']): AppConfig {
@@ -33,5 +33,21 @@ describe('createAgentAdapter', () => {
       supportsRetry: true,
       supportsWorkers: false,
     });
+  });
+
+  test('creates a registry for configured backends', async () => {
+    const registry = await createAgentRegistry(
+      cfg({
+        defaultBackend: 'codex',
+        agentBackends: {
+          claude: { backend: 'claude', command: 'claude' },
+          codex: { backend: 'codex', command: 'codex' },
+        },
+      }),
+    );
+
+    expect(registry.keys()).toEqual(['claude', 'codex']);
+    expect(registry.defaultKey()).toBe('codex');
+    expect((await registry.getDefault()).id).toBe('codex');
   });
 });

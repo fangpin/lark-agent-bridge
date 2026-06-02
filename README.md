@@ -15,6 +15,8 @@ A lightweight bot that bridges Feishu / Lark messenger with your local coding-ag
 - **Images and files**: send them to the bot directly — the agent reads the locally downloaded paths.
 - **Interactive cards**: `/help`, `/ws list`, `/status` return cards with buttons you can click.
 
+For long-running markdown replies, the bridge stops high-frequency streaming refreshes after 10 minutes and then rewrites the card about every 30 seconds with the latest known content. This avoids long-lived streaming update stalls while still keeping the visible card current; the final card is always updated when the agent finishes.
+
 ## Prerequisites
 
 - Node.js **>= 20**
@@ -101,6 +103,7 @@ Host CLI entries for `status`, `doctor`, `handover`, `workspace`, and `service` 
 | `/ws remove <name>` | Delete a named workspace |
 | `/status` | Current cwd / session / agent / latest run (card + buttons) |
 | `/runs [run-id]` | Show recent runs for the current chat/topic, including status, failure reason, retry/stop buttons, and per-run details. |
+| `/backend [key\|default]` | Show or switch the current chat/topic's agent backend. |
 | `/config` | Adjust preferences (reply style, tool-call display, ...) |
 | `/stop` | Stop the run in progress (also the `⏹` button on the card) |
 | `/timeout [N\|off\|default]` | Idle-watchdog (minutes) for the current session. `/config` sets the global default. See FAQ below. |
@@ -152,6 +155,25 @@ By default the bridge uses the Claude backend and appends Claude Code arguments 
 ```
 
 With `claudeArgsOption`, the bridge safely joins Claude Code arguments and runs commands like `my-claude-wrapper --model gpt-5.5 --claude-args "-p ... --output-format stream-json --verbose ..."`. Without `claudeArgsOption`, it appends Claude args as normal argv entries. If `agentCommand` is omitted, it keeps using plain `claude`.
+
+### Multiple backends in one bot
+
+A single bridge process can expose multiple backend profiles and choose one per chat/topic. `defaultBackend` is used when a chat has not selected a backend; `/backend <key>` switches the current chat/topic, and `/backend default` returns to the default.
+
+```json
+{
+  "preferences": {
+    "defaultBackend": "claude",
+    "agentBackends": {
+      "claude": { "backend": "claude", "command": "claude" },
+      "codex": { "backend": "codex", "command": "codex" },
+      "cursor": { "backend": "cursor", "command": "agent" }
+    }
+  }
+}
+```
+
+Sessions are isolated by backend. New bound groups use the current backend label in the group name, and `/backend` best-effort renames group chats with the selected backend prefix.
 
 ### Cursor backend (`@cursor/sdk` or CLI)
 

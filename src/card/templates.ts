@@ -296,6 +296,7 @@ export function helpCard(): object {
         '- `/config` — 调整偏好（消息回复方式、工具调用显示）',
         '- `/status` — 当前状态',
         '- `/runs` — 查看当前 chat 最近运行、失败原因、重试/终止入口',
+        '- `/backend [key|default]` — 查看或切换当前 chat 的 agent backend',
         '- `/stop` — 结束当前正在跑的任务（也可点卡片底部 ⏹ 终止 按钮）',
         '- `/timeout [N|off|default]` — 当前 session 的探活分钟数,`/config` 改全局默认',
         '- `/ps` — 列出本机所有 bot,标识当前正在回复的那个',

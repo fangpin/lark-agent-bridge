@@ -100,6 +100,9 @@ export interface AgentCommandConfig {
   codexArgsOption?: string;
 }
 
+export type AgentBackendKey = string;
+export type AgentBackendConfigs = Record<AgentBackendKey, AgentCommandConfig>;
+
 export interface AppPreferences {
   /** Reply rendering mode for IM (group/p2p) messages. Default 'card'. */
   messageReply?: MessageReplyMode;
@@ -145,6 +148,10 @@ export interface AppPreferences {
   access?: AppAccess;
   /** Coding-agent command configuration. Default backend/command: `claude`. */
   agentCommand?: AgentCommandConfig;
+  /** Default backend key used when a chat/topic has not selected one. */
+  defaultBackend?: string;
+  /** Named backend configurations for multi-backend mode. */
+  agentBackends?: AgentBackendConfigs;
   /**
    * Cursor backend runtime when `agentCommand.backend` is `cursor`:
    *   - `sdk`: reuse persistent `@cursor/sdk` local agents (LRU pool)
@@ -317,10 +324,9 @@ export function getAgentSessionPoolSize(cfg: AppConfig): number {
   return backend === 'cursor' && runtime === 'sdk' ? 10 : 0;
 }
 
-export function getAgentCommand(
-  cfg: AppConfig,
+export function normalizeAgentCommand(
+  raw: AgentCommandConfig | undefined,
 ): { backend: AgentBackend; command: string; args: string[]; claudeArgsOption?: string; codexArgsOption?: string } {
-  const raw = cfg.preferences?.agentCommand;
   const backend: AgentBackend = raw?.backend === 'cursor'
     ? 'cursor'
     : raw?.backend === 'codex'
@@ -349,6 +355,34 @@ export function getAgentCommand(
     ...(claudeArgsOption ? { claudeArgsOption } : {}),
     ...(codexArgsOption ? { codexArgsOption } : {}),
   };
+}
+
+export function getAgentBackendConfigs(
+  cfg: AppConfig,
+): Record<string, ReturnType<typeof normalizeAgentCommand>> {
+  const raw = cfg.preferences?.agentBackends;
+  if (raw && typeof raw === 'object' && Object.keys(raw).length > 0) {
+    return Object.fromEntries(
+      Object.entries(raw)
+        .filter(([key]) => key.trim().length > 0)
+        .map(([key, command]) => [key, normalizeAgentCommand(command)]),
+    );
+  }
+  const single = normalizeAgentCommand(cfg.preferences?.agentCommand);
+  return { [single.backend]: single };
+}
+
+export function getDefaultAgentBackendKey(cfg: AppConfig): string {
+  const configs = getAgentBackendConfigs(cfg);
+  const preferred = cfg.preferences?.defaultBackend?.trim();
+  if (preferred && configs[preferred]) return preferred;
+  return Object.keys(configs)[0] ?? 'claude';
+}
+
+export function getAgentCommand(
+  cfg: AppConfig,
+): { backend: AgentBackend; command: string; args: string[]; claudeArgsOption?: string; codexArgsOption?: string } {
+  return normalizeAgentCommand(cfg.preferences?.agentCommand);
 }
 
 /**

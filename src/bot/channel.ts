@@ -5,7 +5,9 @@ import type {
   NormalizedMessage,
 } from '@larksuiteoapi/node-sdk';
 import { Domain, LoggerLevel, createLarkChannel } from '@larksuiteoapi/node-sdk';
+import type { AgentRegistry } from '../agent/registry';
 import type { AgentAdapter } from '../agent/types';
+import type { BackendStore } from '../backend/store';
 import { handleCardAction } from '../card/dispatcher';
 import { renderCard } from '../card/run-renderer';
 import {
@@ -54,6 +56,7 @@ const QUOTE_FETCH_TIMEOUT_MS = 10_000;
 const SESSION_PRECREATE_TIMEOUT_MS = 20_000;
 const STREAM_UPDATE_TIMEOUT_MS = 15_000;
 const MARKDOWN_REFRESH_CUTOFF_MS = 10 * 60_000;
+const MARKDOWN_REFRESH_AFTER_CUTOFF_MS = 30_000;
 const MARKDOWN_REFRESH_CUTOFF_NOTE =
   '_已运行超过 10 分钟，飞书卡片将停止自动刷新；Agent 会继续在后台工作，完成后会更新最终结果。_';
 const FINAL_FLUSH_TIMEOUT_MS = 20_000;
@@ -126,14 +129,32 @@ export interface BridgeChannel {
 
 export interface StartChannelDeps {
   cfg: AppConfig;
-  agent: AgentAdapter;
+  agent?: AgentAdapter;
+  agentRegistry?: AgentRegistry;
+  backendStore?: BackendStore;
   sessions: SessionStore;
   workspaces: WorkspaceStore;
   controls: Controls;
 }
 
+async function resolveAgentForScope(
+  scope: string,
+  deps: { agent?: AgentAdapter; agentRegistry?: AgentRegistry; backendStore?: BackendStore },
+): Promise<{ agent: AgentAdapter; backendKey: string }> {
+  if (!deps.agentRegistry) {
+    if (!deps.agent) throw new Error('no agent configured');
+    return { agent: deps.agent, backendKey: deps.agent.id };
+  }
+  const requested = deps.backendStore?.get(scope);
+  const key = requested && deps.agentRegistry.has(requested) ? requested : deps.agentRegistry.defaultKey();
+  return { agent: await deps.agentRegistry.get(key), backendKey: key };
+}
+
 export async function startChannel(deps: StartChannelDeps): Promise<BridgeChannel> {
-  const { cfg, agent, sessions, workspaces, controls } = deps;
+  const { cfg, agent, agentRegistry, backendStore, sessions, workspaces, controls } = deps;
+  const startupAgent = agentRegistry ? await agentRegistry.getDefault() : agent;
+  if (!startupAgent) throw new Error('no agent configured');
+  const agentDeps = { agent, agentRegistry, backendStore };
   const activeRuns = new ActiveRuns();
   // ChatModeCache stays per-bridge-instance — invalidated on restart along
   // with everything else. Topic-mode chats only need one chat.get() call ever.
@@ -207,9 +228,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       const release = await pool.acquire();
       try {
         const mode = await chatModeCache.resolve(channel, firstMsg.chatId);
+        const resolved = await resolveAgentForScope(scope, agentDeps);
         await runAgentBatch({
           channel,
-          agent,
+          agent: resolved.agent,
           sessions,
           workspaces,
           activeRuns,
@@ -240,7 +262,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, () =>
         intakeMessage({
           channel,
-          agent,
+          agent: startupAgent,
+          agentRegistry,
+          backendStore,
           sessions,
           workspaces,
           activeRuns,
@@ -263,7 +287,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           sessions,
           workspaces,
           activeRuns,
-          agent,
+          agent: startupAgent,
+          agentRegistry,
+          backendStore,
           controls,
           pending,
           runHistory,
@@ -273,7 +299,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     },
     comment: async (evt) => {
       await withTrace({ chatId: 'comment' }, async () => {
-        await handleCommentMention({ channel, evt, agent, sessions, workspaces }).catch((err) =>
+        await handleCommentMention({ channel, evt, agent: startupAgent, sessions, workspaces }).catch((err) =>
           log.fail('comment', err),
         );
       }).catch((err) => log.fail('comment', err));
@@ -318,7 +344,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   log.info('ws', 'connected', {
     bot: identity?.name ?? 'unknown',
     openId: identity?.openId ?? '-',
-    agent: `${agent.displayName} (${agent.id})`,
+    agent: `${startupAgent.displayName} (${startupAgent.id})`,
     appId: cfg.accounts.app.id,
     procId: controls.processId,
   });
@@ -352,6 +378,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
 interface IntakeDeps {
   channel: LarkChannel;
   agent: AgentAdapter;
+  agentRegistry?: AgentRegistry;
+  backendStore?: BackendStore;
   sessions: SessionStore;
   workspaces: WorkspaceStore;
   activeRuns: ActiveRuns;
@@ -366,6 +394,8 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const {
     channel,
     agent,
+    agentRegistry,
+    backendStore,
     sessions,
     workspaces,
     activeRuns,
@@ -429,6 +459,8 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
+  const resolved = await resolveAgentForScope(scope, { agent, agentRegistry, backendStore });
+
   if (isStopCommandText(msg.content)) {
     const result = interruptScopeNow(activeRuns, pending, scope);
     log.info('intake', 'immediate-stop', {
@@ -446,7 +478,10 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     chatMode,
     sessions,
     workspaces,
-    agent,
+    agent: resolved.agent,
+    agentRegistry,
+    backendStore,
+    backendKey: resolved.backendKey,
     activeRuns,
     pending,
     runHistory,
@@ -731,13 +766,25 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     } else if (replyMode === 'markdown') {
       log.info('run', 'timeline', { runId: historyEntry.runId, step: 'card-stream-start', mode: 'markdown' });
       let cutoff: MarkdownRefreshCutoff | undefined;
+      let streamMessageIdForRefresh: string | undefined;
       let result: { messageId: string };
       try {
         result = await channel.stream(
           chatId,
           {
             markdown: async (ctrl) => {
-              cutoff = createMarkdownRefreshCutoff((markdown) => ctrl.setContent(markdown));
+              streamMessageIdForRefresh = ctrl.messageId;
+              cutoff = createMarkdownRefreshCutoff((markdown) => ctrl.setContent(markdown), Date.now, {
+                updateLatest: (markdown) => {
+                  const refreshMessageId = streamMessageIdForRefresh;
+                  if (!refreshMessageId) return Promise.resolve();
+                  const raw = channel.updateCard(refreshMessageId, markdownFinalCard(markdown, finalState));
+                  return {
+                    operation: withTimeout('markdown.periodic-card-update', FINAL_FLUSH_TIMEOUT_MS, raw),
+                    raw,
+                  };
+                },
+              });
               await withTimeout(
                 'markdown.initial-flush',
                 STREAM_UPDATE_TIMEOUT_MS,
@@ -771,6 +818,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         cutoff?.dispose();
       }
       streamMessageId = result.messageId;
+      streamMessageIdForRefresh = streamMessageId;
       runHistory.update(historyEntry.runId, { streamMessageId });
       log.info('run', 'timeline', {
         runId: historyEntry.runId,
@@ -879,9 +927,17 @@ export interface MarkdownRefreshCutoff {
   dispose(): void;
 }
 
+type MarkdownLatestUpdate = Promise<void> | { operation: Promise<void>; raw: Promise<void> };
+
+interface MarkdownRefreshCutoffOptions {
+  periodicMs?: number;
+  updateLatest?: (markdown: string) => MarkdownLatestUpdate;
+}
+
 export function createMarkdownRefreshCutoff(
   setContent: (markdown: string) => Promise<void>,
   now: () => number = Date.now,
+  opts: MarkdownRefreshCutoffOptions = {},
 ): MarkdownRefreshCutoff {
   let disposed = false;
   let finalizing = false;
@@ -890,11 +946,18 @@ export function createMarkdownRefreshCutoff(
   let latestMarkdown = '';
   let tail: Promise<void> = Promise.resolve();
   let cutoffUpdate: Promise<void> | undefined;
+  let periodicTimer: NodeJS.Timeout | undefined;
+  let periodicTail: Promise<void> = Promise.resolve();
+  const periodicUpdates = new Set<Promise<unknown>>();
+  let latestPeriodicMarkdown = '';
+  const periodicMs = opts.periodicMs ?? MARKDOWN_REFRESH_AFTER_CUTOFF_MS;
   const startedAt = now();
   const timer = setTimeout(() => {
     if (disposed || finalizing || cutoffNoticeSent) return;
     cutoffReached = true;
-    void Promise.resolve().then(() => sendCutoffNotice());
+    void Promise.resolve()
+      .then(() => sendCutoffNotice())
+      .then(() => schedulePeriodicUpdate());
   }, MARKDOWN_REFRESH_CUTOFF_MS);
 
   const isAtOrAfterCutoff = (): boolean => cutoffReached || now() - startedAt >= MARKDOWN_REFRESH_CUTOFF_MS;
@@ -907,6 +970,38 @@ export function createMarkdownRefreshCutoff(
     log.warn('markdown', 'refresh-cutoff-update-failed', {
       message: err instanceof Error ? err.message : String(err),
     });
+  };
+
+  const clearPeriodicTimer = (): void => {
+    if (periodicTimer) clearTimeout(periodicTimer);
+    periodicTimer = undefined;
+  };
+
+  const schedulePeriodicUpdate = (): void => {
+    if (!opts.updateLatest || periodicMs <= 0 || disposed || finalizing || periodicTimer) return;
+    periodicTimer = setTimeout(() => {
+      periodicTimer = undefined;
+      if (disposed || finalizing) return;
+      const markdown = latestPeriodicMarkdown;
+      const update = periodicTail
+        .then(async () => {
+          const result = opts.updateLatest?.(markdown);
+          if (!result || result instanceof Promise) {
+            await result;
+            return;
+          }
+          const raw = result.raw.catch((err: unknown) => warnAndContinue(err));
+          periodicUpdates.add(raw);
+          void raw.finally(() => {
+            periodicUpdates.delete(raw);
+          });
+          await result.operation;
+        })
+        .catch((err) => warnAndContinue(err));
+      periodicTail = update.then(() => {
+        schedulePeriodicUpdate();
+      });
+    }, periodicMs);
   };
 
   const enqueue = (operation: () => Promise<void>): Promise<void> => {
@@ -935,8 +1030,10 @@ export function createMarkdownRefreshCutoff(
   return {
     async flush(markdown: string, opts?: { final?: boolean }): Promise<void> {
       latestMarkdown = markdown;
+      latestPeriodicMarkdown = markdown;
       if (opts?.final) {
         clearCutoffTimer();
+        clearPeriodicTimer();
         finalizing = true;
         await setContent(markdown);
         disposed = true;
@@ -949,13 +1046,17 @@ export function createMarkdownRefreshCutoff(
       cutoffReached = true;
       clearCutoffTimer();
       await sendCutoffNotice(markdown);
+      schedulePeriodicUpdate();
     },
     pendingCutoffUpdate(): Promise<void> | undefined {
-      return cutoffUpdate;
+      const pending = [cutoffUpdate, ...periodicUpdates].filter((update): update is Promise<unknown> => Boolean(update));
+      if (pending.length === 0) return undefined;
+      return Promise.allSettled(pending).then(() => undefined);
     },
     dispose(): void {
       disposed = true;
       clearCutoffTimer();
+      clearPeriodicTimer();
     },
   };
 }

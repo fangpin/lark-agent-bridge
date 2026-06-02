@@ -3,7 +3,9 @@ import { stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
+import type { AgentRegistry } from '../agent/registry';
 import type { AgentAdapter } from '../agent/types';
+import type { BackendStore } from '../backend/store';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { PendingQueue } from '../bot/pending-queue';
 import type { RunHistory } from '../bot/run-history';
@@ -45,7 +47,7 @@ import { isAlive, readAndPrune, resolveTarget, sameAppOthers } from '../runtime/
 import type { SessionStore } from '../session/store';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import type { WorkspaceStore } from '../workspace/store';
-import { createBoundChat, defaultChatName } from '../bot/group';
+import { backendChatName, backendLabel, createBoundChat, renameChatForBackend } from '../bot/group';
 
 export interface Controls {
   /** Restart the bridge in-process: disconnect WS, kill claude runs, reload
@@ -80,6 +82,9 @@ export interface CommandContext {
   sessions: SessionStore;
   workspaces: WorkspaceStore;
   agent: AgentAdapter;
+  agentRegistry?: AgentRegistry;
+  backendStore?: BackendStore;
+  backendKey: string;
   activeRuns: ActiveRuns;
   pending?: PendingQueue;
   runHistory?: RunHistory;
@@ -106,6 +111,7 @@ const handlers: Record<string, Handler> = {
   '/resume': handleResume,
   '/status': handleStatus,
   '/runs': handleRuns,
+  '/backend': handleBackend,
   '/help': handleHelp,
   '/account': handleAccount,
   '/config': handleConfig,
@@ -132,6 +138,7 @@ const ADMIN_COMMANDS = new Set([
   '/exit',
   '/reconnect',
   '/doctor',
+  '/backend',
   '/workers',
   '/shell',
   '/cd',
@@ -305,7 +312,7 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
 
 async function handleNewChat(rawName: string, ctx: CommandContext): Promise<void> {
   const sourceCwd = ctx.workspaces.cwdFor(ctx.scope);
-  const name = rawName || defaultChatName();
+  const name = rawName || backendChatName(ctx.backendKey);
 
   let created;
   try {
@@ -503,6 +510,45 @@ async function handleRuns(args: string, ctx: CommandContext): Promise<void> {
 
   const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
   await replyCard(ctx, runsCard({ cwd, entries: ctx.runHistory.list(ctx.scope, 10) }));
+}
+
+async function handleBackend(args: string, ctx: CommandContext): Promise<void> {
+  if (!ctx.agentRegistry || !ctx.backendStore) {
+    await reply(ctx, '当前运行环境不支持多 backend。');
+    return;
+  }
+  const requested = args.trim();
+  if (!requested) {
+    await reply(ctx, [
+      `当前 backend：\`${ctx.backendKey}\` (${ctx.agent.displayName})`,
+      `默认 backend：\`${ctx.agentRegistry.defaultKey()}\``,
+      `可用 backend：${ctx.agentRegistry.keys().map((key) => `\`${key}\``).join(', ')}`,
+      '用法：`/backend <key>` 或 `/backend default`',
+    ].join('\n'));
+    return;
+  }
+  const nextKey = requested === 'default' ? ctx.agentRegistry.defaultKey() : requested;
+  if (!ctx.agentRegistry.has(nextKey)) {
+    await reply(ctx, `未知 backend：\`${requested}\`\n可用 backend：${ctx.agentRegistry.keys().map((key) => `\`${key}\``).join(', ')}`);
+    return;
+  }
+
+  const nextAgent = await ctx.agentRegistry.get(nextKey);
+  ctx.activeRuns.interrupt(ctx.scope);
+  await ctx.agent.evictScope?.(ctx.scope, ctx.workspaces.cwdFor(ctx.scope) ?? undefined);
+  if (requested === 'default') ctx.backendStore.clear(ctx.scope);
+  else ctx.backendStore.set(ctx.scope, nextKey);
+
+  let renameStatus = '';
+  if (ctx.chatMode === 'group') {
+    try {
+      await renameChatForBackend(ctx.channel, ctx.msg.chatId, 'Chat', nextKey);
+      renameStatus = `\n群名已更新为 ${backendLabel(nextKey)} 前缀。`;
+    } catch {
+      renameStatus = '\nbackend 已切换；群名更新失败，请确认 bot 具备 chat 更新权限。';
+    }
+  }
+  await reply(ctx, `已切换 backend 到 \`${nextKey}\`（${nextAgent.displayName}）。\n已有 session 会继续保留；如需新会话请使用 /reset。${renameStatus}`);
 }
 
 async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {

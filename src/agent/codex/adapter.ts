@@ -14,6 +14,7 @@ export interface CodexAdapterOptions {
   args?: string[];
   codexArgsOption?: string;
   defaultModel?: string;
+  backendKey?: string;
   availabilityTimeoutMs?: number;
   availabilityStopGraceMs?: number;
 }

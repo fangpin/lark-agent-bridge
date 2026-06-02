@@ -1,5 +1,7 @@
 import type { CardActionEvent, LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
+import type { AgentRegistry } from '../agent/registry';
 import type { AgentAdapter } from '../agent/types';
+import type { BackendStore } from '../backend/store';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { ChatModeCache } from '../bot/chat-mode-cache';
 import type { PendingQueue } from '../bot/pending-queue';
@@ -25,6 +27,8 @@ export interface CardDispatchDeps {
   workspaces: WorkspaceStore;
   activeRuns: ActiveRuns;
   agent: AgentAdapter;
+  agentRegistry?: AgentRegistry;
+  backendStore?: BackendStore;
   controls: Controls;
   pending: PendingQueue;
   runHistory: RunHistory;
@@ -86,6 +90,9 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   if (!cmd) return;
   log.info('cardAction', 'cmd', { cmd, scope });
 
+  const backendKey = deps.backendStore?.get(scope) ?? deps.agentRegistry?.defaultKey() ?? deps.agent.id;
+  const agent = deps.agentRegistry ? await deps.agentRegistry.getOrDefault(backendKey) : deps.agent;
+
   const ctx: CommandContext = {
     channel: deps.channel,
     msg: makeFakeMsg(deps.evt, threadId),
@@ -94,7 +101,10 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     sessions: deps.sessions,
     workspaces: deps.workspaces,
     activeRuns: deps.activeRuns,
-    agent: deps.agent,
+    agent,
+    agentRegistry: deps.agentRegistry,
+    backendStore: deps.backendStore,
+    backendKey,
     controls: deps.controls,
     pending: deps.pending,
     runHistory: deps.runHistory,

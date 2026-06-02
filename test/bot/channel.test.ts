@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { createLarkChannel } from '@larksuiteoapi/node-sdk';
+import { AgentRegistry } from '../../src/agent/registry';
 import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../../src/agent/types';
 import type { RunHandle } from '../../src/bot/active-runs';
 import { ActiveRuns } from '../../src/bot/active-runs';
@@ -77,6 +78,30 @@ describe('summarizeBatchForHistory', () => {
 });
 
 describe('channel streamMessageId persistence', () => {
+  test('runs messages with the backend selected for the scope', async () => {
+    const calls: string[] = [];
+    const claude = fakeNamedAgent('claude', calls);
+    const codex = fakeNamedAgent('codex', calls);
+    const registry = new AgentRegistry(['claude', 'codex'], 'claude', async (key) => key === 'codex' ? codex : claude);
+    const backendStore = { get: () => 'codex', async flush() {} };
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agentRegistry: registry,
+      backendStore: backendStore as never,
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces(process.cwd()),
+      controls: fakeControls(textReplyConfig()),
+    });
+
+    await messages.message?.(fakeMessage('hello'));
+
+    await vi.waitFor(() => expect(calls).toEqual(['codex']));
+  });
+
   test('text replies persist sent message ids in run history', async () => {
     let persistedStreamMessageId: string | undefined;
     const originalUpdate = RunHistory.prototype.update;
@@ -210,6 +235,343 @@ describe('channel streamMessageId persistence', () => {
     });
   });
 
+  test('starts periodic markdown refresh when cutoff timer fires without another flush', async () => {
+    vi.useFakeTimers();
+    let now = 0;
+    const setContent = vi.fn(async (_markdown: string) => {});
+    const updateLatest = vi.fn(async (_markdown: string) => {});
+    const cutoff = createMarkdownRefreshCutoff(setContent, () => now, {
+      periodicMs: 30_000,
+      updateLatest,
+    });
+
+    await cutoff.flush('before cutoff');
+    now += 600_000;
+    await vi.advanceTimersByTimeAsync(600_000);
+
+    now += 30_000;
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(updateLatest).toHaveBeenCalledOnce();
+    expect(updateLatest).toHaveBeenCalledWith('before cutoff');
+    cutoff.dispose();
+  });
+
+  test('markdown reply mode periodically updateCards latest content after the cutoff before final completion', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+      let releaseStream!: () => void;
+      const streamReleased = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      let resolveStreamStarted!: () => void;
+      const streamStarted = new Promise<void>((resolve) => {
+        resolveStreamStarted = resolve;
+      });
+      let resolveStreamFinished!: () => void;
+      const streamFinished = new Promise<void>((resolve) => {
+        resolveStreamFinished = resolve;
+      });
+      const updateCard = vi.fn(async (_messageId: string, _card: unknown) => {});
+      const fakeChannel = {
+        ...createFakeChannel(messages),
+        async stream(_chatId: string, payload: { markdown?: (ctrl: { messageId: string; setContent(markdown: string): Promise<void> }) => Promise<void> }) {
+          if (!payload.markdown) throw new Error('markdown stream producer was not registered');
+          resolveStreamStarted();
+          await payload.markdown({
+            messageId: 'om_markdown_stream',
+            async setContent() {},
+          });
+          resolveStreamFinished();
+          return { messageId: 'om_markdown_stream' };
+        },
+        updateCard,
+      } as unknown as LarkChannel;
+      const cfg = markdownReplyConfig();
+      vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+      await startChannel({
+        cfg,
+        agent: fakeAgentWithEvents(async function* (): AsyncGenerator<AgentEvent> {
+          yield { type: 'text', delta: 'first' };
+          yield { type: 'text', delta: ' second' };
+          await streamReleased;
+          yield { type: 'done' };
+        }),
+        sessions: fakeSessions(),
+        workspaces: fakeWorkspaces('/tmp/project'),
+        controls: fakeControls(cfg),
+      });
+
+      const onMessage = messages.message;
+      if (!onMessage) throw new Error('message handler was not registered');
+      await onMessage(fakeMessage('om_original', 'original prompt'));
+      await streamStarted;
+      await vi.waitFor(() => expect(updateCard).not.toHaveBeenCalled());
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      await vi.waitFor(() => expect(updateCard).toHaveBeenCalled());
+      expect(updateCard.mock.calls[0]?.[0]).toBe('om_markdown_stream');
+      expect(JSON.stringify(updateCard.mock.calls[0]?.[1])).toContain('first second');
+      releaseStream();
+      await streamFinished;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('re-applies the final markdown card after a delayed periodic refresh settles', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+      const appliedCards: unknown[] = [];
+      let releaseStream!: () => void;
+      const streamReleased = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      let resolvePeriodicStarted!: () => void;
+      const periodicStarted = new Promise<void>((resolve) => {
+        resolvePeriodicStarted = resolve;
+      });
+      let releasePeriodic!: () => void;
+      const periodicReleased = new Promise<void>((resolve) => {
+        releasePeriodic = resolve;
+      });
+      const fakeChannel = {
+        ...createFakeChannel(messages),
+        async stream(_chatId: string, payload: { markdown?: (ctrl: { messageId: string; setContent(markdown: string): Promise<void> }) => Promise<void> }) {
+          if (!payload.markdown) throw new Error('markdown stream producer was not registered');
+          await payload.markdown({
+            messageId: 'om_markdown_stream',
+            async setContent() {},
+          });
+          return { messageId: 'om_markdown_stream' };
+        },
+        async updateCard(_messageId: string, card: unknown) {
+          const summary = (card as { config?: { summary?: { content?: string } } }).config?.summary?.content;
+          if (summary === '运行中') {
+            resolvePeriodicStarted();
+            await periodicReleased;
+          }
+          appliedCards.push(card);
+        },
+      } as unknown as LarkChannel;
+      const cfg = markdownReplyConfig();
+      vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+      await startChannel({
+        cfg,
+        agent: fakeAgentWithEvents(async function* (): AsyncGenerator<AgentEvent> {
+          yield { type: 'text', delta: 'first' };
+          yield { type: 'text', delta: ' second' };
+          await streamReleased;
+          yield { type: 'done' };
+        }),
+        sessions: fakeSessions(),
+        workspaces: fakeWorkspaces('/tmp/project'),
+        controls: fakeControls(cfg),
+      });
+
+      const onMessage = messages.message;
+      if (!onMessage) throw new Error('message handler was not registered');
+      await onMessage(fakeMessage('om_original', 'original prompt'));
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await periodicStarted;
+
+      releaseStream();
+      await vi.waitFor(() =>
+        expect(appliedCards).toContainEqual(
+          expect.objectContaining({ config: expect.objectContaining({ summary: { content: '已完成' } }) }),
+        ),
+      );
+
+      releasePeriodic();
+
+      await vi.waitFor(() => expect(appliedCards).toHaveLength(3));
+      expect(appliedCards.at(-1)).toMatchObject({ config: { streaming_mode: false, summary: { content: '已完成' } } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('re-applies the final markdown card after a timed-out periodic refresh resolves late', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+      const visibleUpdates: Array<{ kind: 'card'; summary: string | undefined }> = [];
+      let releaseStream!: () => void;
+      const streamReleased = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      let resolvePeriodicStarted!: () => void;
+      const periodicStarted = new Promise<void>((resolve) => {
+        resolvePeriodicStarted = resolve;
+      });
+      let releasePeriodic!: () => void;
+      const periodicReleased = new Promise<void>((resolve) => {
+        releasePeriodic = resolve;
+      });
+      const fakeChannel = {
+        ...createFakeChannel(messages),
+        async stream(_chatId: string, payload: { markdown?: (ctrl: { messageId: string; setContent(markdown: string): Promise<void> }) => Promise<void> }) {
+          if (!payload.markdown) throw new Error('markdown stream producer was not registered');
+          await payload.markdown({
+            messageId: 'om_markdown_stream',
+            async setContent() {},
+          });
+          return { messageId: 'om_markdown_stream' };
+        },
+        async updateCard(_messageId: string, card: unknown) {
+          const summary = (card as { config?: { summary?: { content?: string } } }).config?.summary?.content;
+          if (summary === '运行中') {
+            resolvePeriodicStarted();
+            await periodicReleased;
+          }
+          visibleUpdates.push({ kind: 'card', summary });
+        },
+      } as unknown as LarkChannel;
+      const cfg = markdownReplyConfig();
+      vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+      await startChannel({
+        cfg,
+        agent: fakeAgentWithEvents(async function* (): AsyncGenerator<AgentEvent> {
+          yield { type: 'text', delta: 'first' };
+          yield { type: 'text', delta: ' second' };
+          await streamReleased;
+          yield { type: 'done' };
+        }),
+        sessions: fakeSessions(),
+        workspaces: fakeWorkspaces('/tmp/project'),
+        controls: fakeControls(cfg),
+      });
+
+      const onMessage = messages.message;
+      if (!onMessage) throw new Error('message handler was not registered');
+      await onMessage(fakeMessage('om_original', 'original prompt'));
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await periodicStarted;
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      releaseStream();
+      await vi.waitFor(() => expect(visibleUpdates).toContainEqual({ kind: 'card', summary: '已完成' }));
+
+      releasePeriodic();
+      await vi.waitFor(() => expect(visibleUpdates.length).toBeGreaterThanOrEqual(3));
+
+      expect(visibleUpdates.at(-1)).toEqual({ kind: 'card', summary: '已完成' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('waits for all timed-out periodic markdown refreshes before re-applying the final card', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+      const visibleUpdates: Array<{ kind: 'card'; summary: string | undefined; refresh?: number }> = [];
+      let releaseStream!: () => void;
+      const streamReleased = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      let resolveFirstPeriodicStarted!: () => void;
+      const firstPeriodicStarted = new Promise<void>((resolve) => {
+        resolveFirstPeriodicStarted = resolve;
+      });
+      let resolveSecondPeriodicStarted!: () => void;
+      const secondPeriodicStarted = new Promise<void>((resolve) => {
+        resolveSecondPeriodicStarted = resolve;
+      });
+      let releaseFirstPeriodic!: () => void;
+      const firstPeriodicReleased = new Promise<void>((resolve) => {
+        releaseFirstPeriodic = resolve;
+      });
+      let releaseSecondPeriodic!: () => void;
+      const secondPeriodicReleased = new Promise<void>((resolve) => {
+        releaseSecondPeriodic = resolve;
+      });
+      let periodicRefreshes = 0;
+      const fakeChannel = {
+        ...createFakeChannel(messages),
+        async stream(_chatId: string, payload: { markdown?: (ctrl: { messageId: string; setContent(markdown: string): Promise<void> }) => Promise<void> }) {
+          if (!payload.markdown) throw new Error('markdown stream producer was not registered');
+          await payload.markdown({
+            messageId: 'om_markdown_stream',
+            async setContent() {},
+          });
+          return { messageId: 'om_markdown_stream' };
+        },
+        async updateCard(_messageId: string, card: unknown) {
+          const summary = (card as { config?: { summary?: { content?: string } } }).config?.summary?.content;
+          if (summary === '运行中') {
+            periodicRefreshes += 1;
+            const refresh = periodicRefreshes;
+            if (refresh === 1) {
+              resolveFirstPeriodicStarted();
+              await firstPeriodicReleased;
+            } else if (refresh === 2) {
+              resolveSecondPeriodicStarted();
+              await secondPeriodicReleased;
+            }
+            visibleUpdates.push({ kind: 'card', summary, refresh });
+            return;
+          }
+          visibleUpdates.push({ kind: 'card', summary });
+        },
+      } as unknown as LarkChannel;
+      const cfg = markdownReplyConfig();
+      vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+      await startChannel({
+        cfg,
+        agent: fakeAgentWithEvents(async function* (): AsyncGenerator<AgentEvent> {
+          yield { type: 'text', delta: 'first' };
+          yield { type: 'text', delta: ' second' };
+          await streamReleased;
+          yield { type: 'done' };
+        }),
+        sessions: fakeSessions(),
+        workspaces: fakeWorkspaces('/tmp/project'),
+        controls: fakeControls(cfg),
+      });
+
+      const onMessage = messages.message;
+      if (!onMessage) throw new Error('message handler was not registered');
+      await onMessage(fakeMessage('om_original', 'original prompt'));
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await firstPeriodicStarted;
+      await vi.advanceTimersByTimeAsync(20_000);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await secondPeriodicStarted;
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      releaseStream();
+      await vi.waitFor(() => expect(visibleUpdates).toContainEqual({ kind: 'card', summary: '已完成' }));
+
+      releaseSecondPeriodic();
+      await vi.waitFor(() => expect(visibleUpdates).toContainEqual({ kind: 'card', summary: '运行中', refresh: 2 }));
+
+      releaseFirstPeriodic();
+      await vi.waitFor(() => expect(visibleUpdates).toContainEqual({ kind: 'card', summary: '运行中', refresh: 1 }));
+      await vi.waitFor(() => expect(visibleUpdates.at(-1)).toEqual({ kind: 'card', summary: '已完成' }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test('re-applies the final markdown card after a delayed cutoff notice settles', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
@@ -270,6 +632,102 @@ describe('channel streamMessageId persistence', () => {
     expect(markdownUpdates.some((markdown) => markdown.includes('飞书卡片将停止自动刷新'))).toBe(true);
     expect(finalCards[0]).toMatchObject({ config: { streaming_mode: false, summary: { content: '已完成' } } });
     expect(finalCards[1]).toMatchObject({ config: { streaming_mode: false, summary: { content: '已完成' } } });
+  });
+
+  test('re-applies the final markdown card after delayed cutoff notice and periodic refresh settle', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+      const visibleUpdates: Array<{ kind: 'markdown'; content: string } | { kind: 'card'; summary: string | undefined }> = [];
+      const appliedCards: unknown[] = [];
+      let releaseStream!: () => void;
+      const streamReleased = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      let resolveCutoffNoticeStarted!: () => void;
+      const cutoffNoticeStarted = new Promise<void>((resolve) => {
+        resolveCutoffNoticeStarted = resolve;
+      });
+      let releaseCutoffNotice!: () => void;
+      const cutoffNoticeReleased = new Promise<void>((resolve) => {
+        releaseCutoffNotice = resolve;
+      });
+      let resolvePeriodicStarted!: () => void;
+      const periodicStarted = new Promise<void>((resolve) => {
+        resolvePeriodicStarted = resolve;
+      });
+      let releasePeriodic!: () => void;
+      const periodicReleased = new Promise<void>((resolve) => {
+        releasePeriodic = resolve;
+      });
+      const fakeChannel = {
+        ...createFakeChannel(messages),
+        async stream(_chatId: string, payload: { markdown?: (ctrl: { messageId: string; setContent(markdown: string): Promise<void> }) => Promise<void> }) {
+          if (!payload.markdown) throw new Error('markdown stream producer was not registered');
+          await payload.markdown({
+            messageId: 'om_markdown_stream',
+            async setContent(markdown: string) {
+              if (markdown.includes('飞书卡片将停止自动刷新')) {
+                resolveCutoffNoticeStarted();
+                await cutoffNoticeReleased;
+              }
+              visibleUpdates.push({ kind: 'markdown', content: markdown });
+            },
+          });
+          return { messageId: 'om_markdown_stream' };
+        },
+        async updateCard(_messageId: string, card: unknown) {
+          const summary = (card as { config?: { summary?: { content?: string } } }).config?.summary?.content;
+          if (summary === '运行中') {
+            resolvePeriodicStarted();
+            await periodicReleased;
+          }
+          visibleUpdates.push({ kind: 'card', summary });
+          appliedCards.push(card);
+        },
+      } as unknown as LarkChannel;
+      const cfg = markdownReplyConfig();
+      vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+      await startChannel({
+        cfg,
+        agent: fakeAgentWithEvents(async function* (): AsyncGenerator<AgentEvent> {
+          yield { type: 'text', delta: 'first' };
+          yield { type: 'text', delta: ' second' };
+          await streamReleased;
+          yield { type: 'done' };
+        }),
+        sessions: fakeSessions(),
+        workspaces: fakeWorkspaces('/tmp/project'),
+        controls: fakeControls(cfg),
+      });
+
+      const onMessage = messages.message;
+      if (!onMessage) throw new Error('message handler was not registered');
+      await onMessage(fakeMessage('om_original', 'original prompt'));
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await cutoffNoticeStarted;
+      await vi.advanceTimersByTimeAsync(30_000);
+      await periodicStarted;
+
+      releaseStream();
+      await vi.waitFor(() =>
+        expect(appliedCards).toContainEqual(
+          expect.objectContaining({ config: expect.objectContaining({ summary: { content: '已完成' } }) }),
+        ),
+      );
+
+      releasePeriodic();
+      releaseCutoffNotice();
+
+      await vi.waitFor(() => expect(appliedCards).toHaveLength(3));
+      expect(visibleUpdates.at(-1)).toEqual({ kind: 'card', summary: '已完成' });
+      expect(appliedCards.at(-1)).toMatchObject({ config: { streaming_mode: false, summary: { content: '已完成' } } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test('card reply mode does not use the markdown refresh cutoff note', async () => {
@@ -650,6 +1108,84 @@ describe('processAgentStream', () => {
     expect(writes).toEqual(['running', 'final']);
   });
 
+  test('markdown cutoff periodically refreshes latest content after the 10 minute cutoff', async () => {
+    vi.useFakeTimers();
+    try {
+      let now = 0;
+      const setContentCalls: string[] = [];
+      const updateCalls: string[] = [];
+      const cutoff = createMarkdownRefreshCutoff(
+        async (markdown) => {
+          setContentCalls.push(markdown);
+        },
+        () => now,
+        {
+          periodicMs: 30_000,
+          updateLatest: async (markdown) => {
+            updateCalls.push(markdown);
+          },
+        },
+      );
+
+      await cutoff.flush('initial');
+      now = 10 * 60_000;
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await cutoff.flush('after cutoff 1');
+
+      expect(setContentCalls.at(-1)).toContain('已运行超过 10 分钟');
+      expect(updateCalls).toEqual([]);
+
+      await cutoff.flush('after cutoff 2');
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(updateCalls).toEqual(['after cutoff 2']);
+
+      await cutoff.flush('after cutoff 3');
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(updateCalls).toEqual(['after cutoff 2', 'after cutoff 3']);
+
+      await cutoff.flush('final', { final: true });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(updateCalls).toEqual(['after cutoff 2', 'after cutoff 3']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('markdown cutoff periodic refresh failures do not reject later flushes', async () => {
+    vi.useFakeTimers();
+    try {
+      let now = 0;
+      let attempts = 0;
+      const setContentCalls: string[] = [];
+      const cutoff = createMarkdownRefreshCutoff(
+        async (markdown) => {
+          setContentCalls.push(markdown);
+        },
+        () => now,
+        {
+          periodicMs: 30_000,
+          updateLatest: async () => {
+            attempts += 1;
+            if (attempts === 1) throw new Error('update failed');
+          },
+        },
+      );
+
+      now = 10 * 60_000;
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await cutoff.flush('after cutoff 1');
+      await vi.advanceTimersByTimeAsync(30_000);
+      await cutoff.flush('after cutoff 2');
+      await vi.advanceTimersByTimeAsync(30_000);
+      await cutoff.flush('final', { final: true });
+
+      expect(attempts).toBe(2);
+      expect(setContentCalls.at(-1)).toBe('final');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test('fails fast when the final flush hangs', async () => {
     vi.useFakeTimers();
     const run: AgentRun = {
@@ -819,6 +1355,25 @@ function createFakeChannel(handlers: Record<string, (msg: NormalizedMessage) => 
       },
     },
   } as unknown as LarkChannel;
+}
+
+function fakeNamedAgent(key: string, calls: string[]): AgentAdapter {
+  return {
+    ...fakeAgent(() => calls.push(key)),
+    id: key,
+    sessionKey: key,
+    displayName: key,
+    commandLabel: key,
+    descriptor: {
+      id: key,
+      label: key,
+      runtime: 'test',
+      sessionKey: key,
+      commandLabel: key,
+      supportsRetry: true,
+      supportsWorkers: false,
+    },
+  };
 }
 
 function fakeAgent(onRun: (opts: AgentRunOptions) => void): AgentAdapter {
