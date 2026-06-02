@@ -12,7 +12,8 @@ export interface CreatedChat {
   name: string;
 }
 
-const BACKEND_NAME_PREFIX_RE = /^(Claude|Codex|Cursor|[A-Za-z][A-Za-z0-9_-]*) ·\s*/;
+const KNOWN_BACKEND_LABELS = new Set(['Claude', 'Codex', 'Cursor']);
+const GENERIC_BACKEND_LABEL_RE = /^[A-Z][A-Za-z0-9_-]*$/;
 
 export function backendLabel(key: string): string {
   if (key === 'claude') return 'Claude';
@@ -23,11 +24,18 @@ export function backendLabel(key: string): string {
 
 export function backendChatName(key: string, date = new Date()): string {
   const pad = (n: number): string => `${n}`.padStart(2, '0');
-  return `${backendLabel(key)} · ${date.getMonth() + 1}-${date.getDate()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return `${date.getMonth() + 1}-${date.getDate()} ${pad(date.getHours())}:${pad(date.getMinutes())} · ${backendLabel(key)}`;
 }
 
 export function nameWithBackend(name: string, key: string): string {
-  return `${backendLabel(key)} · ${name.replace(BACKEND_NAME_PREFIX_RE, '').trim() || 'Chat'}`;
+  const parts = name.split(' · ').map((part) => part.trim()).filter(Boolean);
+  const isKnownLabel = (part: string): boolean => KNOWN_BACKEND_LABELS.has(part) || part === backendLabel(key);
+  if (parts.length > 1 && isKnownLabel(parts[0]!)) parts.shift();
+  if (parts.length > 1 && isKnownLabel(parts.at(-1)!)) parts.pop();
+  if (parts.length > 1 && GENERIC_BACKEND_LABEL_RE.test(parts[0]!)) parts.shift();
+  else if (parts.length > 1 && GENERIC_BACKEND_LABEL_RE.test(parts.at(-1)!)) parts.pop();
+  const baseName = parts.join(' · ').trim();
+  return `${baseName || 'Chat'} · ${backendLabel(key)}`;
 }
 
 export async function getChatName(channel: LarkChannel, chatId: string): Promise<string | undefined> {

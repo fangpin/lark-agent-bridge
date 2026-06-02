@@ -67,7 +67,7 @@ describe('/new worktree', () => {
 
     expect(worktree.createGitWorktree).toHaveBeenCalledWith('/home/me/repos/project_a', 'pin', 'abc');
     expect(commandCtx.channel.rawClient.im.v1.chat.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ name: 'Codex · abc' }),
+      data: expect.objectContaining({ name: 'abc · Codex' }),
       params: { user_id_type: 'open_id' },
     });
     expect(commandCtx.workspaces.setCwd).toHaveBeenCalledWith('chat-new', '/home/me/repos/project_a_pin_abc');
