@@ -98,6 +98,7 @@ Host CLI entries for `status`, `doctor`, `handover`, `workspace`, and `service` 
 | `/new`, `/reset` | Clear the current chat's session |
 | `/new chat [name]` | Create a new group chat, invite you, and bind it to a fresh session |
 | `/new worktree <name>` | Create a new git worktree from `origin/main` (or `origin/master` fallback), create a backend-labeled group chat, and bind that chat cwd to the worktree. |
+| `/clear [--force]` | In a worktree-bound group, clean the current worktree, clear bridge state/history, delete the branch, and dissolve the group. Without `--force`, dirty or unmerged worktrees are refused. |
 | `/resume [N]` | List and restore recent local agent sessions for the current cwd |
 | `/cd <path>` | Switch working directory (resets session) |
 | `/ws list` | List named workspaces (card + buttons) |

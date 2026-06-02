@@ -1,16 +1,27 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, test } from 'vitest';
-import { buildWorktreePlan, createGitWorktree, validateWorktreeName } from '../../src/git/worktree';
+import {
+  buildWorktreePlan,
+  createGitWorktree,
+  inspectWorktreeClearTarget,
+  removeGitWorktreeAndBranch,
+  validateWorktreeName,
+} from '../../src/git/worktree';
 
 const execFileAsync = promisify(execFile);
 const cleanupDirs: string[] = [];
 
 async function git(cwd: string, args: string[]): Promise<void> {
   await execFileAsync('git', args, { cwd });
+}
+
+async function gitOutput(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', args, { cwd });
+  return stdout.trim();
 }
 
 afterEach(async () => {
@@ -56,5 +67,84 @@ describe('git worktree helpers', () => {
     cleanupDirs.push(result.path);
 
     expect(result.path).toBe(join(root, 'project_a_pin_abc'));
+  });
+
+  test('inspects a secondary worktree clear target', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-agent-worktree-clear-'));
+    cleanupDirs.push(root);
+    const repo = join(root, 'project_a');
+    const wt = join(root, 'project_a_pin_abc');
+    await mkdir(repo, { recursive: true });
+    await git(repo, ['init']);
+    await git(repo, ['commit', '--allow-empty', '-m', 'initial']);
+    await git(repo, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+    await git(repo, ['worktree', 'add', '-b', 'pin/abc', wt, 'origin/main']);
+    cleanupDirs.push(wt);
+
+    const target = await inspectWorktreeClearTarget(wt);
+
+    expect(target.path).toBe(wt);
+    expect(target.primaryPath).toBe(repo);
+    expect(target.branch).toBe('pin/abc');
+    expect(target.baseRef).toBe('origin/main');
+    expect(target.dirty).toBe(false);
+    expect(target.unmerged).toBe(false);
+  });
+
+  test('rejects the primary worktree as a clear target', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-agent-worktree-primary-'));
+    cleanupDirs.push(root);
+    const repo = join(root, 'project_a');
+    await mkdir(repo, { recursive: true });
+    await git(repo, ['init']);
+    await git(repo, ['commit', '--allow-empty', '-m', 'initial']);
+    await git(repo, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+
+    await expect(inspectWorktreeClearTarget(repo)).rejects.toMatchObject({
+      code: 'primary-worktree',
+    });
+  });
+
+  test('reports dirty and unmerged safety state', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-agent-worktree-dirty-'));
+    cleanupDirs.push(root);
+    const repo = join(root, 'project_a');
+    const wt = join(root, 'project_a_pin_dirty');
+    await mkdir(repo, { recursive: true });
+    await git(repo, ['init']);
+    await git(repo, ['commit', '--allow-empty', '-m', 'initial']);
+    await git(repo, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+    await git(repo, ['worktree', 'add', '-b', 'pin/dirty', wt, 'origin/main']);
+    cleanupDirs.push(wt);
+    await git(wt, ['commit', '--allow-empty', '-m', 'worktree commit']);
+    await writeFile(join(wt, 'scratch.txt'), 'dirty');
+
+    const target = await inspectWorktreeClearTarget(wt);
+
+    expect(target.dirty).toBe(true);
+    expect(target.unmerged).toBe(true);
+    expect(target.safetyIssues).toEqual([
+      'worktree has uncommitted or untracked changes',
+      'branch has commits not merged into origin/main',
+    ]);
+  });
+
+  test('removes worktree and branch with force when requested', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-agent-worktree-remove-'));
+    cleanupDirs.push(root);
+    const repo = join(root, 'project_a');
+    const wt = join(root, 'project_a_pin_remove');
+    await mkdir(repo, { recursive: true });
+    await git(repo, ['init']);
+    await git(repo, ['commit', '--allow-empty', '-m', 'initial']);
+    await git(repo, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+    await git(repo, ['worktree', 'add', '-b', 'pin/remove', wt, 'origin/main']);
+    await writeFile(join(wt, 'scratch.txt'), 'dirty');
+
+    const target = await inspectWorktreeClearTarget(wt);
+    await removeGitWorktreeAndBranch(target, true);
+
+    await expect(gitOutput(repo, ['worktree', 'list', '--porcelain'])).resolves.not.toContain(wt);
+    await expect(execFileAsync('git', ['show-ref', '--verify', '--quiet', 'refs/heads/pin/remove'], { cwd: repo })).rejects.toBeTruthy();
   });
 });

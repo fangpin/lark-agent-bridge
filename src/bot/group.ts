@@ -83,6 +83,13 @@ export async function createBoundChat(opts: CreateBoundChatOptions): Promise<Cre
   return { chatId, name };
 }
 
+export async function dissolveChat(channel: LarkChannel, chatId: string): Promise<void> {
+  const chatApi = channel.rawClient.im.v1.chat as typeof channel.rawClient.im.v1.chat & {
+    delete(args: { path: { chat_id: string } }): Promise<unknown>;
+  };
+  await chatApi.delete({ path: { chat_id: chatId } });
+}
+
 export function defaultChatName(): string {
   return backendChatName('claude');
 }

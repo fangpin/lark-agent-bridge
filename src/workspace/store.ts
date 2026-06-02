@@ -44,6 +44,13 @@ export class WorkspaceStore {
     this.schedulePersist();
   }
 
+  clearCwd(chatId: string): boolean {
+    if (!(chatId in this.data.chats)) return false;
+    delete this.data.chats[chatId];
+    this.schedulePersist();
+    return true;
+  }
+
   listNamed(): Record<string, string> {
     return Object.fromEntries(
       Object.entries(this.data.named).map(([name, cwd]) => [

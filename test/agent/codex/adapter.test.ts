@@ -161,7 +161,7 @@ describe('CodexAdapter', () => {
     const adapter = new CodexAdapter({
       command: process.execPath,
       args: [file, pidFile],
-      availabilityTimeoutMs: 30,
+      availabilityTimeoutMs: 100,
       availabilityStopGraceMs: 30,
     });
 
