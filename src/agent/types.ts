@@ -42,6 +42,10 @@ export interface AgentDescriptor {
   supportsWorkers: boolean;
 }
 
+export type AgentAvailability =
+  | { ok: true }
+  | { ok: false; error: string };
+
 export interface AgentRun {
   readonly events: AsyncIterable<AgentEvent>;
   stop(): Promise<void>;
@@ -79,6 +83,8 @@ export interface AgentAdapter {
   readonly commandLabel: string;
   readonly descriptor: AgentDescriptor;
   isAvailable(): Promise<boolean>;
+  /** Optional: return why the startup/doctor availability probe failed. */
+  checkAvailability?(): Promise<AgentAvailability>;
   run(opts: AgentRunOptions): AgentRun;
   /** Optional: pre-create a backend session id (Cursor CLI create-chat or SDK agent). */
   prepareSession?(cwd: string, scope?: string): Promise<string | undefined>;

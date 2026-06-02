@@ -1,5 +1,5 @@
 import { stat } from 'node:fs/promises';
-import type { AgentAdapter } from '../agent/types';
+import type { AgentAdapter, AgentAvailability } from '../agent/types';
 import { resolveAppSecret } from '../config/secret-resolver';
 import type { AppConfig } from '../config/schema';
 import {
@@ -38,7 +38,7 @@ export interface SetupDiagnosticsInput {
   resolveAppSecret?: (cfg: AppConfig) => Promise<string>;
 }
 
-const DEFAULT_AGENT_AVAILABLE_TIMEOUT_MS = 5_000;
+const DEFAULT_AGENT_AVAILABLE_TIMEOUT_MS = 20_000;
 const DEFAULT_SECRET_RESOLVE_TIMEOUT_MS = 5_000;
 
 export function runIncompleteSetupDiagnostics(input: { configPath: string }): SetupDiagnosticsResult {
@@ -87,15 +87,20 @@ export async function runSetupDiagnostics(input: SetupDiagnosticsInput): Promise
   });
 
   const availability = await withTimeoutResult(
-    input.agent.isAvailable(),
+    checkAgentAvailability(input.agent),
     input.timeouts?.agentAvailableMs ?? DEFAULT_AGENT_AVAILABLE_TIMEOUT_MS,
   );
-  const available = availability.ok ? availability.value : false;
+  const available = availability.ok ? availability.value.ok : false;
+  const availabilityDetail = availability.ok
+    ? availability.value.ok
+      ? input.agent.commandLabel
+      : `${input.agent.commandLabel}: ${availability.value.error}`
+    : `${input.agent.commandLabel}: ${availability.error.message}`;
   checks.push({
     id: 'agent.available',
     status: available ? 'pass' : 'fail',
     title: 'Agent command available',
-    detail: availability.ok ? input.agent.commandLabel : `${input.agent.commandLabel}: ${availability.error.message}`,
+    detail: availabilityDetail,
     suggestion: available ? undefined : 'Check preferences.agentCommand.command, wrapper args, PATH, or backend login/auth.',
   });
 
@@ -170,6 +175,11 @@ async function withTimeoutResult<T>(promise: Promise<T>, timeoutMs: number): Pro
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+async function checkAgentAvailability(agent: AgentAdapter): Promise<AgentAvailability> {
+  if (agent.checkAvailability) return agent.checkAvailability();
+  return (await agent.isAvailable()) ? { ok: true } : { ok: false, error: 'not available' };
 }
 
 async function cwdCheck(cwd: string): Promise<SetupDiagnosticCheck> {

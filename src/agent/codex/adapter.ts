@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline';
 import type { Readable } from 'node:stream';
 import { log } from '../../core/logger';
 import { BRIDGE_SYSTEM_PROMPT } from '../claude/adapter';
-import type { AgentAdapter, AgentDescriptor, AgentEvent, AgentRun, AgentRunOptions } from '../types';
+import type { AgentAdapter, AgentAvailability, AgentDescriptor, AgentEvent, AgentRun, AgentRunOptions } from '../types';
 import { createCodexTranslator } from './stream-json';
 
 export interface CodexAdapterOptions {
@@ -24,10 +24,11 @@ interface CodexAttempt {
   events: AsyncGenerator<AgentEvent>;
 }
 
-const DEFAULT_AVAILABILITY_TIMEOUT_MS = 5_000;
+const DEFAULT_AVAILABILITY_TIMEOUT_MS = 20_000;
 const DEFAULT_AVAILABILITY_STOP_GRACE_MS = 1_000;
 const NO_SANDBOX_ARG = '--dangerously-bypass-approvals-and-sandbox';
 const CODEX_RESPONSE_FAILED_ERROR = 'stream disconnected before completion: response.failed event received';
+const AVAILABILITY_OUTPUT_MAX_CHARS = 2_000;
 
 function quoteShellArg(arg: string): string {
   if (arg.length === 0) return "''";
@@ -37,6 +38,14 @@ function quoteShellArg(arg: string): string {
 
 function joinShellArgs(args: string[]): string {
   return args.map(quoteShellArg).join(' ');
+}
+
+function trimAvailabilityOutput(chunks: Buffer[]): string {
+  return Buffer.concat(chunks)
+    .toString('utf8')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, AVAILABILITY_OUTPUT_MAX_CHARS);
 }
 
 export function buildCodexPrompt(prompt: string): string {
@@ -100,27 +109,54 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async isAvailable(): Promise<boolean> {
+    const availability = await this.checkAvailability();
+    return availability.ok;
+  }
+
+  async checkAvailability(): Promise<AgentAvailability> {
     return new Promise((resolve) => {
-      const child = spawn(this.command, this.buildProcessArgs(['--version']), { stdio: 'ignore' });
+      const child = spawn(this.command, this.buildProcessArgs(['--version']), { stdio: ['ignore', 'pipe', 'pipe'] });
       let settled = false;
       let timedOut = false;
       let timeoutTimer: NodeJS.Timeout | undefined;
       let graceTimer: NodeJS.Timeout | undefined;
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdoutChunks.push(chunk);
+      });
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderrChunks.push(chunk);
+      });
 
       const cleanup = (): void => {
         if (timeoutTimer) clearTimeout(timeoutTimer);
         if (graceTimer) clearTimeout(graceTimer);
         child.removeListener('error', onError);
-        child.removeListener('exit', onExit);
+        child.removeListener('close', onClose);
       };
-      const finish = (available: boolean): void => {
+      const finish = (availability: AgentAvailability): void => {
         if (settled) return;
         settled = true;
         cleanup();
-        resolve(available);
+        resolve(availability);
       };
-      const onError = (): void => finish(false);
-      const onExit = (code: number | null): void => finish(timedOut ? false : code === 0);
+      const onError = (err: Error): void => finish({ ok: false, error: err.message });
+      const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
+        if (timedOut) {
+          finish({ ok: false, error: `timed out after ${this.availabilityTimeoutMs}ms` });
+          return;
+        }
+        if (code === 0) {
+          finish({ ok: true });
+          return;
+        }
+        const output = trimAvailabilityOutput(stderrChunks) || trimAvailabilityOutput(stdoutChunks);
+        const suffix = output ? `: ${output}` : '';
+        if (code !== null) finish({ ok: false, error: `exited with code ${code}${suffix}` });
+        else finish({ ok: false, error: `exited with signal ${signal ?? 'unknown'}${suffix}` });
+      };
 
       timeoutTimer = setTimeout(() => {
         timedOut = true;
@@ -133,7 +169,7 @@ export class CodexAdapter implements AgentAdapter {
       }, this.availabilityTimeoutMs);
 
       child.on('error', onError);
-      child.on('exit', onExit);
+      child.on('close', onClose);
     });
   }
 

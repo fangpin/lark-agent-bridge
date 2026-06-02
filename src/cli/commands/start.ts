@@ -2,6 +2,7 @@ import dns from 'node:dns';
 import { createInterface } from 'node:readline';
 import pkg from '../../../package.json';
 import { createAgentAdapter } from '../../agent/factory';
+import type { AgentAdapter, AgentAvailability } from '../../agent/types';
 import { startChannel, type BridgeChannel } from '../../bot/channel';
 import { runRegistrationWizard } from '../../bot/wizard';
 import type { Controls } from '../../commands';
@@ -58,6 +59,11 @@ export function shouldSkipConfigMutationForCheck(opts: StartOptions): boolean {
   return opts.check === true;
 }
 
+async function checkAgentAvailability(agent: AgentAdapter): Promise<AgentAvailability> {
+  if (agent.checkAvailability) return agent.checkAvailability();
+  return (await agent.isAvailable()) ? { ok: true } : { ok: false, error: 'not available' };
+}
+
 export async function runStart(opts: StartOptions): Promise<void> {
   const configPath = opts.config ?? paths.configFile;
   const existing = await loadConfig(configPath);
@@ -98,8 +104,10 @@ export async function runStart(opts: StartOptions): Promise<void> {
   }
 
   let agent = await createAgentAdapter(cfg);
-  if (!(await agent.isAvailable())) {
-    console.error(`✗ 未找到或无法运行 agent 命令: ${agent.commandLabel}`);
+  const availability = await checkAgentAvailability(agent);
+  if (!availability.ok) {
+    console.error(`✗ agent 命令可用性检查失败: ${agent.commandLabel}`);
+    if ('error' in availability) console.error(`  原因: ${availability.error}`);
     console.error('  请确认已安装并可执行该命令，或在 ~/.lark-channel/config.json 中配置 preferences.agentCommand。');
     process.exit(1);
   }

@@ -134,6 +134,22 @@ describe('CodexAdapter', () => {
     await expect(adapter.isAvailable()).resolves.toBe(true);
   });
 
+  test('reports availability stderr when wrapper exits non-zero', async () => {
+    const fake = nodeCommand(`
+      console.error('SSO authentication failed');
+      process.exit(1);
+    `);
+    const adapter = new CodexAdapter({
+      command: fake.command,
+      args: fake.args,
+    });
+
+    await expect(adapter.checkAvailability()).resolves.toEqual({
+      ok: false,
+      error: expect.stringContaining('SSO authentication failed'),
+    });
+  });
+
   test('availability check kills codex wrapper that ignores SIGTERM', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'codex-adapter-'));
     const pidFile = join(dir, 'pid.txt');
