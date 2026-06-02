@@ -26,6 +26,7 @@ import {
   getRequireMentionInGroup,
   getRunIdleTimeoutMs,
   getShowToolCalls,
+  getWorktreeBranchPrefix,
   isAdmin,
   secretKeyForApp,
 } from '../config/schema';
@@ -48,6 +49,7 @@ import type { SessionStore } from '../session/store';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import type { WorkspaceStore } from '../workspace/store';
 import { backendChatName, backendLabel, createBoundChat, renameChatForBackend } from '../bot/group';
+import { createGitWorktree, validateWorktreeName } from '../git/worktree';
 
 export interface Controls {
   /** Restart the bridge in-process: disconnect WS, kill claude runs, reload
@@ -145,8 +147,13 @@ const ADMIN_COMMANDS = new Set([
   '/ws',
 ]);
 
-function isAdminCommand(cmd: string): boolean {
-  return ADMIN_COMMANDS.has(cmd.startsWith('/') ? cmd : `/${cmd}`);
+function isAdminCommand(cmd: string, args = ''): boolean {
+  const normalized = cmd.startsWith('/') ? cmd : `/${cmd}`;
+  if (normalized === '/new') {
+    const trimmedArgs = args.trim();
+    return trimmedArgs === 'worktree' || trimmedArgs.startsWith('worktree ');
+  }
+  return ADMIN_COMMANDS.has(normalized);
 }
 
 export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
@@ -154,7 +161,7 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
   if (!parsed) return false;
   const h = handlers[parsed.cmd];
   if (!h) return false;
-  if (isAdminCommand(parsed.cmd) && !isAdmin(ctx.controls.cfg, ctx.msg.senderId)) {
+  if (isAdminCommand(parsed.cmd, parsed.args) && !isAdmin(ctx.controls.cfg, ctx.msg.senderId)) {
     log.info('command', 'admin-deny', {
       cmd: parsed.cmd,
       sender: ctx.msg.senderId.slice(-6),
@@ -190,7 +197,7 @@ export async function runCommandHandler(
 ): Promise<boolean> {
   const h = handlers[`/${name}`];
   if (!h) return false;
-  if (isAdminCommand(name) && !isAdmin(ctx.controls.cfg, ctx.msg.senderId)) {
+  if (isAdminCommand(name, args) && !isAdmin(ctx.controls.cfg, ctx.msg.senderId)) {
     log.info('command', 'admin-deny', {
       cmd: name,
       sender: ctx.msg.senderId.slice(-6),
@@ -285,6 +292,11 @@ function shortId(id: string): string {
 async function handleNew(args: string, ctx: CommandContext): Promise<void> {
   const trimmed = args.trim();
 
+  if (trimmed === 'worktree' || trimmed.startsWith('worktree ')) {
+    const name = trimmed === 'worktree' ? '' : trimmed.slice('worktree'.length).trim();
+    return handleNewWorktree(name, ctx);
+  }
+
   // /new chat [name]  — spin up a fresh group chat bound to a fresh session
   if (trimmed === 'chat' || trimmed.startsWith('chat ')) {
     const rawName = trimmed === 'chat' ? '' : trimmed.slice(5).trim();
@@ -307,6 +319,50 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
         wasRunning ? '原运行中的任务会在其卡片上显示为已中断。' : '',
       ].filter(Boolean),
     }),
+  );
+}
+
+async function handleNewWorktree(name: string, ctx: CommandContext): Promise<void> {
+  const validationError = validateWorktreeName(name);
+  if (validationError) {
+    await reply(ctx, `❌ ${validationError}\n用法：\`/new worktree <name>\``);
+    return;
+  }
+
+  const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  const prefix = getWorktreeBranchPrefix(ctx.controls.cfg);
+  let createdWorktree;
+  try {
+    createdWorktree = await createGitWorktree(cwd, prefix, name);
+  } catch (err) {
+    await reply(ctx, `❌ 创建 worktree 失败：${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+
+  let createdChat;
+  try {
+    createdChat = await createBoundChat({
+      channel: ctx.channel,
+      name: `${backendLabel(ctx.backendKey)} · ${name}`,
+      inviteOpenId: ctx.msg.senderId,
+    });
+  } catch (err) {
+    await reply(
+      ctx,
+      `⚠️ worktree 已创建，但创建群聊失败：${err instanceof Error ? err.message : String(err)}\n` +
+        `branch：\`${createdWorktree.branch}\`\npath：\`${createdWorktree.path}\``,
+    );
+    return;
+  }
+
+  ctx.workspaces.setCwd(createdChat.chatId, createdWorktree.path);
+  ctx.backendStore?.set(createdChat.chatId, ctx.backendKey);
+  await reply(
+    ctx,
+    `✓ 已创建 worktree 群聊：${createdChat.name}\n` +
+      `branch：\`${createdWorktree.branch}\`\n` +
+      `base：\`${createdWorktree.base}\`\n` +
+      `cwd：\`${createdWorktree.path}\``,
   );
 }
 

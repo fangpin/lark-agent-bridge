@@ -5,6 +5,7 @@ import {
   getAgentCodexModel,
   getAgentCursorLocalSettings,
   getDefaultAgentBackendKey,
+  getWorktreeBranchPrefix,
   type AppConfig,
 } from '../../src/config/schema';
 
@@ -83,6 +84,12 @@ describe('agent command config', () => {
   test('loads local Cursor settings by default for SDK runtime', () => {
     expect(getAgentCursorLocalSettings(cfg({}))).toBe('all');
     expect(getAgentCursorLocalSettings(cfg({ agentCursorLocalSettings: 'none' }))).toBe('none');
+  });
+
+  test('resolves worktree branch prefix with validation fallback', () => {
+    expect(getWorktreeBranchPrefix(cfg({}))).toBe('feat');
+    expect(getWorktreeBranchPrefix(cfg({ worktreeBranchPrefix: 'pin' }))).toBe('pin');
+    expect(getWorktreeBranchPrefix(cfg({ worktreeBranchPrefix: ' bad value ' }))).toBe('feat');
   });
 
   test('normalizes legacy single backend as the default backend config', () => {

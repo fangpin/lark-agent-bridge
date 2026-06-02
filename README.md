@@ -96,6 +96,7 @@ Host CLI entries for `status`, `doctor`, `handover`, `workspace`, and `service` 
 | Command | Effect |
 |---|---|
 | `/new`, `/reset` | Clear the current chat's session |
+| `/new worktree <name>` | Create a new git worktree from `origin/main` (or `origin/master` fallback), create a backend-labeled group chat, and bind that chat cwd to the worktree. |
 | `/cd <path>` | Switch working directory (resets session) |
 | `/ws list` | List named workspaces (card + buttons) |
 | `/ws save <name>` | Save current cwd as a named workspace |
@@ -174,6 +175,8 @@ A single bridge process can expose multiple backend profiles and choose one per 
 ```
 
 Sessions are isolated by backend. New bound groups use the current backend label in the group name, and `/backend` best-effort renames group chats with the selected backend prefix.
+
+`/new worktree <name>` uses `preferences.worktreeBranchPrefix` for the branch prefix (default `feat`). For example, from cwd `~/repos/project_a`, prefix `pin`, and name `abc`, it creates branch `pin/abc` and worktree path `~/repos/project_a_pin_abc`.
 
 ### Cursor backend (`@cursor/sdk` or CLI)
 

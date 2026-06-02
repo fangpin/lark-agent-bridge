@@ -165,6 +165,8 @@ export interface AppPreferences {
    * skills. `none` keeps the SDK isolated to inline config only. Default: all.
    */
   agentCursorLocalSettings?: AgentCursorLocalSettings;
+  /** Default git worktree branch prefix. Default: feat. */
+  worktreeBranchPrefix?: string;
   /**
    * Max persistent Cursor SDK session workers kept alive between runs. Each
    * worker holds one local `Agent.create()` instance. 0 disables pooling.
@@ -297,6 +299,11 @@ export function getAgentCursorRuntime(cfg: AppConfig): 'sdk' | 'cli' {
 
 export function getAgentCursorLocalSettings(cfg: AppConfig): AgentCursorLocalSettings {
   return cfg.preferences?.agentCursorLocalSettings === 'none' ? 'none' : 'all';
+}
+
+export function getWorktreeBranchPrefix(cfg: AppConfig): string {
+  const raw = cfg.preferences?.worktreeBranchPrefix?.trim();
+  return raw && /^[A-Za-z0-9._-]+$/.test(raw) ? raw : 'feat';
 }
 
 /** @deprecated Use getAgentCursorCliModel from agent/cursor/model-selection. */
