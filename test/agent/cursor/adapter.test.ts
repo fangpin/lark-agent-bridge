@@ -57,7 +57,7 @@ describe('CursorAdapter', () => {
   test('loads local Cursor settings by default in SDK runtime', () => {
     const adapter = new CursorAdapter({ runtime: 'sdk', sessionPoolSize: 1 });
 
-    expect(sdkWorkerConfig(adapter)?.localSettingSources).toBe('all');
+    expect(sdkWorkerConfig(adapter)?.localSettingSources).toEqual(['all']);
   });
 
   test('can disable local Cursor settings in SDK runtime', () => {
