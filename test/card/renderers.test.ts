@@ -101,6 +101,48 @@ describe('run renderers', () => {
     });
   });
 
+  test('turns TaskCreate calls into a task board instead of a bare tool block', () => {
+    const state = reduce(initialState, {
+      type: 'tool_use',
+      id: 'tool-1',
+      name: 'TaskCreate',
+      input: {
+        subject: '修复工具展示',
+        description: '让 TaskCreate 在卡片里显示具体任务内容',
+        activeForm: '修复工具展示',
+      },
+    });
+
+    expect(state.blocks).toEqual([]);
+    expect(renderText(state)).toContain('📋 **任务看板** · 0/1 完成 · 当前: 修复工具展示');
+    expect(renderText(state)).not.toContain('TaskCreate');
+  });
+
+  test('applies TaskUpdate status changes to the task board', () => {
+    const created = reduce(initialState, {
+      type: 'tool_use',
+      id: 'tool-1',
+      name: 'TaskCreate',
+      input: {
+        subject: '定位根因',
+        description: '找出为什么任务工具没有内容',
+      },
+    });
+    const updated = reduce(created, {
+      type: 'tool_use',
+      id: 'tool-2',
+      name: 'TaskUpdate',
+      input: {
+        taskId: '1',
+        status: 'completed',
+      },
+    });
+
+    expect(updated.blocks).toEqual([]);
+    expect(renderText(updated)).toContain('📋 **任务看板** · 1/1 完成');
+    expect(renderText(updated)).not.toContain('TaskUpdate');
+  });
+
   test('recognizes updateTodos aliases as the task board source', () => {
     const state = reduce(initialState, {
       type: 'tool_use',

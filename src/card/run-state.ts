@@ -131,11 +131,21 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         input: evt.input,
         status: 'running',
       };
-      const todos = readTodoWriteInput(evt.name, evt.input);
-      if (todos) {
+      const todoWrite = readTodoWriteInput(evt.name, evt.input);
+      if (todoWrite) {
         return touch({
           ...state,
-          todos: applyTodoWrite(state.todos, todos),
+          todos: applyTodoWrite(state.todos, todoWrite),
+          reasoning: { ...state.reasoning, active: false },
+          footer: 'tool_running',
+          activity: { kind: 'phase', phase: 'tool_running', label: '更新任务看板' },
+        });
+      }
+      const taskTool = readTaskToolInput(evt.name, evt.input, state.todos);
+      if (taskTool) {
+        return touch({
+          ...state,
+          todos: applyTaskTool(state.todos, taskTool),
           reasoning: { ...state.reasoning, active: false },
           footer: 'tool_running',
           activity: { kind: 'phase', phase: 'tool_running', label: '更新任务看板' },
@@ -258,8 +268,50 @@ function readTodoWriteInput(
 }
 
 function isTodoWriteTool(name: string): boolean {
-  const normalized = name.replace(/^functions\./, '').replace(/[_\s-]/g, '').toLowerCase();
+  const normalized = normalizedToolName(name);
   return normalized === 'todowrite' || normalized === 'updatetodos' || normalized === 'todoupdate';
+}
+
+function readTaskToolInput(
+  name: string,
+  input: unknown,
+  existing: TodoItem[],
+):
+  | { kind: 'create'; todo: TodoItem }
+  | { kind: 'update'; id: string; status?: TodoStatus; content?: string }
+  | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const rec = input as Record<string, unknown>;
+  const normalized = normalizedToolName(name);
+  if (normalized === 'taskcreate') {
+    const content = readTaskContent(rec);
+    if (!content) return undefined;
+    return {
+      kind: 'create',
+      todo: {
+        id: String(existing.length + 1),
+        content,
+        status: 'in_progress',
+      },
+    };
+  }
+  if (normalized !== 'taskupdate') return undefined;
+  const id = typeof rec.taskId === 'string' && rec.taskId.trim() ? rec.taskId.trim() : '';
+  if (!id) return undefined;
+  const status = readTodoStatus(rec.status);
+  const content = readTaskContent(rec);
+  if (!status && !content) return undefined;
+  return { kind: 'update', id, status, content };
+}
+
+function readTaskContent(rec: Record<string, unknown>): string | undefined {
+  for (const key of ['subject', 'description', 'activeForm']) {
+    const value = rec[key];
+    if (typeof value !== 'string') continue;
+    const content = value.replace(/\s+/g, ' ').trim();
+    if (content) return content;
+  }
+  return undefined;
 }
 
 function readTodoStatus(status: unknown): TodoStatus | undefined {
@@ -281,6 +333,26 @@ function applyTodoWrite(
     byId.set(todo.id, todo);
   }
   return Array.from(byId.values());
+}
+
+function applyTaskTool(
+  existing: TodoItem[],
+  update: { kind: 'create'; todo: TodoItem } | { kind: 'update'; id: string; status?: TodoStatus; content?: string },
+): TodoItem[] {
+  if (update.kind === 'create') return [...existing, update.todo];
+  return existing.map((todo) =>
+    todo.id === update.id
+      ? {
+          ...todo,
+          content: update.content ?? todo.content,
+          status: update.status ?? todo.status,
+        }
+      : todo,
+  );
+}
+
+function normalizedToolName(name: string): string {
+  return name.replace(/^functions\./, '').replace(/[_\s-]/g, '').toLowerCase();
 }
 
 function summarizeActivityText(value: string | undefined): string | undefined {
