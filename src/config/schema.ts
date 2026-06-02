@@ -90,6 +90,7 @@ export interface AppAccess {
 }
 
 export type AgentBackend = 'claude' | 'cursor' | 'codex';
+export type AgentCursorLocalSettings = 'all' | 'none';
 
 export interface AgentCommandConfig {
   backend?: AgentBackend;
@@ -151,6 +152,12 @@ export interface AppPreferences {
    * Default: `sdk` for cursor backend; set `cli` to force per-message spawn.
    */
   agentCursorRuntime?: 'sdk' | 'cli';
+  /**
+   * Cursor SDK local setting sources. `all` loads local Cursor settings so the
+   * SDK backend can see configured MCP servers, hooks/subagents, plugins, and
+   * skills. `none` keeps the SDK isolated to inline config only. Default: all.
+   */
+  agentCursorLocalSettings?: AgentCursorLocalSettings;
   /**
    * Max persistent Cursor SDK session workers kept alive between runs. Each
    * worker holds one local `Agent.create()` instance. 0 disables pooling.
@@ -279,6 +286,10 @@ export function getRequireMentionInGroup(cfg: AppConfig): boolean {
 export function getAgentCursorRuntime(cfg: AppConfig): 'sdk' | 'cli' {
   if (getAgentCommand(cfg).backend !== 'cursor') return 'cli';
   return cfg.preferences?.agentCursorRuntime === 'cli' ? 'cli' : 'sdk';
+}
+
+export function getAgentCursorLocalSettings(cfg: AppConfig): AgentCursorLocalSettings {
+  return cfg.preferences?.agentCursorLocalSettings === 'none' ? 'none' : 'all';
 }
 
 /** @deprecated Use getAgentCursorCliModel from agent/cursor/model-selection. */

@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'vitest';
-import { getAgentCommand, getAgentCodexModel, type AppConfig } from '../../src/config/schema';
+import {
+  getAgentCommand,
+  getAgentCodexModel,
+  getAgentCursorLocalSettings,
+  type AppConfig,
+} from '../../src/config/schema';
 
 function cfg(preferences: AppConfig['preferences']): AppConfig {
   return {
@@ -71,5 +76,10 @@ describe('agent command config', () => {
         }),
       ),
     ).toEqual({ backend: 'claude', command: 'ttadk', args: [] });
+  });
+
+  test('loads local Cursor settings by default for SDK runtime', () => {
+    expect(getAgentCursorLocalSettings(cfg({}))).toBe('all');
+    expect(getAgentCursorLocalSettings(cfg({ agentCursorLocalSettings: 'none' }))).toBe('none');
   });
 });
