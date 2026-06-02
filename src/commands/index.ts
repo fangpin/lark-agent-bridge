@@ -48,7 +48,7 @@ import { isAlive, readAndPrune, resolveTarget, sameAppOthers } from '../runtime/
 import type { SessionStore } from '../session/store';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import type { WorkspaceStore } from '../workspace/store';
-import { dissolveChat, backendChatName, backendLabel, createBoundChat, nameWithBackend, renameChatForBackend } from '../bot/group';
+import { backendChatName, backendLabel, createBoundChat, nameWithBackend, renameChatForBackend } from '../bot/group';
 import {
   createGitWorktree,
   inspectWorktreeClearTarget,
@@ -824,7 +824,7 @@ async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
   await reply(ctx, `已重新排队上次任务（${entry.batch.length} 条消息，当前队列 ${size}）。`);
 }
 
-const SHELL_TIMEOUT_MS = 30_000;
+const SHELL_TIMEOUT_MS = 10 * 60_000;
 const SHELL_OUTPUT_MAX_CHARS = 12_000;
 
 interface ShellRunResult {
@@ -1041,7 +1041,7 @@ function formatWorktreeClearError(err: unknown): string {
 
 function formatClearSuccess(target: WorktreeClearTarget, force: boolean, interrupted: boolean, historyPaths: string[]): string {
   const lines = [
-    '✓ 本地清理已完成，即将解散当前群聊。',
+    '✓ 本地清理已完成。',
     '',
     `worktree：\`${target.path}\``,
     `branch：\`${target.branch}\``,
@@ -1123,13 +1123,6 @@ async function handleClear(args: string, ctx: CommandContext): Promise<void> {
 
   await reply(ctx, formatClearSuccess(target, force, interrupted, historyPaths));
 
-  try {
-    await dissolveChat(ctx.channel, ctx.msg.chatId);
-    log.info('command', 'clear-dissolved', logMeta);
-  } catch (err) {
-    log.fail('command', err, { ...logMeta, step: 'dissolve' });
-    await reply(ctx, `⚠️ 本地清理已完成，但解散群聊失败：${err instanceof Error ? err.message : String(err)}\n请确认 bot 具备解散/删除群聊权限。`);
-  }
 }
 
 async function handleExit(args: string, ctx: CommandContext): Promise<void> {

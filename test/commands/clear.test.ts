@@ -133,12 +133,12 @@ describe('/clear', () => {
     expect(commandCtx.channel.send).toHaveBeenCalledWith('chat-1', { markdown: expect.stringContaining('/clear --force') }, { replyTo: 'msg-1' });
   });
 
-  test('cleans state, removes history and worktree, then dissolves the group', async () => {
+  test('cleans state, removes history and worktree without dissolving the group', async () => {
     const target = clearTarget();
     vi.spyOn(worktree, 'inspectWorktreeClearTarget').mockResolvedValue(target);
     vi.spyOn(worktree, 'removeGitWorktreeAndBranch').mockResolvedValue(undefined);
     vi.spyOn(localHistory, 'removeLocalAgentHistory').mockResolvedValue(['/home/me/.claude/projects/-home-me-repos-project_a_pin_abc']);
-    vi.spyOn(group, 'dissolveChat').mockResolvedValue(undefined);
+    const dissolve = vi.spyOn(group, 'dissolveChat');
     const commandCtx = ctx('/clear');
 
     await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
@@ -150,11 +150,11 @@ describe('/clear', () => {
     expect(commandCtx.backendStore?.clear).toHaveBeenCalledWith('chat-1');
     expect(localHistory.removeLocalAgentHistory).toHaveBeenCalledWith('/home/me/repos/project_a_pin_abc');
     expect(worktree.removeGitWorktreeAndBranch).toHaveBeenCalledWith(target, false);
-    expect(commandCtx.channel.send).toHaveBeenCalledWith('chat-1', { markdown: expect.stringContaining('即将解散当前群聊') }, { replyTo: 'msg-1' });
-    expect(group.dissolveChat).toHaveBeenCalledWith(commandCtx.channel, 'chat-1');
+    expect(commandCtx.channel.send).toHaveBeenCalledWith('chat-1', { markdown: expect.stringContaining('本地清理已完成。') }, { replyTo: 'msg-1' });
+    expect(dissolve).not.toHaveBeenCalled();
   });
 
-  test('force mode continues through unsafe state and removes with force', async () => {
+  test('force mode continues through unsafe state and only removes local state with force', async () => {
     const unsafe = clearTarget({
       dirty: true,
       unmerged: true,
@@ -163,16 +163,16 @@ describe('/clear', () => {
     vi.spyOn(worktree, 'inspectWorktreeClearTarget').mockResolvedValue(unsafe);
     vi.spyOn(worktree, 'removeGitWorktreeAndBranch').mockResolvedValue(undefined);
     vi.spyOn(localHistory, 'removeLocalAgentHistory').mockResolvedValue([]);
-    vi.spyOn(group, 'dissolveChat').mockResolvedValue(undefined);
+    const dissolve = vi.spyOn(group, 'dissolveChat');
     const commandCtx = ctx('/clear --force');
 
     await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
 
     expect(worktree.removeGitWorktreeAndBranch).toHaveBeenCalledWith(unsafe, true);
-    expect(group.dissolveChat).toHaveBeenCalledWith(commandCtx.channel, 'chat-1');
+    expect(dissolve).not.toHaveBeenCalled();
   });
 
-  test('short force flag continues through unsafe state and removes with force', async () => {
+  test('short force flag continues through unsafe state and only removes local state with force', async () => {
     const unsafe = clearTarget({
       dirty: true,
       unmerged: true,
@@ -181,26 +181,13 @@ describe('/clear', () => {
     vi.spyOn(worktree, 'inspectWorktreeClearTarget').mockResolvedValue(unsafe);
     vi.spyOn(worktree, 'removeGitWorktreeAndBranch').mockResolvedValue(undefined);
     vi.spyOn(localHistory, 'removeLocalAgentHistory').mockResolvedValue([]);
-    vi.spyOn(group, 'dissolveChat').mockResolvedValue(undefined);
+    const dissolve = vi.spyOn(group, 'dissolveChat');
     const commandCtx = ctx('/clear -f');
 
     await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
 
     expect(worktree.removeGitWorktreeAndBranch).toHaveBeenCalledWith(unsafe, true);
-    expect(group.dissolveChat).toHaveBeenCalledWith(commandCtx.channel, 'chat-1');
-  });
-
-  test('reports Lark dissolution failure after local cleanup', async () => {
-    vi.spyOn(worktree, 'inspectWorktreeClearTarget').mockResolvedValue(clearTarget());
-    vi.spyOn(worktree, 'removeGitWorktreeAndBranch').mockResolvedValue(undefined);
-    vi.spyOn(localHistory, 'removeLocalAgentHistory').mockResolvedValue([]);
-    vi.spyOn(group, 'dissolveChat').mockRejectedValue(new Error('missing scope'));
-    const commandCtx = ctx('/clear');
-
-    await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
-
-    expect(worktree.removeGitWorktreeAndBranch).toHaveBeenCalledOnce();
-    expect(commandCtx.channel.send).toHaveBeenCalledWith('chat-1', { markdown: expect.stringContaining('本地清理已完成，但解散群聊失败') }, { replyTo: 'msg-1' });
+    expect(dissolve).not.toHaveBeenCalled();
   });
 
   test('stops cleanup and keeps group when git removal fails', async () => {

@@ -144,6 +144,11 @@ export interface AppPreferences {
    * Cloud-doc comments still require @-mention unconditionally.
    */
   requireMentionInGroup?: boolean;
+  /**
+   * After a terminal card update is confirmed in a group/topic chat, mark that
+   * chat unread so completed work remains visible. Default true.
+   */
+  markGroupUnreadOnFinalCard?: boolean;
   /** Access control — user/chat allowlists + admin gating. See AppAccess. */
   access?: AppAccess;
   /** Coding-agent command configuration. Default backend/command: `claude`. */
@@ -290,6 +295,10 @@ export function getMaxConcurrentRuns(cfg: AppConfig): number {
  */
 export function getRequireMentionInGroup(cfg: AppConfig): boolean {
   return cfg.preferences?.requireMentionInGroup !== false;
+}
+
+export function getMarkGroupUnreadOnFinalCard(cfg: AppConfig): boolean {
+  return cfg.preferences?.markGroupUnreadOnFinalCard !== false;
 }
 
 export function getAgentCursorRuntime(cfg: AppConfig): 'sdk' | 'cli' {
