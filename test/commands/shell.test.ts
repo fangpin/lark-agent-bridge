@@ -66,6 +66,37 @@ describe('shell command', () => {
     expect(result.timedOut).toBe(true);
   });
 
+  test('sends a temporary check message after shell command finishes', async () => {
+    vi.useFakeTimers();
+    const ctx = commandContext('/shell node -e "process.exit(0)"', 'admin');
+    const send = vi.fn(async (_chatId: string, payload: unknown) => {
+      const markdown = (payload as { markdown?: string }).markdown;
+      return { messageId: markdown === '请检查' ? 'om_check' : 'om_shell_result' };
+    });
+    const deleteMessage = vi.fn(async () => undefined);
+    ctx.channel = {
+      send,
+      rawClient: {
+        im: {
+          v1: {
+            message: { delete: deleteMessage },
+          },
+        },
+      },
+    } as unknown as CommandContext['channel'];
+
+    await expect(tryHandleCommand(ctx)).resolves.toBe(true);
+
+    expect(send).toHaveBeenCalledWith('chat', expect.objectContaining({ markdown: expect.stringContaining('**/shell exit 0**') }), { replyTo: 'msg' });
+    expect(send).toHaveBeenCalledWith('chat', { markdown: '请检查' });
+    expect(deleteMessage).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(12 * 60 * 60 * 1000);
+
+    expect(deleteMessage).toHaveBeenCalledWith({ path: { message_id: 'om_check' } });
+    vi.useRealTimers();
+  });
+
   test('is gated to admins', async () => {
     const ctx = commandContext('/shell echo nope');
 

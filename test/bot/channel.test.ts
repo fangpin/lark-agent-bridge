@@ -102,6 +102,54 @@ describe('channel streamMessageId persistence', () => {
     await vi.waitFor(() => expect(calls).toEqual(['codex']));
   });
 
+  test('sends a temporary check message after text reply runs finish', async () => {
+    vi.useFakeTimers();
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const send = vi.fn(async (_chatId: string, payload: unknown) => {
+      const markdown = (payload as { markdown?: string }).markdown;
+      return { messageId: markdown === '请检查' ? 'om_check' : 'om_sent_text' };
+    });
+    const deleteMessage = vi.fn(async () => undefined);
+    const fakeChannel = {
+      ...createFakeChannel(messages),
+      send,
+      rawClient: {
+        im: {
+          v1: {
+            message: { delete: deleteMessage },
+            messageReaction: {
+              async create() {
+                return { data: { reaction_id: 'reaction-1' } };
+              },
+              async delete() {},
+            },
+          },
+        },
+      },
+    } as unknown as LarkChannel;
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent(() => {}),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('om_original', 'original prompt'));
+
+    await vi.waitFor(() => expect(send).toHaveBeenCalledWith('chat-1', { markdown: '请检查' }));
+    expect(deleteMessage).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(12 * 60 * 60 * 1000);
+
+    expect(deleteMessage).toHaveBeenCalledWith({ path: { message_id: 'om_check' } });
+    vi.useRealTimers();
+  });
+
   test('text replies persist sent message ids in run history', async () => {
     let persistedStreamMessageId: string | undefined;
     const originalUpdate = RunHistory.prototype.update;

@@ -40,6 +40,7 @@ import { ensureResumeSession } from '../session/ensure-resume';
 import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
+import { sendCompletionCheckMessage } from './completion-check';
 import { handleCommentMention } from './comments';
 import { startKeepalive } from './keepalive';
 import { configureNetwork } from './network-config';
@@ -917,6 +918,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     activeRuns.unregister(scope, run);
     if (reactionId) {
       await removeReaction(channel, lastMsg.messageId, reactionId);
+    }
+    if (finalState.terminal !== 'running') {
+      await sendCompletionCheckMessage(channel, chatId);
     }
   }
 }
