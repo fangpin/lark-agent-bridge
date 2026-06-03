@@ -304,9 +304,14 @@ function shortId(id: string): string {
 
 const DOC_USAGE = [
   '用法：',
-  '- `/doc bind <doc-url|token> <backend|default> <session-id>` 指定云文档使用的 backend 和 session',
+  '- `/doc bind <doc-url|token>`：在群里把云文档绑定到当前群的 backend/session',
+  '- `/doc bind <doc-url|token> <backend|default> <session-id>`：显式指定 backend/session',
   '- `/doc status <doc-url|token>` 查看云文档当前配置',
   '- `/doc clear <doc-url|token>` 清除云文档 backend/session 覆盖',
+  '',
+  '示例：',
+  '- `/doc bind https://example.feishu.cn/docx/DOCTOKEN`',
+  '- `/doc bind DOCTOKEN claude SESSION_ID`',
 ].join('\n');
 
 function extractDocToken(input: string): string | undefined {
@@ -671,10 +676,70 @@ async function handleDoc(args: string, ctx: CommandContext): Promise<void> {
 }
 
 async function handleDocBind(parts: string[], ctx: CommandContext): Promise<void> {
+  if (parts.length === 1) {
+    return handleDocBindCurrentChat(parts[0] ?? '', ctx);
+  }
   if (parts.length < 3) {
     await reply(ctx, DOC_USAGE);
     return;
   }
+  return handleDocBindExplicit(parts, ctx);
+}
+
+async function handleDocBindCurrentChat(docInput: string, ctx: CommandContext): Promise<void> {
+  if (ctx.chatMode === 'p2p') {
+    await reply(ctx, '快捷绑定只能在群聊或话题群里使用；私聊请使用 `/doc bind <doc-url|token> <backend|default> <session-id>`。');
+    return;
+  }
+  if (!ctx.agentRegistry || !ctx.backendStore) {
+    await reply(ctx, '当前运行环境不支持多 backend，无法为云文档指定 backend。');
+    return;
+  }
+
+  const scope = docScopeForInput(docInput);
+  if (!scope) {
+    await reply(ctx, `无法识别云文档 token：\`${docInput}\``);
+    return;
+  }
+
+  const currentBackend = ctx.backendStore.get(ctx.scope);
+  const backendKey = currentBackend && ctx.agentRegistry.has(currentBackend)
+    ? currentBackend
+    : ctx.agentRegistry.defaultKey();
+  const nextAgent = await ctx.agentRegistry.get(backendKey);
+  const currentSession = ctx.sessions.getRaw(ctx.scope, nextAgent.sessionKey);
+  if (!currentSession?.sessionId) {
+    await reply(ctx, '当前群还没有可绑定的 session，请先在群里完成一次 agent 对话后再绑定。');
+    return;
+  }
+
+  const previousKey = ctx.backendStore.get(scope);
+  const previousAgent = await ctx.agentRegistry.getOrDefault(previousKey);
+  const cwd = currentSession.cwd ?? ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+
+  ctx.activeRuns.interrupt(scope);
+  await previousAgent.evictScope?.(scope, cwd);
+  if (currentBackend) ctx.backendStore.set(scope, backendKey);
+  else ctx.backendStore.clear(scope);
+  ctx.sessions.set(scope, nextAgent.sessionKey, currentSession.sessionId, cwd);
+
+  await replyCard(
+    ctx,
+    commandStatusCard({
+      title: '已绑定云文档到当前群会话',
+      status: 'success',
+      lines: [
+        `scope: \`${scope}\``,
+        `backend: \`${backendKey}\`（${nextAgent.displayName}）`,
+        `session: \`${shortId(currentSession.sessionId)}\``,
+        `cwd: \`${cwd}\``,
+        '后续在该文档里 @bot 时会使用当前群的 backend/session。',
+      ],
+    }),
+  );
+}
+
+async function handleDocBindExplicit(parts: string[], ctx: CommandContext): Promise<void> {
   if (!ctx.agentRegistry || !ctx.backendStore) {
     await reply(ctx, '当前运行环境不支持多 backend，无法为云文档指定 backend。');
     return;
