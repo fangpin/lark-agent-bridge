@@ -58,6 +58,7 @@ import {
   type WorktreeClearTarget,
 } from '../git/worktree';
 import { removeLocalAgentHistory } from '../session/local-history';
+import { sendCompletionCheckMessage } from '../bot/completion-check';
 
 export interface Controls {
   /** Restart the bridge in-process: disconnect WS, kill claude runs, reload
@@ -1035,6 +1036,7 @@ async function handleShell(args: string, ctx: CommandContext): Promise<void> {
   });
 
   await reply(ctx, formatShellResult(command, cwd, result));
+  await sendCompletionCheckMessage(ctx.channel, ctx.msg.chatId);
 }
 
 export function runShellCommand(
