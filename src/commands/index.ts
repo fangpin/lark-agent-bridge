@@ -123,6 +123,7 @@ const handlers: Record<string, Handler> = {
   '/status': handleStatus,
   '/runs': handleRuns,
   '/backend': handleBackend,
+  '/doc': handleDoc,
   '/help': handleHelp,
   '/account': handleAccount,
   '/config': handleConfig,
@@ -151,6 +152,7 @@ const ADMIN_COMMANDS = new Set([
   '/reconnect',
   '/doctor',
   '/backend',
+  '/doc',
   '/workers',
   '/shell',
   '/cd',
@@ -297,6 +299,40 @@ function resolveCdInput(input: string, baseCwd: string): string {
 
 function shortId(id: string): string {
   return id.length <= 12 ? id : `${id.slice(0, 8)}…`;
+}
+
+const DOC_USAGE = [
+  '用法：',
+  '- `/doc bind <doc-url|token> <backend|default> <session-id>` 指定云文档使用的 backend 和 session',
+  '- `/doc status <doc-url|token>` 查看云文档当前配置',
+  '- `/doc clear <doc-url|token>` 清除云文档 backend/session 覆盖',
+].join('\n');
+
+function extractDocToken(input: string): string | undefined {
+  const raw = input.trim().replace(/^<|>$/g, '');
+  if (!raw) return undefined;
+
+  const tokenFromPath = (path: string): string | undefined => {
+    const segments = path.split('/').filter(Boolean);
+    const marker = segments.findIndex((segment) => ['doc', 'docx', 'sheet', 'file', 'wiki'].includes(segment));
+    return marker >= 0 ? segments[marker + 1] : undefined;
+  };
+
+  try {
+    const token = tokenFromPath(new URL(raw).pathname);
+    if (token) return token;
+  } catch {
+    // Not a URL; fall through to path/token parsing.
+  }
+
+  const pathMatch = raw.match(/(?:^|\/)(?:doc|docx|sheet|file|wiki)\/([A-Za-z0-9_-]+)/);
+  if (pathMatch?.[1]) return pathMatch[1];
+  return /^[A-Za-z0-9_-]{6,}$/.test(raw) ? raw : undefined;
+}
+
+function docScopeForInput(input: string): string | undefined {
+  const token = extractDocToken(input);
+  return token ? `doc:${token}` : undefined;
 }
 
 async function handleNew(args: string, ctx: CommandContext): Promise<void> {
@@ -615,6 +651,143 @@ async function handleBackend(args: string, ctx: CommandContext): Promise<void> {
     }
   }
   await reply(ctx, `已切换 backend 到 \`${nextKey}\`（${nextAgent.displayName}）。\n已有 session 会继续保留；如需新会话请使用 /reset。${renameStatus}`);
+}
+
+async function handleDoc(args: string, ctx: CommandContext): Promise<void> {
+  const parts = args.trim().split(/\s+/).filter(Boolean);
+  const sub = parts[0] ?? '';
+
+  switch (sub) {
+    case 'bind':
+      return handleDocBind(parts.slice(1), ctx);
+    case 'status':
+      return handleDocStatus(parts.slice(1), ctx);
+    case 'clear':
+      return handleDocClear(parts.slice(1), ctx);
+    default:
+      await reply(ctx, DOC_USAGE);
+  }
+}
+
+async function handleDocBind(parts: string[], ctx: CommandContext): Promise<void> {
+  if (parts.length < 3) {
+    await reply(ctx, DOC_USAGE);
+    return;
+  }
+  if (!ctx.agentRegistry || !ctx.backendStore) {
+    await reply(ctx, '当前运行环境不支持多 backend，无法为云文档指定 backend。');
+    return;
+  }
+
+  const [docInput, backendInput, sessionId] = parts;
+  const scope = docScopeForInput(docInput ?? '');
+  if (!scope) {
+    await reply(ctx, `无法识别云文档 token：\`${docInput ?? ''}\``);
+    return;
+  }
+  if (!backendInput || !sessionId) {
+    await reply(ctx, DOC_USAGE);
+    return;
+  }
+
+  const backendKey = backendInput === 'default' ? ctx.agentRegistry.defaultKey() : backendInput;
+  if (!ctx.agentRegistry.has(backendKey)) {
+    await reply(ctx, `未知 backend：\`${backendInput}\`\n可用 backend：${ctx.agentRegistry.keys().map((key) => `\`${key}\``).join(', ')}`);
+    return;
+  }
+
+  const previousKey = ctx.backendStore.get(scope);
+  const previousAgent = await ctx.agentRegistry.getOrDefault(previousKey);
+  const nextAgent = await ctx.agentRegistry.get(backendKey);
+  const cwd = ctx.workspaces.cwdFor(scope) ?? homedir();
+
+  ctx.activeRuns.interrupt(scope);
+  await previousAgent.evictScope?.(scope, cwd);
+  if (backendInput === 'default') ctx.backendStore.clear(scope);
+  else ctx.backendStore.set(scope, backendKey);
+  ctx.sessions.set(scope, nextAgent.sessionKey, sessionId, cwd);
+
+  await replyCard(
+    ctx,
+    commandStatusCard({
+      title: '已绑定云文档会话',
+      status: 'success',
+      lines: [
+        `scope: \`${scope}\``,
+        `backend: \`${backendKey}\`（${nextAgent.displayName}）`,
+        `session: \`${shortId(sessionId)}\``,
+        `cwd: \`${cwd}\``,
+        '后续在该文档里 @bot 时会优先使用这个 backend/session。',
+      ],
+    }),
+  );
+}
+
+async function handleDocStatus(parts: string[], ctx: CommandContext): Promise<void> {
+  const [docInput] = parts;
+  const scope = docScopeForInput(docInput ?? '');
+  if (!scope) {
+    await reply(ctx, DOC_USAGE);
+    return;
+  }
+
+  const requestedBackend = ctx.backendStore?.get(scope);
+  const backendKey = ctx.agentRegistry
+    ? requestedBackend && ctx.agentRegistry.has(requestedBackend)
+      ? requestedBackend
+      : ctx.agentRegistry.defaultKey()
+    : ctx.backendKey;
+  const agent = ctx.agentRegistry ? await ctx.agentRegistry.get(backendKey) : ctx.agent;
+  const activeSession = ctx.sessions.getRaw(scope, agent.sessionKey);
+  const allSessions = ctx.sessions.getRaw(scope);
+  const sessionLines = Object.entries(allSessions?.agents ?? {}).map(
+    ([sessionKey, entry]) => `- \`${sessionKey}\`: \`${shortId(entry.sessionId)}\` (${new Date(entry.updatedAt).toLocaleString()})`,
+  );
+
+  await replyCard(
+    ctx,
+    commandStatusCard({
+      title: '云文档会话配置',
+      status: 'info',
+      lines: [
+        `scope: \`${scope}\``,
+        `backend: \`${backendKey}\`${requestedBackend ? '（文档覆盖）' : '（跟随默认）'}`,
+        `当前 backend session: ${activeSession?.sessionId ? `\`${shortId(activeSession.sessionId)}\`` : '(无)'}`,
+        sessionLines.length > 0 ? `已保存 sessions:\n${sessionLines.join('\n')}` : '已保存 sessions: (无)',
+      ],
+    }),
+  );
+}
+
+async function handleDocClear(parts: string[], ctx: CommandContext): Promise<void> {
+  const [docInput] = parts;
+  const scope = docScopeForInput(docInput ?? '');
+  if (!scope) {
+    await reply(ctx, DOC_USAGE);
+    return;
+  }
+
+  const cwd = ctx.workspaces.cwdFor(scope) ?? homedir();
+  const previousKey = ctx.backendStore?.get(scope);
+  const previousAgent = ctx.agentRegistry ? await ctx.agentRegistry.getOrDefault(previousKey) : ctx.agent;
+  ctx.activeRuns.interrupt(scope);
+  await previousAgent.evictScope?.(scope, cwd);
+  const clearedBackend = ctx.backendStore?.clear(scope) ?? false;
+  const hadSessions = Boolean(ctx.sessions.getRaw(scope));
+  ctx.sessions.clear(scope);
+
+  await replyCard(
+    ctx,
+    commandStatusCard({
+      title: '已清除云文档会话配置',
+      status: clearedBackend || hadSessions ? 'success' : 'info',
+      lines: [
+        `scope: \`${scope}\``,
+        clearedBackend ? '已清除文档 backend 覆盖。' : '没有文档 backend 覆盖。',
+        hadSessions ? '已清除该文档下保存的 sessions。' : '没有该文档下保存的 session。',
+      ],
+    }),
+  );
 }
 
 async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {

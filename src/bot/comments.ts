@@ -1,6 +1,8 @@
 import { homedir } from 'node:os';
 import type { CommentEvent, LarkChannel } from '@larksuiteoapi/node-sdk';
+import type { AgentRegistry } from '../agent/registry';
 import type { AgentAdapter } from '../agent/types';
+import type { BackendStore } from '../backend/store';
 import { log } from '../core/logger';
 import { ensureResumeSession } from '../session/ensure-resume';
 import type { SessionStore } from '../session/store';
@@ -11,6 +13,8 @@ export interface CommentDeps {
   channel: LarkChannel;
   evt: CommentEvent;
   agent: AgentAdapter;
+  agentRegistry?: AgentRegistry;
+  backendStore?: BackendStore;
   sessions: SessionStore;
   workspaces: WorkspaceStore;
 }
@@ -60,7 +64,7 @@ interface CommentContext {
  * a reply in the same comment thread.
  */
 export async function handleCommentMention(deps: CommentDeps): Promise<void> {
-  const { channel, evt, agent, sessions, workspaces } = deps;
+  const { channel, evt, sessions, workspaces } = deps;
   // Log every comment event we receive, regardless of whether we'll act on it.
   // `mentionedBot` and `replyId` here let us tell apart top-level comments
   // from thread replies (the latter requires SDK ≥ 1.65.0-alpha.0).
@@ -107,14 +111,21 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
   });
   const prompt = buildCommentPrompt(target, ctx);
 
-  // One Claude session per cloud-doc; subsequent @-mentions in the same
+  // One agent session per cloud-doc; subsequent @-mentions in the same
   // doc continue the same conversation. cwd defaults to $HOME — the agent
   // probably won't do filesystem work for doc replies but we keep a sane
   // default in case it does.
   const synthChatId = `doc:${evt.fileToken}`;
   const cwd = workspaces.cwdFor(synthChatId) ?? homedir();
+  const requestedBackend = deps.backendStore?.get(synthChatId);
+  const backendKey = deps.agentRegistry
+    ? requestedBackend && deps.agentRegistry.has(requestedBackend)
+      ? requestedBackend
+      : deps.agentRegistry.defaultKey()
+    : deps.agent.id;
+  const agent = deps.agentRegistry ? await deps.agentRegistry.get(backendKey) : deps.agent;
   const resumeFrom = await ensureResumeSession(agent, sessions, synthChatId, cwd);
-  log.info('comment', 'session', { synthChatId, resumeFrom: resumeFrom ?? null, cwd });
+  log.info('comment', 'session', { synthChatId, resumeFrom: resumeFrom ?? null, cwd, backendKey });
 
   // Cloud-doc comments have no streaming UI — the user just sees their
   // @-mention sit there until our reply lands. Mark the triggering reply
@@ -162,7 +173,7 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
     await run.stop();
 
     let reply = stripMarkdown(answer.trim());
-    if (errorMsg) reply = `⚠️ Claude 报错：${errorMsg}`;
+    if (errorMsg) reply = `⚠️ ${agent.displayName} 报错：${errorMsg}`;
     if (!reply) reply = '（无回复内容）';
     if (reply.length > REPLY_MAX_CHARS) reply = `${reply.slice(0, REPLY_MAX_CHARS - 1)}…`;
 

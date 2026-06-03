@@ -109,6 +109,7 @@ Host CLI entries for `status`, `doctor`, `handover`, `workspace`, and `service` 
 | `/status` | Current cwd / session / agent / latest run (card + buttons) |
 | `/runs [run-id]` | Show recent runs for the current chat/topic, including status, failure reason, retry/stop buttons, and per-run details. |
 | `/backend [key\|default]` | Show or switch the current chat/topic's agent backend. |
+| `/doc bind <doc-url\|token> <backend\|default> <session-id>` | Pin a cloud-doc @bot scope to a specific backend/session. Use `/doc status <doc-url\|token>` or `/doc clear <doc-url\|token>` to inspect or remove the override. |
 | `/config` | Adjust preferences (reply style, tool-call display, ...) |
 | `/stop` | Stop the run in progress (also the `⏹` button on the card) |
 | `/timeout [N\|off\|default]` | Idle-watchdog (minutes) for the current session. `/config` sets the global default. See FAQ below. |
@@ -287,7 +288,7 @@ DMs are unaffected; only listed groups trigger responses:
 - **Admins**: your own `open_id`
 - Other two blank
 
-Others running `/account`, `/config`, `/exit`, `/reconnect`, `/doctor`, `/workers`, `/shell`, `/cd`, or `/ws` get a `❌ 此命令仅管理员可用` reply. Normal conversation (asking the bot to do things) is unaffected.
+Others running `/account`, `/config`, `/exit`, `/reconnect`, `/doctor`, `/workers`, `/shell`, `/cd`, `/ws`, or `/doc` get a `❌ 此命令仅管理员可用` reply. Normal conversation (asking the bot to do things) is unaffected.
 
 **Lock everything down**
 
