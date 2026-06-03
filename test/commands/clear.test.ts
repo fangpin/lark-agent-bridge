@@ -172,6 +172,24 @@ describe('/clear', () => {
     expect(dissolve).not.toHaveBeenCalled();
   });
 
+  test('short force flag continues through unsafe state and only removes local state with force', async () => {
+    const unsafe = clearTarget({
+      dirty: true,
+      unmerged: true,
+      safetyIssues: ['worktree has uncommitted or untracked changes'],
+    });
+    vi.spyOn(worktree, 'inspectWorktreeClearTarget').mockResolvedValue(unsafe);
+    vi.spyOn(worktree, 'removeGitWorktreeAndBranch').mockResolvedValue(undefined);
+    vi.spyOn(localHistory, 'removeLocalAgentHistory').mockResolvedValue([]);
+    const dissolve = vi.spyOn(group, 'dissolveChat');
+    const commandCtx = ctx('/clear -f');
+
+    await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
+
+    expect(worktree.removeGitWorktreeAndBranch).toHaveBeenCalledWith(unsafe, true);
+    expect(dissolve).not.toHaveBeenCalled();
+  });
+
   test('stops cleanup and keeps group when git removal fails', async () => {
     vi.spyOn(worktree, 'inspectWorktreeClearTarget').mockResolvedValue(clearTarget());
     vi.spyOn(worktree, 'removeGitWorktreeAndBranch').mockRejectedValue(new Error('branch not merged'));
