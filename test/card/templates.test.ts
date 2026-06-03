@@ -50,6 +50,7 @@ describe('runs cards', () => {
       '/status',
       '/runs [run-id]',
       '/backend [key|default]',
+      '/doc bind <doc-url|token> <backend|default> <session-id>',
       '/stop',
       '/timeout [N|off|default]',
       '/retry <run-id>',

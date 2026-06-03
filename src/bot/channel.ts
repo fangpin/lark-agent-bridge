@@ -301,9 +301,15 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     },
     comment: async (evt) => {
       await withTrace({ chatId: 'comment' }, async () => {
-        await handleCommentMention({ channel, evt, agent: startupAgent, sessions, workspaces }).catch((err) =>
-          log.fail('comment', err),
-        );
+        await handleCommentMention({
+          channel,
+          evt,
+          agent: startupAgent,
+          agentRegistry,
+          backendStore,
+          sessions,
+          workspaces,
+        }).catch((err) => log.fail('comment', err));
       }).catch((err) => log.fail('comment', err));
     },
     reconnecting: () => {

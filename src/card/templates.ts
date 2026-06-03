@@ -300,6 +300,7 @@ export function helpCard(): object {
         '- `/status` — 当前状态',
         '- `/runs [run-id]` — 查看最近运行、失败原因、重试/终止入口和单次详情',
         '- `/backend [key|default]` — 查看或切换当前 chat 的 agent backend',
+        '- `/doc bind <doc-url|token> <backend|default> <session-id>` — 指定某个云文档 @bot 时使用的 backend/session',
         '- `/stop` — 结束当前正在跑的任务（也可点卡片底部 ⏹ 终止 按钮）',
         '- `/timeout [N|off|default]` — 当前 session 的探活分钟数,`/config` 改全局默认',
         '- `/retry <run-id>` — 重放最近失败或超时的任务',

@@ -102,6 +102,44 @@ describe('channel streamMessageId persistence', () => {
     await vi.waitFor(() => expect(calls).toEqual(['codex']));
   });
 
+  test('runs cloud-doc comments with the backend selected for the doc scope', async () => {
+    const calls: string[] = [];
+    const claude = fakeNamedAgent('claude', calls);
+    const codex = fakeNamedAgent('codex', calls);
+    const registry = new AgentRegistry(['claude', 'codex'], 'claude', async (key) => key === 'codex' ? codex : claude);
+    const backendStore = { get: (scope: string) => scope === 'doc:doc-token' ? 'codex' : undefined, async flush() {} };
+    const sessions = {
+      ...fakeSessions(),
+      resumeFor: vi.fn((scope: string, _cwd: string, sessionKey: string) =>
+        scope === 'doc:doc-token' && sessionKey === 'codex' ? 'codex-session' : undefined,
+      ),
+    } as unknown as SessionStore;
+    const handlers: Record<string, (evt: never) => Promise<void>> = {};
+    const fakeChannel = createDocCommentChannel(handlers);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agentRegistry: registry,
+      backendStore: backendStore as never,
+      sessions,
+      workspaces: fakeWorkspaces('/tmp/doc-cwd'),
+      controls: fakeControls(textReplyConfig()),
+    });
+
+    await handlers.comment?.({
+      fileToken: 'doc-token',
+      fileType: 'docx',
+      commentId: 'comment-1',
+      replyId: 'reply-1',
+      mentionedBot: true,
+      operator: { openId: 'ou_user' },
+    } as never);
+
+    expect(calls).toEqual(['codex']);
+    expect(sessions.resumeFor).toHaveBeenCalledWith('doc:doc-token', '/tmp/doc-cwd', 'codex');
+  });
+
   test('sends a temporary check message after text reply runs finish', async () => {
     vi.useFakeTimers();
     const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
@@ -1538,6 +1576,50 @@ function createFakeChannel(handlers: Record<string, (msg: NormalizedMessage) => 
               return { data: { reaction_id: 'reaction-1' } };
             },
             async delete() {},
+          },
+        },
+      },
+    },
+  } as unknown as LarkChannel;
+}
+
+function createDocCommentChannel(handlers: Record<string, (evt: never) => Promise<void>>): LarkChannel {
+  const base = createFakeChannel(handlers as unknown as Record<string, (msg: NormalizedMessage) => Promise<void>>);
+  return {
+    ...base,
+    rawClient: {
+      ...base.rawClient,
+      request: vi.fn(async () => ({})),
+      wiki: {
+        v2: {
+          space: {
+            async getNode() {
+              return { data: {} };
+            },
+          },
+        },
+      },
+      drive: {
+        v1: {
+          fileComment: {
+            async get() {
+              return {
+                data: {
+                  is_whole: false,
+                  reply_list: {
+                    replies: [
+                      {
+                        reply_id: 'reply-1',
+                        content: { elements: [{ type: 'text_run', text_run: { text: 'doc question' } }] },
+                      },
+                    ],
+                  },
+                },
+              };
+            },
+            async create() {
+              return {};
+            },
           },
         },
       },
