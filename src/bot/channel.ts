@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import type {
+  CommentEvent,
   LarkChannel,
   LarkChannelOptions,
   NormalizedMessage,
@@ -42,6 +43,7 @@ import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
 import { sendCompletionCheckMessage } from './completion-check';
+import { CommentQueue } from './comment-queue';
 import { handleCommentMention } from './comments';
 import { startKeepalive } from './keepalive';
 import { configureNetwork } from './network-config';
@@ -66,6 +68,10 @@ const PROGRESS_REFRESH_MS = 15_000;
 const MAX_AUTO_RETRY_KEYS = 200;
 
 export type AutoRetryKeys = Set<string>;
+
+export function commentQueueScope(evt: { fileToken: string }): string {
+  return `doc:${evt.fileToken}`;
+}
 
 // Lark SDK logs API errors at error level even when the caller catches them.
 // These specific codes are EXPECTED in our flow (wiki-node lookup that
@@ -220,6 +226,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // queue so messages keep accumulating without flushing. When the run ends,
   // unblock immediately flushes anything queued. Net effect: at most one run
   // per chat in flight, no artificial delay before an idle scope starts work.
+  const commentQueue = new CommentQueue<CommentEvent>();
+
   const pending = new PendingQueue(PENDING_FLUSH_DELAY_MS, (scope, batch) => {
     const firstMsg = batch[0];
     if (!firstMsg) return;
@@ -300,17 +308,20 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       }).catch((err) => log.fail('cardAction', err));
     },
     comment: async (evt) => {
-      await withTrace({ chatId: 'comment' }, async () => {
-        await handleCommentMention({
-          channel,
-          evt,
-          agent: startupAgent,
-          agentRegistry,
-          backendStore,
-          sessions,
-          workspaces,
+      const scope = commentQueueScope(evt);
+      commentQueue.push(scope, evt, async (queuedEvt) => {
+        await withTrace({ chatId: scope }, async () => {
+          await handleCommentMention({
+            channel,
+            evt: queuedEvt,
+            agent: startupAgent,
+            agentRegistry,
+            backendStore,
+            sessions,
+            workspaces,
+          }).catch((err) => log.fail('comment', err));
         }).catch((err) => log.fail('comment', err));
-      }).catch((err) => log.fail('comment', err));
+      });
     },
     reconnecting: () => {
       consecutiveReconnects++;
@@ -375,6 +386,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     channel,
     disconnect: async () => {
       keepalive.stop();
+      commentQueue.cancelAll();
       pending.cancelAll();
       await channel.disconnect();
       await activeRuns.stopAll();

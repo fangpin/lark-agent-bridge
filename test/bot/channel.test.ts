@@ -10,6 +10,7 @@ import {
   interruptScopeNow,
   maybeEnqueueAutoRetryForOpaqueSdkError,
   processAgentStream,
+  commentQueueScope,
   shouldAutoRetryOpaqueSdkError,
   startChannel,
   summarizeBatchForHistory,
@@ -77,6 +78,10 @@ describe('summarizeBatchForHistory', () => {
   });
 });
 
+test('commentQueueScope uses document token', () => {
+  expect(commentQueueScope({ fileToken: 'doc-token' } as never)).toBe('doc:doc-token');
+});
+
 describe('channel streamMessageId persistence', () => {
   test('runs messages with the backend selected for the scope', async () => {
     const calls: string[] = [];
@@ -136,8 +141,55 @@ describe('channel streamMessageId persistence', () => {
       operator: { openId: 'ou_user' },
     } as never);
 
-    expect(calls).toEqual(['codex']);
+    await vi.waitFor(() => expect(calls).toEqual(['codex']));
     expect(sessions.resumeFor).toHaveBeenCalledWith('doc:doc-token', '/tmp/doc-cwd', 'codex');
+  });
+
+  test('serializes cloud-doc comments for the same document', async () => {
+    const calls: string[] = [];
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const agent = fakeAgentWithEvents(async function* (): AsyncGenerator<AgentEvent> {
+      calls.push('start');
+      if (calls.length === 1) await firstBlocked;
+      calls.push('end');
+      yield { type: 'text', delta: 'comment answer' };
+      yield { type: 'done' };
+    });
+    const handlers: Record<string, (evt: never) => Promise<void>> = {};
+    const fakeChannel = createDocCommentChannel(handlers);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent,
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/doc-cwd'),
+      controls: fakeControls(textReplyConfig()),
+    });
+
+    void handlers.comment?.({
+      fileToken: 'doc-token',
+      fileType: 'docx',
+      commentId: 'comment-1',
+      replyId: 'reply-1',
+      mentionedBot: true,
+      operator: { openId: 'ou_user' },
+    } as never);
+    void handlers.comment?.({
+      fileToken: 'doc-token',
+      fileType: 'docx',
+      commentId: 'comment-1',
+      replyId: 'reply-1',
+      mentionedBot: true,
+      operator: { openId: 'ou_user' },
+    } as never);
+
+    await vi.waitFor(() => expect(calls).toEqual(['start']));
+    releaseFirst();
+    await vi.waitFor(() => expect(calls).toEqual(['start', 'end', 'start', 'end']));
   });
 
   test('sends a temporary check message after text reply runs finish', async () => {

@@ -124,7 +124,7 @@ Host CLI entries for `status`, `doctor`, `handover`, `workspace`, and `service` 
 | `/help` | Help card |
 | Any other `/xxx` | Forwarded verbatim to the agent |
 
-**Reply policy**: in a DM, the bot replies to anything. In a **group (including topic groups), the bot only replies when `@`-mentioned** (default since 0.1.22); unmentioned messages are ignored. `@all` is never answered. Cloud-doc comments must mention the bot. To restore the older "always answer in groups" behaviour: `/config` → "Require @bot in groups" → No.
+**Reply policy**: in a DM, the bot replies to anything. In a **group (including topic groups), the bot only replies when `@`-mentioned** (default since 0.1.22); unmentioned messages are ignored. `@all` is never answered. Cloud-doc comments must mention the bot. Cloud-doc comment mentions are queued per document: if multiple comments in the same document @ the bot, they run one at a time in arrival order. Mentions from different documents can run concurrently. To restore the older "always answer in groups" behaviour: `/config` → "Require @bot in groups" → No.
 
 ## Data directories
 
