@@ -6,9 +6,11 @@ import type { ChatModeCache } from './chat-mode-cache';
  *
  *  - **p2p / group**: scope = `chatId`. Replies in regular groups thread the
  *    UI but share the chat's session (matches user expectation).
- *  - **topic group**: scope = `${chatId}:${threadId}` — each topic is an
- *    independent conversation with its own session / cwd / pending queue.
- *    Topic-group top-level messages (no threadId, rare) fall back to chatId.
+ *  - **threaded/topic message**: scope = `${chatId}:${threadId}` — each topic is an
+ *    independent conversation with its own session / pending queue.
+ *    Workspace cwd is keyed separately by chatId so all topics in one topic
+ *    group share cwd. Topic-group top-level messages (no threadId, rare) fall
+ *    back to chatId.
  *
  * Async because chat mode requires an API lookup (cached after first hit).
  * Callers typically await this once at intake/cardAction entry and pass
@@ -20,10 +22,10 @@ export async function scopeFor(
   threadId: string | undefined,
   cache: ChatModeCache,
 ): Promise<string> {
-  const mode = await cache.resolve(channel, chatId);
-  if (mode === 'topic' && threadId) {
+  if (threadId) {
     return `${chatId}:${threadId}`;
   }
+  await cache.resolve(channel, chatId);
   return chatId;
 }
 

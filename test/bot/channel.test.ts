@@ -107,6 +107,40 @@ describe('channel streamMessageId persistence', () => {
     await vi.waitFor(() => expect(calls).toEqual(['codex']));
   });
 
+  test('uses chat-level cwd for topic group runs while keeping topic session scope', async () => {
+    const runOptions: AgentRunOptions[] = [];
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const fakeChannel = {
+      ...createFakeChannel(messages),
+      async getChatMode() {
+        return 'topic';
+      },
+    } as unknown as LarkChannel;
+    const sessions = {
+      ...fakeSessions(),
+      resumeFor: vi.fn(() => undefined),
+    } as unknown as SessionStore;
+    const workspaces = {
+      cwdFor: vi.fn((scope: string) => (scope === 'chat-1' ? '/tmp/shared-topic-cwd' : undefined)),
+      async flush() {},
+    } as unknown as WorkspaceStore;
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent((opts) => runOptions.push(opts)),
+      sessions,
+      workspaces,
+      controls: fakeControls(textReplyConfig()),
+    });
+
+    await messages.message?.(fakeMessage('hello', 'topic prompt', { threadId: 'thread-1' }));
+
+    await vi.waitFor(() => expect(runOptions[0]?.cwd).toBe('/tmp/shared-topic-cwd'));
+    expect(workspaces.cwdFor).toHaveBeenCalledWith('chat-1');
+    expect(sessions.resumeFor).toHaveBeenCalledWith('chat-1:thread-1', '/tmp/shared-topic-cwd', 'fake:test');
+  });
+
   test('runs cloud-doc comments with the backend selected for the doc scope', async () => {
     const calls: string[] = [];
     const claude = fakeNamedAgent('claude', calls);
@@ -289,6 +323,65 @@ describe('channel streamMessageId persistence', () => {
           { replyTo: 'om_original', replyInThread: true },
         ),
       );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('threads the temporary check message when a thread id is present even if chat mode is group', async () => {
+    vi.useFakeTimers();
+    try {
+      const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+      const send = vi.fn(async (_chatId: string, payload: unknown) => {
+        const markdown = (payload as { markdown?: string }).markdown;
+        return { messageId: markdown === '请检查' ? 'om_check' : 'om_sent_text' };
+      });
+      const sessions = {
+        ...fakeSessions(),
+        resumeFor: vi.fn(() => undefined),
+      } as unknown as SessionStore;
+      const fakeChannel = {
+        ...createFakeChannel(messages),
+        send,
+        async getChatMode() {
+          return 'group';
+        },
+        rawClient: {
+          im: {
+            v1: {
+              message: { async delete() {} },
+              messageReaction: {
+                async create() {
+                  return { data: { reaction_id: 'reaction-1' } };
+                },
+                async delete() {},
+              },
+            },
+          },
+        },
+      } as unknown as LarkChannel;
+      vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+      await startChannel({
+        cfg: textReplyConfig(),
+        agent: fakeAgent(() => {}),
+        sessions,
+        workspaces: fakeWorkspaces('/tmp/project'),
+        controls: fakeControls(textReplyConfig()),
+      });
+
+      const onMessage = messages.message;
+      if (!onMessage) throw new Error('message handler was not registered');
+      await onMessage(fakeMessage('om_original', 'original prompt', { threadId: 'thread-1' }));
+
+      await vi.waitFor(() =>
+        expect(send).toHaveBeenCalledWith(
+          'chat-1',
+          { markdown: '请检查' },
+          { replyTo: 'om_original', replyInThread: true },
+        ),
+      );
+      expect(sessions.resumeFor).toHaveBeenCalledWith('chat-1:thread-1', '/tmp/project', 'fake:test');
     } finally {
       vi.useRealTimers();
     }

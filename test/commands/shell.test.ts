@@ -97,6 +97,32 @@ describe('shell command', () => {
     vi.useRealTimers();
   });
 
+  test('sends shell completion check in thread when thread id is present', async () => {
+    vi.useFakeTimers();
+    const ctx = commandContext('/shell node -e "process.exit(0)"', 'admin');
+    ctx.chatMode = 'group';
+    ctx.msg.threadId = 'thread-1';
+    const send = vi.fn(async (_chatId: string, payload: unknown) => {
+      const markdown = (payload as { markdown?: string }).markdown;
+      return { messageId: markdown === '请检查' ? 'om_check' : 'om_shell_result' };
+    });
+    ctx.channel = {
+      send,
+      rawClient: {
+        im: {
+          v1: {
+            message: { delete: vi.fn(async () => undefined) },
+          },
+        },
+      },
+    } as unknown as CommandContext['channel'];
+
+    await expect(tryHandleCommand(ctx)).resolves.toBe(true);
+
+    expect(send).toHaveBeenCalledWith('chat', { markdown: '请检查' }, { replyTo: 'msg', replyInThread: true });
+    vi.useRealTimers();
+  });
+
   test('is gated to admins', async () => {
     const ctx = commandContext('/shell echo nope');
 

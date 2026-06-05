@@ -82,9 +82,10 @@ export interface CommandContext {
   /**
    * Session scope string. For p2p / regular group it equals `msg.chatId`;
    * for topic groups it's `${chatId}:${threadId}` (so each topic gets its
-   * own session / cwd / active-run). All handlers should read/write
-   * session / workspace / activeRuns through this — never through
-   * `msg.chatId` directly.
+   * own session / active-run). Workspace cwd is keyed separately via
+   * `workspaceScope(ctx)`, so a topic group shares one cwd across topics.
+   * All handlers should read/write session / activeRuns through this —
+   * never through `msg.chatId` directly.
    */
   scope: string;
   /** Resolved chat mode for `msg.chatId`. Used by /status to surface the
@@ -112,6 +113,18 @@ type Handler = (args: string, ctx: CommandContext) => Promise<void>;
 interface ParsedCommand {
   cmd: string;
   args: string;
+}
+
+function workspaceScope(ctx: Pick<CommandContext, 'chatMode' | 'msg' | 'scope'>): string {
+  return ctx.msg.threadId ? ctx.msg.chatId : ctx.scope;
+}
+
+function workspaceCwd(ctx: Pick<CommandContext, 'chatMode' | 'msg' | 'scope' | 'workspaces'>): string | undefined {
+  return ctx.workspaces.cwdFor(workspaceScope(ctx));
+}
+
+function effectiveCwd(ctx: Pick<CommandContext, 'chatMode' | 'msg' | 'scope' | 'workspaces'>): string {
+  return workspaceCwd(ctx) ?? homedir();
 }
 
 const handlers: Record<string, Handler> = {
@@ -237,7 +250,7 @@ export async function runCommandHandler(
 function replyOptions(ctx: CommandContext): { replyTo: string; replyInThread?: true } {
   return {
     replyTo: ctx.msg.messageId,
-    ...(ctx.chatMode === 'topic' && ctx.msg.threadId ? { replyInThread: true as const } : {}),
+    ...(ctx.msg.threadId ? { replyInThread: true as const } : {}),
   };
 }
 
@@ -356,9 +369,9 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
   }
 
   const wasRunning = ctx.activeRuns.interrupt(ctx.scope);
-  await ctx.agent.evictScope?.(ctx.scope, ctx.workspaces.cwdFor(ctx.scope) ?? undefined);
+  await ctx.agent.evictScope?.(ctx.scope, workspaceCwd(ctx));
   ctx.sessions.clear(ctx.scope, ctx.agent.sessionKey);
-  const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  const cwd = effectiveCwd(ctx);
   await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, cwd);
   await replyCard(
     ctx,
@@ -381,7 +394,7 @@ async function handleNewWorktree(name: string, ctx: CommandContext): Promise<voi
     return;
   }
 
-  const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  const cwd = effectiveCwd(ctx);
   const prefix = getWorktreeBranchPrefix(ctx.controls.cfg);
   let createdWorktree;
   try {
@@ -419,7 +432,7 @@ async function handleNewWorktree(name: string, ctx: CommandContext): Promise<voi
 }
 
 async function handleNewChat(rawName: string, ctx: CommandContext): Promise<void> {
-  const sourceCwd = ctx.workspaces.cwdFor(ctx.scope);
+  const sourceCwd = workspaceCwd(ctx);
   const name = rawName || backendChatName(ctx.backendKey);
 
   let created;
@@ -463,7 +476,7 @@ async function handleCd(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, '用法：`/cd <路径>`，支持绝对路径、`~/xxx` 或相对当前 cwd 的路径。');
     return;
   }
-  const absolute = resolveCdInput(input, ctx.workspaces.cwdFor(ctx.scope) ?? homedir());
+  const absolute = resolveCdInput(input, effectiveCwd(ctx));
   try {
     const st = await stat(absolute);
     if (!st.isDirectory()) {
@@ -475,8 +488,8 @@ async function handleCd(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
   ctx.activeRuns.interrupt(ctx.scope);
-  await ctx.agent.evictScope?.(ctx.scope, ctx.workspaces.cwdFor(ctx.scope) ?? undefined);
-  ctx.workspaces.setCwd(ctx.scope, absolute);
+  await ctx.agent.evictScope?.(ctx.scope, workspaceCwd(ctx));
+  ctx.workspaces.setCwd(workspaceScope(ctx), absolute);
   ctx.sessions.clear(ctx.scope, ctx.agent.sessionKey);
   await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, absolute);
   await reply(ctx, `✓ 已切换 cwd 到 \`${absolute}\`\n（session 已重置）`);
@@ -504,7 +517,7 @@ async function handleWs(args: string, ctx: CommandContext): Promise<void> {
 
 async function handleWsList(ctx: CommandContext): Promise<void> {
   const named = ctx.workspaces.listNamed();
-  const currentCwd = ctx.workspaces.cwdFor(ctx.scope);
+  const currentCwd = workspaceCwd(ctx);
   const card = workspacesCard(currentCwd, named);
   await ctx.channel.send(ctx.msg.chatId, { card }, { replyTo: ctx.msg.messageId });
 }
@@ -514,7 +527,7 @@ async function handleWsSave(name: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, '用法：`/ws save <name>`');
     return;
   }
-  const cwd = ctx.workspaces.cwdFor(ctx.scope);
+  const cwd = workspaceCwd(ctx);
   if (!cwd) {
     await reply(ctx, '当前 chat 未设置 cwd，先用 `/cd` 设置再保存。');
     return;
@@ -534,8 +547,8 @@ async function handleWsUse(name: string, ctx: CommandContext): Promise<void> {
     return;
   }
   ctx.activeRuns.interrupt(ctx.scope);
-  await ctx.agent.evictScope?.(ctx.scope, ctx.workspaces.cwdFor(ctx.scope) ?? undefined);
-  ctx.workspaces.setCwd(ctx.scope, cwd);
+  await ctx.agent.evictScope?.(ctx.scope, workspaceCwd(ctx));
+  ctx.workspaces.setCwd(workspaceScope(ctx), cwd);
   ctx.sessions.clear(ctx.scope, ctx.agent.sessionKey);
   await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, cwd);
   await reply(ctx, `✓ 已切换到 \`${name}\` (${cwd})\n（session 已重置）`);
@@ -566,7 +579,7 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
   const n = Number.parseInt(sub, 10);
   const limit = Number.isFinite(n) && n > 0 && n <= 20 ? n : 5;
 
-  const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  const cwd = effectiveCwd(ctx);
   if (ctx.agent.id !== 'claude') {
     await reply(ctx, '当前 agent 暂不支持历史会话列表；已有 bridge session 会自动续上，可用 `/new` 开新会话。');
     return;
@@ -585,7 +598,7 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
 }
 
 async function applyResume(sessionId: string, ctx: CommandContext): Promise<void> {
-  const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  const cwd = effectiveCwd(ctx);
   ctx.activeRuns.interrupt(ctx.scope);
   ctx.sessions.set(ctx.scope, ctx.agent.sessionKey, sessionId, cwd);
   await reply(
@@ -616,7 +629,7 @@ async function handleRuns(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
-  const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  const cwd = effectiveCwd(ctx);
   await replyCard(ctx, runsCard({ cwd, entries: ctx.runHistory.list(ctx.scope, 10) }));
 }
 
@@ -643,7 +656,7 @@ async function handleBackend(args: string, ctx: CommandContext): Promise<void> {
 
   const nextAgent = await ctx.agentRegistry.get(nextKey);
   ctx.activeRuns.interrupt(ctx.scope);
-  await ctx.agent.evictScope?.(ctx.scope, ctx.workspaces.cwdFor(ctx.scope) ?? undefined);
+  await ctx.agent.evictScope?.(ctx.scope, workspaceCwd(ctx));
   if (requested === 'default') ctx.backendStore.clear(ctx.scope);
   else ctx.backendStore.set(ctx.scope, nextKey);
 
@@ -715,7 +728,7 @@ async function handleDocBindCurrentChat(docInput: string, ctx: CommandContext): 
 
   const previousKey = ctx.backendStore.get(scope);
   const previousAgent = await ctx.agentRegistry.getOrDefault(previousKey);
-  const cwd = currentSession.cwd ?? ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  const cwd = currentSession.cwd ?? effectiveCwd(ctx);
 
   ctx.activeRuns.interrupt(scope);
   await previousAgent.evictScope?.(scope, cwd);
@@ -857,7 +870,7 @@ async function handleDocClear(parts: string[], ctx: CommandContext): Promise<voi
 }
 
 async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
-  const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  const cwd = effectiveCwd(ctx);
   const sess = ctx.sessions.getRaw(ctx.scope, ctx.agent.sessionKey);
   const latestRun = ctx.runHistory?.list(ctx.scope, 1)[0];
   const card = statusCard({
@@ -1046,7 +1059,7 @@ async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, '这个任务状态不能重试；只有失败或超时的任务可以重试。');
     return;
   }
-  const currentCwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  const currentCwd = effectiveCwd(ctx);
   if (entry.cwd !== currentCwd) {
     await reply(ctx, '这个任务属于另一个工作目录，不能在当前 cwd 重试。');
     return;
@@ -1083,7 +1096,7 @@ async function handleShell(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
-  const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+  const cwd = effectiveCwd(ctx);
   log.info('command', 'shell-start', {
     cwd,
     commandChars: command.length,
@@ -1104,7 +1117,7 @@ async function handleShell(args: string, ctx: CommandContext): Promise<void> {
   await sendCompletionCheckMessage(
     ctx.channel,
     ctx.msg.chatId,
-    ctx.chatMode === 'topic' && ctx.msg.threadId ? replyOptions(ctx) : undefined,
+    ctx.msg.threadId ? replyOptions(ctx) : undefined,
   );
 }
 
@@ -1312,7 +1325,7 @@ async function handleClear(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
-  const cwd = ctx.workspaces.cwdFor(ctx.scope);
+  const cwd = workspaceCwd(ctx);
   if (!cwd) {
     await reply(ctx, '❌ 当前群没有绑定 cwd，无法判断要清理哪个 worktree。');
     return;
@@ -1355,7 +1368,7 @@ async function handleClear(args: string, ctx: CommandContext): Promise<void> {
     interrupted = ctx.activeRuns.interrupt(ctx.scope);
     await ctx.agent.evictScope?.(ctx.scope, cwd);
     ctx.sessions.clear(ctx.scope);
-    ctx.workspaces.clearCwd(ctx.scope);
+    ctx.workspaces.clearCwd(workspaceScope(ctx));
     ctx.backendStore?.clear(ctx.scope);
     historyPaths = await removeLocalAgentHistory(cwd);
     await removeGitWorktreeAndBranch(target, force);
@@ -1537,7 +1550,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
     return handleWorkers('', ctx);
   }
   if (args.trim().toLowerCase() === 'setup') {
-    const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
+    const cwd = effectiveCwd(ctx);
     const result = await runSetupDiagnostics({
       cfg: ctx.controls.cfg,
       configPath: ctx.controls.configPath,

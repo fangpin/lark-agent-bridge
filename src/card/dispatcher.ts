@@ -133,10 +133,10 @@ async function resolveScope(
 ): Promise<{ scope: string; threadId: string | undefined; mode: 'p2p' | 'group' | 'topic' }> {
   const chatId = deps.evt.chatId;
   const mode = await deps.chatModeCache.resolve(deps.channel, chatId);
-  if (mode !== 'topic') {
+  if (mode === 'p2p') {
     return { scope: chatId, threadId: undefined, mode };
   }
-  // Topic group — need the carrier message's thread_id to compose scope.
+  // Topic/threaded group — need the carrier message's thread_id to compose scope.
   // One API call per click; could cache by messageId if it ever becomes hot.
   const threadId = await lookupMessageThreadId(deps.channel, deps.evt.messageId);
   if (!threadId) {

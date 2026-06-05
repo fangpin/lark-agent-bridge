@@ -429,7 +429,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // Resolve scope (and underlying chat mode) once at intake — every
   // downstream consumer keys off these.
   const chatMode = await chatModeCache.resolve(channel, msg.chatId);
-  const scope = chatMode === 'topic' && msg.threadId
+  const scope = msg.threadId
     ? `${msg.chatId}:${msg.threadId}`
     : msg.chatId;
   log.info('intake', 'enter', {
@@ -576,7 +576,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const chatId = firstMsg.chatId;
   const threadId = firstMsg.threadId;
-  const cwd = workspaces.cwdFor(scope) ?? homedir();
+  const workspaceScope = threadId ? chatId : scope;
+  const cwd = workspaces.cwdFor(workspaceScope) ?? homedir();
   const historyEntry = runHistory.create(scope, batch, {
     cwd,
     agent: agent.descriptor,
@@ -734,7 +735,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // topic discussion breaks visually.
   const sendOpts: { replyTo: string; replyInThread?: true } = {
     replyTo: lastMsg.messageId,
-    ...(mode === 'topic' && threadId ? { replyInThread: true as const } : {}),
+    ...(threadId ? { replyInThread: true as const } : {}),
   };
 
   // Add a "Typing" reaction as an instant ack while the agent CLI is still
@@ -951,7 +952,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       await removeReaction(channel, lastMsg.messageId, reactionId);
     }
     if (finalState.terminal !== 'running') {
-      await sendCompletionCheckMessage(channel, chatId, mode === 'topic' && threadId ? sendOpts : undefined);
+      await sendCompletionCheckMessage(channel, chatId, threadId ? sendOpts : undefined);
     }
   }
 }
