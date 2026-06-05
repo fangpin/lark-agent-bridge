@@ -1101,7 +1101,11 @@ async function handleShell(args: string, ctx: CommandContext): Promise<void> {
   });
 
   await reply(ctx, formatShellResult(command, cwd, result));
-  await sendCompletionCheckMessage(ctx.channel, ctx.msg.chatId);
+  await sendCompletionCheckMessage(
+    ctx.channel,
+    ctx.msg.chatId,
+    ctx.chatMode === 'topic' && ctx.msg.threadId ? replyOptions(ctx) : undefined,
+  );
 }
 
 export function runShellCommand(

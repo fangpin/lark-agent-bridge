@@ -732,9 +732,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // For topic groups: thread the reply so it lands in the same topic as the
   // user's message. Otherwise the SDK posts at top level and the user's
   // topic discussion breaks visually.
-  const sendOpts = {
+  const sendOpts: { replyTo: string; replyInThread?: true } = {
     replyTo: lastMsg.messageId,
-    ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
+    ...(mode === 'topic' && threadId ? { replyInThread: true as const } : {}),
   };
 
   // Add a "Typing" reaction as an instant ack while the agent CLI is still
@@ -951,7 +951,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       await removeReaction(channel, lastMsg.messageId, reactionId);
     }
     if (finalState.terminal !== 'running') {
-      await sendCompletionCheckMessage(channel, chatId);
+      await sendCompletionCheckMessage(channel, chatId, mode === 'topic' && threadId ? sendOpts : undefined);
     }
   }
 }
@@ -1557,4 +1557,3 @@ function stripAttachmentRefs(text: string, fileKeys: string[]): string {
   }
   return out.replace(/\n{3,}/g, '\n\n');
 }
-

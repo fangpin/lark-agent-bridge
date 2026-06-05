@@ -4,10 +4,21 @@ import { log } from '../core/logger';
 const COMPLETION_CHECK_MARKDOWN = '请检查';
 const COMPLETION_CHECK_RECALL_MS = 12 * 60 * 60 * 1000;
 
-export async function sendCompletionCheckMessage(channel: LarkChannel, chatId: string): Promise<void> {
+export interface CompletionCheckSendOptions {
+  replyTo?: string;
+  replyInThread?: true;
+}
+
+export async function sendCompletionCheckMessage(
+  channel: LarkChannel,
+  chatId: string,
+  opts?: CompletionCheckSendOptions,
+): Promise<void> {
   let messageId: string | undefined;
   try {
-    const sent = (await channel.send(chatId, { markdown: COMPLETION_CHECK_MARKDOWN })) as { messageId?: string } | undefined;
+    const sent = (await (opts
+      ? channel.send(chatId, { markdown: COMPLETION_CHECK_MARKDOWN }, opts)
+      : channel.send(chatId, { markdown: COMPLETION_CHECK_MARKDOWN }))) as { messageId?: string } | undefined;
     messageId = sent?.messageId;
     log.info('completion-check', 'sent', { chatId, messageId });
   } catch (err) {
