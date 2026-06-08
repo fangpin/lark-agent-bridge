@@ -32,7 +32,7 @@ export interface CardDispatchDeps {
   backendStore?: BackendStore;
   controls: Controls;
   pending: PendingQueue;
-  persistentQueue?: PersistentQueue;
+  persistentQueue: PersistentQueue;
   runHistory: RunHistory;
   chatModeCache: ChatModeCache;
 }
@@ -84,7 +84,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   // into the scope's pending queue so claude resumes its session and sees
   // the click as a follow-up message, with full context of what it sent.
   if (CLAUDE_CALLBACK_MARKER in payload) {
-    forwardToClaude(deps, payload, formValue, scope, threadId);
+    await forwardToClaude(deps, payload, formValue, scope, threadId);
     return;
   }
 
@@ -109,6 +109,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     backendKey,
     controls: deps.controls,
     pending: deps.pending,
+    persistentQueue: deps.persistentQueue,
     runHistory: deps.runHistory,
     formValue,
     fromCardAction: true,
@@ -122,8 +123,8 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     const ok = await runCommandHandler(name ?? '', args, ctx);
     if (!ok) log.warn('cardAction', 'unknown', { cmd });
     if (ok && name === 'stop') {
-      const dropped = deps.pending.cancel(scope);
       const droppedPersistent = await deps.persistentQueue?.cancelScope(scope);
+      const dropped = deps.pending.cancel(scope);
       log.info('cardAction', 'stop-cancel-pending', { scope, droppedPending: dropped.length, droppedPersistent });
     }
   } catch (err) {
@@ -168,13 +169,13 @@ async function lookupMessageThreadId(
   }
 }
 
-function forwardToClaude(
+async function forwardToClaude(
   deps: CardDispatchDeps,
   payload: Record<string, unknown>,
   formValue: Record<string, unknown> | undefined,
   scope: string,
   threadId: string | undefined,
-): void {
+): Promise<void> {
   // Strip the marker so claude only sees the meaningful fields it set.
   const { [CLAUDE_CALLBACK_MARKER]: _marker, ...claudePayload } = payload;
   const merged = formValue ? { ...claudePayload, form_value: formValue } : claudePayload;
@@ -197,7 +198,12 @@ function forwardToClaude(
     mentionedBot: false,
     createTime: Date.now(),
   };
-  deps.pending.push(scope, synthetic);
+  try {
+    const record = await deps.persistentQueue.enqueue(scope, [synthetic]);
+    deps.pending.pushBatch(scope, [synthetic], { durableId: record.id });
+  } catch (err) {
+    log.fail('cardAction', err, { step: 'forward-claude-persist', scope });
+  }
 }
 
 /** Turn a button payload like {cmd:'ws.use', name:'proj-a'} into the arg

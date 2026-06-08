@@ -8,6 +8,7 @@ import type { AgentAdapter } from '../agent/types';
 import type { BackendStore } from '../backend/store';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { PendingQueue } from '../bot/pending-queue';
+import type { PersistentQueue } from '../bot/persistent-queue';
 import type { RunHistory } from '../bot/run-history';
 import {
   accountCurrentCard,
@@ -99,6 +100,7 @@ export interface CommandContext {
   backendKey: string;
   activeRuns: ActiveRuns;
   pending?: PendingQueue;
+  persistentQueue?: PersistentQueue;
   runHistory?: RunHistory;
   controls: Controls;
   /** Set when invoked from a CardKit 2.0 form submit. Keys are input `name`s. */
@@ -1042,7 +1044,7 @@ async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, '用法：`/retry <run-id>`，或点击失败卡片上的重试按钮。');
     return;
   }
-  if (!ctx.pending || !ctx.runHistory) {
+  if (!ctx.pending || !ctx.persistentQueue || !ctx.runHistory) {
     await reply(ctx, '当前运行环境不支持重试队列。');
     return;
   }
@@ -1068,11 +1070,10 @@ async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, '这个任务属于另一个 agent 后端，不能用当前 agent 重试。');
     return;
   }
+  const retryBatch = entry.batch.map((msg) => ({ ...msg }));
+  const record = await ctx.persistentQueue.enqueue(ctx.scope, retryBatch);
   ctx.activeRuns.interrupt(ctx.scope);
-  let size = 0;
-  for (const msg of entry.batch) {
-    size = ctx.pending.push(ctx.scope, msg);
-  }
+  const size = ctx.pending.pushBatch(ctx.scope, retryBatch, { durableId: record.id });
   await reply(ctx, `已重新排队上次任务（${entry.batch.length} 条消息，当前队列 ${size}）。`);
 }
 

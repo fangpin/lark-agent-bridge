@@ -369,8 +369,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     },
   });
 
-  await channel.connect();
   await restorePersistentQueue(persistentQueue, pending);
+  await channel.connect();
 
   const identity = channel.botIdentity;
   log.info('ws', 'connected', {
@@ -538,12 +538,13 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     backendKey: resolved.backendKey,
     activeRuns,
     pending,
+    persistentQueue,
     runHistory,
     controls,
   });
   if (handled) {
-    const dropped = pending.cancel(scope);
     const droppedPersistent = await persistentQueue.cancelScope(scope);
+    const dropped = pending.cancel(scope);
     log.info('intake', 'command', { scope, droppedPending: dropped.length, droppedPersistent });
     return;
   }
@@ -560,8 +561,8 @@ export async function interruptScopeNow(
   scope: string,
 ): Promise<{ interrupted: boolean; droppedPending: number; droppedPersistent: number }> {
   const interrupted = activeRuns.interrupt(scope);
-  const dropped = pending.cancel(scope);
   const droppedPersistent = await persistentQueue.cancelScope(scope);
+  const dropped = pending.cancel(scope);
   return { interrupted, droppedPending: dropped.length, droppedPersistent };
 }
 
@@ -989,6 +990,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       pending,
       persistentQueue,
       autoRetryKeys,
+    }).catch((err) => {
+      log.fail('run', err, { step: 'auto-retry-opaque-sdk-error', scope });
     });
     if (durableId && finalState.terminal !== 'running') {
       await persistentQueue.complete(durableId).catch((err) => {

@@ -14,6 +14,7 @@ import {
   maybeEnqueueAutoRetryForOpaqueSdkError,
   processAgentStream,
   commentQueueScope,
+  restorePersistentQueue,
   shouldAutoRetryOpaqueSdkError,
   startChannel as realStartChannel,
   summarizeBatchForHistory,
@@ -1769,6 +1770,53 @@ describe('interruptScopeNow', () => {
     expect(flushCount).toBe(0);
     expect(await persistentQueue.recoverable()).toEqual([]);
   });
+
+  test('keeps pending messages when durable cancellation fails', async () => {
+    const activeRuns = new ActiveRuns();
+    const pending = new PendingQueue(1000, () => {
+      throw new Error('should not flush while blocked');
+    });
+    pending.block('chat-1');
+    pending.push('chat-1', fakeMessage('queued-1'));
+    const persistentQueue = {
+      async cancelScope() {
+        throw new Error('disk cancel failed');
+      },
+    } as unknown as PersistentQueue;
+
+    await expect(interruptScopeNow(activeRuns, pending, persistentQueue, 'chat-1')).rejects.toThrow('disk cancel failed');
+
+    expect(pending.queuedSize('chat-1')).toBe(1);
+  });
+});
+
+describe('persistent queue restore ordering', () => {
+  test('restores older durable records before live messages can run', async () => {
+    const handlers: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const prompts: string[] = [];
+    const persistentQueue = tempPersistentQueue();
+    await persistentQueue.enqueue('chat-1', [fakeMessage('old-1', 'old prompt')], { id: 'old-1', now: 1000 });
+    const fakeChannel = {
+      ...createFakeChannel(handlers),
+      async connect() {
+        await handlers.message?.(fakeMessage('live-1', 'live prompt'));
+      },
+    } as unknown as LarkChannel;
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent((opts) => prompts.push(opts.prompt)),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+    expect(prompts[0]).toContain('old prompt');
+    expect(prompts[1]).toContain('live prompt');
+  });
 });
 
 describe('opaque Cursor SDK auto retry', () => {
@@ -1833,6 +1881,45 @@ describe('opaque Cursor SDK auto retry', () => {
     expect(pending.queuedSize('chat-1')).toBe(0);
     expect(await persistentQueue.recoverable()).toEqual([]);
     expect(flushed).toEqual([]);
+  });
+
+  test('run cleanup completes original durable record when auto retry persistence fails', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const completions: string[] = [];
+    const persistentQueue = tempPersistentQueue();
+    const original = await persistentQueue.enqueue('chat-1', [fakeMessage('msg-1', 'trigger opaque error')], {
+      id: 'original-1',
+      now: 1000,
+    });
+    const enqueue = vi.spyOn(persistentQueue, 'enqueue').mockImplementation(async (scope, batch, opts = {}) => {
+      if (!opts.id) throw new Error('auto retry durable enqueue failed');
+      return PersistentQueue.prototype.enqueue.call(persistentQueue, scope, batch, opts);
+    });
+    const complete = vi.spyOn(persistentQueue, 'complete').mockImplementation(async (id) => {
+      completions.push(id);
+      return PersistentQueue.prototype.complete.call(persistentQueue, id);
+    });
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgentWithEvents(async function* (): AsyncGenerator<AgentEvent> {
+        yield {
+          type: 'error',
+          message: 'sdk run failed (runId=run-1, status=error); Cursor returned no error detail',
+        };
+      }),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledWith(original.id));
+    expect(completions).toEqual([original.id]);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(await persistentQueue.recoverable()).toEqual([]);
   });
 });
 
