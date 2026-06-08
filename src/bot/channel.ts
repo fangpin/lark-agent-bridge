@@ -48,6 +48,7 @@ import { handleCommentMention } from './comments';
 import { startKeepalive } from './keepalive';
 import { configureNetwork } from './network-config';
 import { PendingQueue } from './pending-queue';
+import { PersistentQueue } from './persistent-queue';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, renderQuotedBlock, type QuotedContext } from './quote';
 import { addWorkingReaction, removeReaction } from './reaction';
@@ -143,6 +144,7 @@ export interface StartChannelDeps {
   sessions: SessionStore;
   workspaces: WorkspaceStore;
   controls: Controls;
+  persistentQueue?: PersistentQueue;
 }
 
 async function resolveAgentForScope(
@@ -221,6 +223,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
 
   const channel = createLarkChannel(opts);
   const media = new MediaCache(channel);
+  const persistentQueue = deps.persistentQueue ?? new PersistentQueue();
 
   // Pending → run handoff: while a run is active on a chat, block its pending
   // queue so messages keep accumulating without flushing. When the run ends,
@@ -228,15 +231,20 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // per chat in flight, no artificial delay before an idle scope starts work.
   const commentQueue = new CommentQueue<CommentEvent>();
 
-  const pending = new PendingQueue(PENDING_FLUSH_DELAY_MS, (scope, batch) => {
+  const pending = new PendingQueue(PENDING_FLUSH_DELAY_MS, (scope, batch, durableId) => {
     const firstMsg = batch[0];
     if (!firstMsg) return;
     pending.block(scope);
     void withTrace({ chatId: firstMsg.chatId }, async () => {
-      log.info('flush', 'start', { scope, batchSize: batch.length });
+      log.info('flush', 'start', { scope, batchSize: batch.length, durableId });
       // Pool slot acquired here, released in finally. Across-the-bridge cap.
       const release = await pool.acquire();
       try {
+        if (durableId) {
+          const runningRecord = await persistentQueue.markRunning(durableId);
+          if (!runningRecord) throw new Error(`persistent queue record missing before run: ${durableId}`);
+          log.info('queue', 'persistent-running', { scope, durableId });
+        }
         const mode = await chatModeCache.resolve(channel, firstMsg.chatId);
         const resolved = await resolveAgentForScope(scope, agentDeps);
         await runAgentBatch({
@@ -252,6 +260,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           mode,
           runHistory,
           pending,
+          persistentQueue,
+          durableId,
           autoRetryKeys,
         });
       } catch (err) {
@@ -279,6 +289,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           workspaces,
           activeRuns,
           pending,
+          persistentQueue,
           msg,
           controls,
           runHistory,
@@ -302,6 +313,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           backendStore,
           controls,
           pending,
+          persistentQueue,
           runHistory,
           chatModeCache,
         });
@@ -358,6 +370,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   });
 
   await channel.connect();
+  await restorePersistentQueue(persistentQueue, pending);
 
   const identity = channel.botIdentity;
   log.info('ws', 'connected', {
@@ -395,6 +408,24 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   };
 }
 
+export async function restorePersistentQueue(persistentQueue: PersistentQueue, pending: PendingQueue): Promise<number> {
+  const records = await persistentQueue.recoverable();
+  let restored = 0;
+  for (const record of records) {
+    if (record.messages.length === 0) continue;
+    const size = pending.pushBatch(record.scope, record.messages, { durableId: record.id });
+    restored++;
+    log.info('queue', 'persistent-restored', {
+      scope: record.scope,
+      durableId: record.id,
+      state: record.state,
+      batchSize: record.messages.length,
+      queueSize: size,
+    });
+  }
+  return restored;
+}
+
 interface IntakeDeps {
   channel: LarkChannel;
   agent: AgentAdapter;
@@ -404,6 +435,7 @@ interface IntakeDeps {
   workspaces: WorkspaceStore;
   activeRuns: ActiveRuns;
   pending: PendingQueue;
+  persistentQueue: PersistentQueue;
   runHistory: RunHistory;
   msg: NormalizedMessage;
   controls: Controls;
@@ -420,6 +452,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     workspaces,
     activeRuns,
     pending,
+    persistentQueue,
     runHistory,
     msg,
     controls,
@@ -482,11 +515,12 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const resolved = await resolveAgentForScope(scope, { agent, agentRegistry, backendStore });
 
   if (isStopCommandText(msg.content)) {
-    const result = interruptScopeNow(activeRuns, pending, scope);
+    const result = await interruptScopeNow(activeRuns, pending, persistentQueue, scope);
     log.info('intake', 'immediate-stop', {
       scope,
       interrupted: result.interrupted,
       droppedPending: result.droppedPending,
+      droppedPersistent: result.droppedPersistent,
     });
     return;
   }
@@ -509,22 +543,26 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   });
   if (handled) {
     const dropped = pending.cancel(scope);
-    log.info('intake', 'command', { scope, droppedPending: dropped.length });
+    const droppedPersistent = await persistentQueue.cancelScope(scope);
+    log.info('intake', 'command', { scope, droppedPending: dropped.length, droppedPersistent });
     return;
   }
 
-  const size = pending.push(scope, msg);
-  log.info('intake', 'queued', { scope, queueSize: size, flushDelayMs: PENDING_FLUSH_DELAY_MS });
+  const record = await persistentQueue.enqueue(scope, [msg]);
+  const size = pending.push(scope, msg, { durableId: record.id });
+  log.info('intake', 'queued', { scope, queueSize: size, flushDelayMs: PENDING_FLUSH_DELAY_MS, durableId: record.id });
 }
 
-export function interruptScopeNow(
+export async function interruptScopeNow(
   activeRuns: ActiveRuns,
   pending: PendingQueue,
+  persistentQueue: PersistentQueue,
   scope: string,
-): { interrupted: boolean; droppedPending: number } {
+): Promise<{ interrupted: boolean; droppedPending: number; droppedPersistent: number }> {
   const interrupted = activeRuns.interrupt(scope);
   const dropped = pending.cancel(scope);
-  return { interrupted, droppedPending: dropped.length };
+  const droppedPersistent = await persistentQueue.cancelScope(scope);
+  return { interrupted, droppedPending: dropped.length, droppedPersistent };
 }
 
 export function summarizeBatchForHistory(batch: NormalizedMessage[]): string {
@@ -550,6 +588,8 @@ interface RunBatchDeps {
   mode: ChatMode;
   runHistory: RunHistory;
   pending: PendingQueue;
+  persistentQueue: PersistentQueue;
+  durableId?: string;
   autoRetryKeys: AutoRetryKeys;
 }
 
@@ -567,6 +607,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     mode,
     runHistory,
     pending,
+    persistentQueue,
+    durableId,
     autoRetryKeys,
   } = deps;
   if (batch.length === 0) return;
@@ -939,14 +981,20 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       terminal: finalState.terminal,
       errorMsg: finalState.errorMsg,
     });
-    maybeEnqueueAutoRetryForOpaqueSdkError({
+    await maybeEnqueueAutoRetryForOpaqueSdkError({
       scope,
       batch,
       finalState,
       handleInterrupted: handle.interrupted,
       pending,
+      persistentQueue,
       autoRetryKeys,
     });
+    if (durableId && finalState.terminal !== 'running') {
+      await persistentQueue.complete(durableId).catch((err) => {
+        log.fail('queue', err, { step: 'persistent-complete', scope, durableId });
+      });
+    }
     activeRuns.unregister(scope, run);
     if (reactionId) {
       await removeReaction(channel, lastMsg.messageId, reactionId);
@@ -1101,15 +1149,16 @@ function withMarkdownRefreshCutoffNote(markdown: string): string {
   return `${markdown.trimEnd()}\n\n${MARKDOWN_REFRESH_CUTOFF_NOTE}`;
 }
 
-export function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
+export async function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
   scope: string;
   batch: NormalizedMessage[];
   finalState: RunState;
   handleInterrupted: boolean;
   pending: PendingQueue;
+  persistentQueue?: PersistentQueue;
   autoRetryKeys: AutoRetryKeys;
-}): boolean {
-  const { scope, batch, finalState, handleInterrupted, pending, autoRetryKeys } = opts;
+}): Promise<boolean> {
+  const { scope, batch, finalState, handleInterrupted, pending, persistentQueue, autoRetryKeys } = opts;
   const key = autoRetryKey(scope, batch);
   if (
     !shouldAutoRetryOpaqueSdkError(finalState, handleInterrupted, pending.queuedSize(scope)) ||
@@ -1119,13 +1168,14 @@ export function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
   }
 
   rememberAutoRetryKey(autoRetryKeys, key);
-  for (const msg of batch) {
-    pending.push(scope, { ...msg });
-  }
+  const retryBatch = batch.map((msg) => ({ ...msg }));
+  const record = persistentQueue ? await persistentQueue.enqueue(scope, retryBatch) : undefined;
+  pending.pushBatch(scope, retryBatch, record ? { durableId: record.id } : undefined);
   log.warn('run', 'auto-retry-opaque-sdk-error', {
     scope,
     batchSize: batch.length,
     runId: finalState.runId,
+    durableId: record?.id,
     errorMsg: finalState.errorMsg,
   });
   return true;

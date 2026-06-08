@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { createLarkChannel } from '@larksuiteoapi/node-sdk';
@@ -12,10 +15,11 @@ import {
   processAgentStream,
   commentQueueScope,
   shouldAutoRetryOpaqueSdkError,
-  startChannel,
+  startChannel as realStartChannel,
   summarizeBatchForHistory,
 } from '../../src/bot/channel';
 import { PendingQueue } from '../../src/bot/pending-queue';
+import { PersistentQueue } from '../../src/bot/persistent-queue';
 import { RunHistory } from '../../src/bot/run-history';
 import { createInitialState } from '../../src/card/run-state';
 import { renderText } from '../../src/card/text-renderer';
@@ -31,6 +35,10 @@ vi.mock('@larksuiteoapi/node-sdk', async () => {
     createLarkChannel: vi.fn(),
   };
 });
+
+async function startChannel(deps: Parameters<typeof realStartChannel>[0]): ReturnType<typeof realStartChannel> {
+  return realStartChannel(deps);
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -100,6 +108,7 @@ describe('channel streamMessageId persistence', () => {
       sessions: fakeSessions(),
       workspaces: fakeWorkspaces(process.cwd()),
       controls: fakeControls(textReplyConfig()),
+      persistentQueue: tempPersistentQueue(),
     });
 
     await messages.message?.(fakeMessage('hello'));
@@ -132,6 +141,7 @@ describe('channel streamMessageId persistence', () => {
       sessions,
       workspaces,
       controls: fakeControls(textReplyConfig()),
+      persistentQueue: tempPersistentQueue(),
     });
 
     await messages.message?.(fakeMessage('hello', 'topic prompt', { threadId: 'thread-1' }));
@@ -164,6 +174,7 @@ describe('channel streamMessageId persistence', () => {
       sessions,
       workspaces: fakeWorkspaces('/tmp/doc-cwd'),
       controls: fakeControls(textReplyConfig()),
+      persistentQueue: tempPersistentQueue(),
     });
 
     await handlers.comment?.({
@@ -202,6 +213,7 @@ describe('channel streamMessageId persistence', () => {
       sessions: fakeSessions(),
       workspaces: fakeWorkspaces('/tmp/doc-cwd'),
       controls: fakeControls(textReplyConfig()),
+      persistentQueue: tempPersistentQueue(),
     });
 
     void handlers.comment?.({
@@ -259,6 +271,7 @@ describe('channel streamMessageId persistence', () => {
       sessions: fakeSessions(),
       workspaces: fakeWorkspaces('/tmp/project'),
       controls: fakeControls(textReplyConfig()),
+      persistentQueue: tempPersistentQueue(),
     });
 
     const onMessage = messages.message;
@@ -310,6 +323,7 @@ describe('channel streamMessageId persistence', () => {
         sessions: fakeSessions(),
         workspaces: fakeWorkspaces('/tmp/project'),
         controls: fakeControls(textReplyConfig()),
+        persistentQueue: tempPersistentQueue(),
       });
 
       const onMessage = messages.message;
@@ -368,6 +382,7 @@ describe('channel streamMessageId persistence', () => {
         sessions,
         workspaces: fakeWorkspaces('/tmp/project'),
         controls: fakeControls(textReplyConfig()),
+        persistentQueue: tempPersistentQueue(),
       });
 
       const onMessage = messages.message;
@@ -408,6 +423,7 @@ describe('channel streamMessageId persistence', () => {
       sessions: fakeSessions(),
       workspaces: fakeWorkspaces('/tmp/project'),
       controls: fakeControls(textReplyConfig()),
+      persistentQueue: tempPersistentQueue(),
     });
 
     const onMessage = messages.message;
@@ -450,6 +466,7 @@ describe('channel streamMessageId persistence', () => {
       sessions: fakeSessions(),
       workspaces: fakeWorkspaces('/tmp/project'),
       controls: fakeControls(cfg),
+      persistentQueue: tempPersistentQueue(),
     });
 
     const onMessage = messages.message;
@@ -475,6 +492,7 @@ describe('channel streamMessageId persistence', () => {
       sessions: fakeSessions(),
       workspaces: fakeWorkspaces('/tmp/project'),
       controls: fakeControls(cfg),
+      persistentQueue: tempPersistentQueue(),
     });
 
     const onMessage = messages.message;
@@ -504,6 +522,7 @@ describe('channel streamMessageId persistence', () => {
       sessions: fakeSessions(),
       workspaces: fakeWorkspaces('/tmp/project'),
       controls: fakeControls(cfg),
+      persistentQueue: tempPersistentQueue(),
     });
 
     const onMessage = messages.message;
@@ -528,6 +547,7 @@ describe('channel streamMessageId persistence', () => {
       sessions: fakeSessions(),
       workspaces: fakeWorkspaces('/tmp/project'),
       controls: fakeControls(cfg),
+      persistentQueue: tempPersistentQueue(),
     });
 
     const onMessage = messages.message;
@@ -554,6 +574,7 @@ describe('channel streamMessageId persistence', () => {
       sessions: fakeSessions(),
       workspaces: fakeWorkspaces('/tmp/project'),
       controls: fakeControls(cfg),
+      persistentQueue: tempPersistentQueue(),
     });
 
     const onMessage = messages.message;
@@ -604,6 +625,7 @@ describe('channel streamMessageId persistence', () => {
       sessions: fakeSessions(),
       workspaces: fakeWorkspaces('/tmp/project'),
       controls: fakeControls(cfg),
+      persistentQueue: tempPersistentQueue(),
     });
 
     const onMessage = messages.message;
@@ -690,6 +712,7 @@ describe('channel streamMessageId persistence', () => {
         sessions: fakeSessions(),
         workspaces: fakeWorkspaces('/tmp/project'),
         controls: fakeControls(cfg),
+        persistentQueue: tempPersistentQueue(),
       });
 
       const onMessage = messages.message;
@@ -721,6 +744,10 @@ describe('channel streamMessageId persistence', () => {
       const streamReleased = new Promise<void>((resolve) => {
         releaseStream = resolve;
       });
+      let resolveStreamStarted!: () => void;
+      const streamStarted = new Promise<void>((resolve) => {
+        resolveStreamStarted = resolve;
+      });
       let resolvePeriodicStarted!: () => void;
       const periodicStarted = new Promise<void>((resolve) => {
         resolvePeriodicStarted = resolve;
@@ -733,6 +760,7 @@ describe('channel streamMessageId persistence', () => {
         ...createFakeChannel(messages),
         async stream(_chatId: string, payload: { markdown?: (ctrl: { messageId: string; setContent(markdown: string): Promise<void> }) => Promise<void> }) {
           if (!payload.markdown) throw new Error('markdown stream producer was not registered');
+          resolveStreamStarted();
           await payload.markdown({
             messageId: 'om_markdown_stream',
             async setContent() {},
@@ -762,11 +790,13 @@ describe('channel streamMessageId persistence', () => {
         sessions: fakeSessions(),
         workspaces: fakeWorkspaces('/tmp/project'),
         controls: fakeControls(cfg),
+        persistentQueue: tempPersistentQueue(),
       });
 
       const onMessage = messages.message;
       if (!onMessage) throw new Error('message handler was not registered');
       await onMessage(fakeMessage('om_original', 'original prompt'));
+      await streamStarted;
 
       await vi.advanceTimersByTimeAsync(10 * 60_000);
       await vi.advanceTimersByTimeAsync(30_000);
@@ -798,6 +828,10 @@ describe('channel streamMessageId persistence', () => {
       const streamReleased = new Promise<void>((resolve) => {
         releaseStream = resolve;
       });
+      let resolveStreamStarted!: () => void;
+      const streamStarted = new Promise<void>((resolve) => {
+        resolveStreamStarted = resolve;
+      });
       let resolvePeriodicStarted!: () => void;
       const periodicStarted = new Promise<void>((resolve) => {
         resolvePeriodicStarted = resolve;
@@ -810,6 +844,7 @@ describe('channel streamMessageId persistence', () => {
         ...createFakeChannel(messages),
         async stream(_chatId: string, payload: { markdown?: (ctrl: { messageId: string; setContent(markdown: string): Promise<void> }) => Promise<void> }) {
           if (!payload.markdown) throw new Error('markdown stream producer was not registered');
+          resolveStreamStarted();
           await payload.markdown({
             messageId: 'om_markdown_stream',
             async setContent() {},
@@ -839,11 +874,13 @@ describe('channel streamMessageId persistence', () => {
         sessions: fakeSessions(),
         workspaces: fakeWorkspaces('/tmp/project'),
         controls: fakeControls(cfg),
+        persistentQueue: tempPersistentQueue(),
       });
 
       const onMessage = messages.message;
       if (!onMessage) throw new Error('message handler was not registered');
       await onMessage(fakeMessage('om_original', 'original prompt'));
+      await streamStarted;
 
       await vi.advanceTimersByTimeAsync(10 * 60_000);
       await vi.advanceTimersByTimeAsync(30_000);
@@ -872,6 +909,10 @@ describe('channel streamMessageId persistence', () => {
       const streamReleased = new Promise<void>((resolve) => {
         releaseStream = resolve;
       });
+      let resolveStreamStarted!: () => void;
+      const streamStarted = new Promise<void>((resolve) => {
+        resolveStreamStarted = resolve;
+      });
       let resolveFirstPeriodicStarted!: () => void;
       const firstPeriodicStarted = new Promise<void>((resolve) => {
         resolveFirstPeriodicStarted = resolve;
@@ -893,6 +934,7 @@ describe('channel streamMessageId persistence', () => {
         ...createFakeChannel(messages),
         async stream(_chatId: string, payload: { markdown?: (ctrl: { messageId: string; setContent(markdown: string): Promise<void> }) => Promise<void> }) {
           if (!payload.markdown) throw new Error('markdown stream producer was not registered');
+          resolveStreamStarted();
           await payload.markdown({
             messageId: 'om_markdown_stream',
             async setContent() {},
@@ -931,11 +973,13 @@ describe('channel streamMessageId persistence', () => {
         sessions: fakeSessions(),
         workspaces: fakeWorkspaces('/tmp/project'),
         controls: fakeControls(cfg),
+        persistentQueue: tempPersistentQueue(),
       });
 
       const onMessage = messages.message;
       if (!onMessage) throw new Error('message handler was not registered');
       await onMessage(fakeMessage('om_original', 'original prompt'));
+      await streamStarted;
 
       await vi.advanceTimersByTimeAsync(10 * 60_000);
       await vi.advanceTimersByTimeAsync(30_000);
@@ -1005,6 +1049,7 @@ describe('channel streamMessageId persistence', () => {
       sessions: fakeSessions(),
       workspaces: fakeWorkspaces('/tmp/project'),
       controls: fakeControls(cfg),
+      persistentQueue: tempPersistentQueue(),
     });
 
     const onMessage = messages.message;
@@ -1032,6 +1077,10 @@ describe('channel streamMessageId persistence', () => {
       const streamReleased = new Promise<void>((resolve) => {
         releaseStream = resolve;
       });
+      let resolveStreamStarted!: () => void;
+      const streamStarted = new Promise<void>((resolve) => {
+        resolveStreamStarted = resolve;
+      });
       let resolveCutoffNoticeStarted!: () => void;
       const cutoffNoticeStarted = new Promise<void>((resolve) => {
         resolveCutoffNoticeStarted = resolve;
@@ -1052,6 +1101,7 @@ describe('channel streamMessageId persistence', () => {
         ...createFakeChannel(messages),
         async stream(_chatId: string, payload: { markdown?: (ctrl: { messageId: string; setContent(markdown: string): Promise<void> }) => Promise<void> }) {
           if (!payload.markdown) throw new Error('markdown stream producer was not registered');
+          resolveStreamStarted();
           await payload.markdown({
             messageId: 'om_markdown_stream',
             async setContent(markdown: string) {
@@ -1088,11 +1138,13 @@ describe('channel streamMessageId persistence', () => {
         sessions: fakeSessions(),
         workspaces: fakeWorkspaces('/tmp/project'),
         controls: fakeControls(cfg),
+        persistentQueue: tempPersistentQueue(),
       });
 
       const onMessage = messages.message;
       if (!onMessage) throw new Error('message handler was not registered');
       await onMessage(fakeMessage('om_original', 'original prompt'));
+      await streamStarted;
 
       await vi.advanceTimersByTimeAsync(10 * 60_000);
       await cutoffNoticeStarted;
@@ -1160,6 +1212,7 @@ describe('channel streamMessageId persistence', () => {
       sessions: fakeSessions(),
       workspaces: fakeWorkspaces('/tmp/project'),
       controls: fakeControls(cfg),
+      persistentQueue: tempPersistentQueue(),
     });
 
     const onMessage = messages.message;
@@ -1171,6 +1224,81 @@ describe('channel streamMessageId persistence', () => {
     const joined = cardUpdates.join('\n');
     expect(joined).not.toContain('已运行超过 10 分钟');
     expect(joined).not.toContain('飞书卡片将停止自动刷新');
+  });
+});
+
+describe('persistent queue recovery', () => {
+  test('restores queued and running records on startup', async () => {
+    const persistentQueue = tempPersistentQueue();
+    await persistentQueue.enqueue('chat-1', [fakeMessage('pq-queued', 'queued prompt')], { id: 'pq-queued', now: 1000 });
+    await persistentQueue.enqueue('chat-1', [fakeMessage('pq-running', 'running prompt')], { id: 'pq-running', now: 2000 });
+    await persistentQueue.markRunning('pq-running');
+    const prompts: string[] = [];
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent((opts) => prompts.push(opts.prompt)),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+    expect(prompts[0]).toContain('queued prompt');
+    expect(prompts[1]).toContain('running prompt');
+    await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
+  });
+
+  test('records accepted messages and deletes the record after completion', async () => {
+    const persistentQueue = tempPersistentQueue();
+    const prompts: string[] = [];
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent((opts) => prompts.push(opts.prompt)),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('om_original', 'persist me'));
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    expect(prompts[0]).toContain('persist me');
+    await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
+  });
+
+  test('/stop removes persistent records for the current scope', async () => {
+    const persistentQueue = tempPersistentQueue();
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent(() => {}),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+    await persistentQueue.enqueue('chat-1', [fakeMessage('seeded', 'seeded prompt')], { id: 'seeded', now: 1000 });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('stop-msg', '/stop'));
+
+    await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
   });
 });
 
@@ -1605,13 +1733,16 @@ describe('processAgentStream', () => {
 });
 
 describe('interruptScopeNow', () => {
-  test('interrupts the active run and drops queued messages immediately', () => {
+  test('interrupts the active run and drops queued and persistent messages immediately', async () => {
     let stopCount = 0;
     let flushCount = 0;
     const activeRuns = new ActiveRuns();
     const pending = new PendingQueue(0, () => {
       flushCount++;
     });
+    const persistentQueue = tempPersistentQueue();
+    await persistentQueue.enqueue('chat-1', [fakeMessage('durable-1')], { id: 'durable-1', now: 1000 });
+    await persistentQueue.enqueue('chat-1', [fakeMessage('durable-2')], { id: 'durable-2', now: 2000 });
     const run: AgentRun = {
       events: (async function* (): AsyncGenerator<AgentEvent> {})(),
       async stop() {
@@ -1627,14 +1758,16 @@ describe('interruptScopeNow', () => {
     pending.push('chat-1', fakeMessage('queued-1'));
     pending.push('chat-1', fakeMessage('queued-2'));
 
-    expect(interruptScopeNow(activeRuns, pending, 'chat-1')).toEqual({
+    await expect(interruptScopeNow(activeRuns, pending, persistentQueue, 'chat-1')).resolves.toEqual({
       interrupted: true,
       droppedPending: 2,
+      droppedPersistent: 2,
     });
     pending.unblock('chat-1');
 
     expect(stopCount).toBe(1);
     expect(flushCount).toBe(0);
+    expect(await persistentQueue.recoverable()).toEqual([]);
   });
 });
 
@@ -1653,11 +1786,12 @@ describe('opaque Cursor SDK auto retry', () => {
     expect(shouldAutoRetryOpaqueSdkError({ ...state, errorMsg: 'Cursor API 鉴权失败' }, false, 0)).toBe(false);
   });
 
-  test('queues the original batch once for opaque SDK status errors', () => {
+  test('queues the original batch once for opaque SDK status errors', async () => {
     const flushed: NormalizedMessage[][] = [];
     const pending = new PendingQueue(1000, (_scope, batch) => {
       flushed.push(batch);
     });
+    const persistentQueue = tempPersistentQueue();
     const batch = [fakeMessage('msg-1'), fakeMessage('msg-2')];
     const state = {
       ...createInitialState('run-1'),
@@ -1667,7 +1801,7 @@ describe('opaque Cursor SDK auto retry', () => {
     };
     const autoRetryKeys = new Set<string>();
 
-    expect(
+    await expect(
       maybeEnqueueAutoRetryForOpaqueSdkError({
         scope: 'chat-1',
         batch,
@@ -1675,12 +1809,17 @@ describe('opaque Cursor SDK auto retry', () => {
         handleInterrupted: false,
         pending,
         autoRetryKeys,
+        persistentQueue,
       }),
-    ).toBe(true);
+    ).resolves.toBe(true);
     expect(pending.queuedSize('chat-1')).toBe(2);
+    const records = await persistentQueue.recoverable();
+    expect(records).toHaveLength(1);
+    expect(records[0]?.messages.map((msg) => msg.messageId)).toEqual(['msg-1', 'msg-2']);
     pending.cancel('chat-1');
+    await persistentQueue.cancelScope('chat-1');
 
-    expect(
+    await expect(
       maybeEnqueueAutoRetryForOpaqueSdkError({
         scope: 'chat-1',
         batch,
@@ -1688,12 +1827,18 @@ describe('opaque Cursor SDK auto retry', () => {
         handleInterrupted: false,
         pending,
         autoRetryKeys,
+        persistentQueue,
       }),
-    ).toBe(false);
+    ).resolves.toBe(false);
     expect(pending.queuedSize('chat-1')).toBe(0);
+    expect(await persistentQueue.recoverable()).toEqual([]);
     expect(flushed).toEqual([]);
   });
 });
+
+function tempPersistentQueue(): PersistentQueue {
+  return new PersistentQueue(join(mkdtempSync(join(tmpdir(), 'channel-persistent-queue-')), 'queue.json'));
+}
 
 function fakeMessage(messageId: string, content = 'queued', overrides: Partial<NormalizedMessage> = {}): NormalizedMessage {
   return {

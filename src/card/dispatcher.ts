@@ -5,6 +5,7 @@ import type { BackendStore } from '../backend/store';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { ChatModeCache } from '../bot/chat-mode-cache';
 import type { PendingQueue } from '../bot/pending-queue';
+import type { PersistentQueue } from '../bot/persistent-queue';
 import type { RunHistory } from '../bot/run-history';
 import { runCommandHandler, type CommandContext, type Controls } from '../commands';
 import { isChatAllowed, isUserAllowed } from '../config/schema';
@@ -31,6 +32,7 @@ export interface CardDispatchDeps {
   backendStore?: BackendStore;
   controls: Controls;
   pending: PendingQueue;
+  persistentQueue?: PersistentQueue;
   runHistory: RunHistory;
   chatModeCache: ChatModeCache;
 }
@@ -121,7 +123,8 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     if (!ok) log.warn('cardAction', 'unknown', { cmd });
     if (ok && name === 'stop') {
       const dropped = deps.pending.cancel(scope);
-      log.info('cardAction', 'stop-cancel-pending', { scope, droppedPending: dropped.length });
+      const droppedPersistent = await deps.persistentQueue?.cancelScope(scope);
+      log.info('cardAction', 'stop-cancel-pending', { scope, droppedPending: dropped.length, droppedPersistent });
     }
   } catch (err) {
     log.fail('cardAction', err, { cmd });
