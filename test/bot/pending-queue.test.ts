@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { PendingQueue } from '../../src/bot/pending-queue';
 
@@ -48,15 +48,21 @@ describe('PendingQueue', () => {
   });
 
   test('flushes durable batch ids with queued messages', () => {
-    const flushed: Array<{ durableId: string | undefined; ids: string[] }> = [];
-    const queue = new PendingQueue(0, (_scope, batch, durableId) => {
-      flushed.push({ durableId, ids: batch.map((m) => m.messageId) });
-    });
+    vi.useFakeTimers();
+    try {
+      const flushed: Array<{ durableId: string | undefined; ids: string[] }> = [];
+      const queue = new PendingQueue(1000, (_scope, batch, durableId) => {
+        flushed.push({ durableId, ids: batch.map((m) => m.messageId) });
+      });
 
-    queue.push('chat-1', msg('m1'), { durableId: 'pq-1' });
-    queue.push('chat-1', msg('m2'), { durableId: 'pq-1' });
+      queue.push('chat-1', msg('m1'), { durableId: 'pq-1' });
+      queue.push('chat-1', msg('m2'), { durableId: 'pq-1' });
+      vi.advanceTimersByTime(1000);
 
-    expect(flushed).toEqual([{ durableId: 'pq-1', ids: ['m1', 'm2'] }]);
+      expect(flushed).toEqual([{ durableId: 'pq-1', ids: ['m1', 'm2'] }]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test('pushes recovered batches as one durable unit', () => {
@@ -69,5 +75,67 @@ describe('PendingQueue', () => {
 
     expect(size).toBe(2);
     expect(flushed).toEqual([{ durableId: 'pq-restored', ids: ['m1', 'm2'] }]);
+  });
+
+  test('flushes durable messages synchronously when delay is disabled', () => {
+    const flushed: Array<{ durableId: string | undefined; ids: string[] }> = [];
+    const queue = new PendingQueue(0, (_scope, batch, durableId) => {
+      flushed.push({ durableId, ids: batch.map((m) => m.messageId) });
+    });
+
+    const size = queue.push('chat-1', msg('m1'), { durableId: 'pq-1' });
+
+    expect(size).toBe(1);
+    expect(flushed).toEqual([{ durableId: 'pq-1', ids: ['m1'] }]);
+    expect(queue.queuedSize('chat-1')).toBe(0);
+    expect(queue.cancel('chat-1')).toEqual([]);
+  });
+
+  test('does not merge different durable ids into one flush', () => {
+    vi.useFakeTimers();
+    try {
+      const flushed: Array<{ durableId: string | undefined; ids: string[] }> = [];
+      const queue = new PendingQueue(1000, (_scope, batch, durableId) => {
+        flushed.push({ durableId, ids: batch.map((m) => m.messageId) });
+      });
+
+      queue.push('chat-1', msg('m1'), { durableId: 'pq-1' });
+      const size = queue.push('chat-1', msg('m2'), { durableId: 'pq-2' });
+
+      expect(flushed).toEqual([{ durableId: 'pq-1', ids: ['m1'] }]);
+      expect(size).toBe(1);
+      expect(queue.queuedSize('chat-1')).toBe(1);
+
+      vi.advanceTimersByTime(1000);
+
+      expect(flushed).toEqual([
+        { durableId: 'pq-1', ids: ['m1'] },
+        { durableId: 'pq-2', ids: ['m2'] },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('keeps different durable ids separate while blocked', () => {
+    const flushed: Array<{ durableId: string | undefined; ids: string[] }> = [];
+    const queue = new PendingQueue(0, (_scope, batch, durableId) => {
+      flushed.push({ durableId, ids: batch.map((m) => m.messageId) });
+    });
+
+    queue.block('chat-1');
+    queue.push('chat-1', msg('m1'), { durableId: 'pq-1' });
+    queue.push('chat-1', msg('m2'), { durableId: 'pq-2' });
+
+    expect(flushed).toEqual([]);
+    expect(queue.queuedSize('chat-1')).toBe(2);
+
+    queue.unblock('chat-1');
+
+    expect(flushed).toEqual([
+      { durableId: 'pq-1', ids: ['m1'] },
+      { durableId: 'pq-2', ids: ['m2'] },
+    ]);
+    expect(queue.queuedSize('chat-1')).toBe(0);
   });
 });
