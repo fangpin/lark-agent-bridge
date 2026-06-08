@@ -136,7 +136,7 @@ function normalizeMessage(value: unknown): NormalizedMessage | undefined {
   if (!isObject(value)) return undefined;
   if (typeof value.messageId !== 'string') return undefined;
   if (typeof value.chatId !== 'string') return undefined;
-  if (typeof value.chatType !== 'string') return undefined;
+  if (value.chatType !== 'p2p' && value.chatType !== 'group') return undefined;
   if (typeof value.senderId !== 'string') return undefined;
   if (typeof value.content !== 'string') return undefined;
   if (typeof value.rawContentType !== 'string') return undefined;

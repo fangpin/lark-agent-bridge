@@ -357,6 +357,41 @@ describe('PersistentQueue', () => {
     expect(records[0]!.messages.map((message) => message.messageId)).toEqual(['m1', 'm2']);
   });
 
+  test('skips messages with invalid chatType while preserving valid messages', async () => {
+    const file = queueFile();
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        records: [
+          { id: 'valid', scope: 'scope-a', messages: [msg('m1')], state: 'queued', createdAt: 1_000, updatedAt: 1_000 },
+          {
+            id: 'mixed-chat-types',
+            scope: 'scope-a',
+            messages: [msg('m2'), { ...msg('m3'), chatType: 'invalid' }, msg('m4')],
+            state: 'queued',
+            createdAt: 2_000,
+            updatedAt: 2_000,
+          },
+          {
+            id: 'invalid-chat-type',
+            scope: 'scope-a',
+            messages: [{ ...msg('m5'), chatType: 'invalid' }],
+            state: 'queued',
+            createdAt: 3_000,
+            updatedAt: 3_000,
+          },
+        ],
+      }),
+    );
+
+    const records = await new PersistentQueue(file).recoverable();
+
+    expect(records.map((record) => record.id)).toEqual(['valid', 'mixed-chat-types']);
+    expect(records[0]!.messages.map((message) => message.messageId)).toEqual(['m1']);
+    expect(records[1]!.messages.map((message) => message.messageId)).toEqual(['m2', 'm4']);
+  });
+
   test('skips records when all messages are malformed', async () => {
     const file = queueFile();
     await writeFile(
