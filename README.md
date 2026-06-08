@@ -97,7 +97,7 @@ Host CLI entries for `status`, `doctor`, `handover`, `workspace`, and `service` 
 |---|---|
 | `/new`, `/reset` | Clear the current chat's session |
 | `/new chat [name]` | Create a new group chat, invite you, and bind it to a fresh session |
-| `/new worktree <name>` | Create a new git worktree from `origin/main` (or `origin/master` fallback), create a backend-labeled group chat, and bind that chat cwd to the worktree. |
+| `/new worktree <name> [backend]` | Create a new git worktree from `origin/main` (or `origin/master` fallback), create a backend-labeled group chat, and bind that chat cwd/backend to the worktree. |
 | `/clear [--force|-f]` | In a worktree-bound group, clean the current worktree, clear bridge state/history, delete the branch, and dissolve the group. Without `--force`/`-f`, dirty or unmerged worktrees are refused. |
 | `/resume [N]` | List and restore recent local agent sessions for the current cwd |
 | `/cd <path>` | Switch working directory (resets session) |
@@ -181,7 +181,7 @@ A single bridge process can expose multiple backend profiles and choose one per 
 
 Sessions are isolated by backend. New bound groups use the current backend label at the end of the group name, and `/backend` best-effort renames group chats with the selected backend suffix.
 
-`/new worktree <name>` uses `preferences.worktreeBranchPrefix` for the branch prefix (default `feat`). For example, from cwd `~/repos/project_a`, prefix `pin`, and name `abc`, it creates branch `pin/abc` and worktree path `~/repos/project_a_pin_abc`.
+`/new worktree <name> [backend]` uses `preferences.worktreeBranchPrefix` for the branch prefix (default `feat`). For example, from cwd `~/repos/project_a`, prefix `pin`, and name `abc`, it creates branch `pin/abc` and worktree path `~/repos/project_a_pin_abc`. If `[backend]` is provided, the new group is labeled and bound to that backend instead of the current chat backend.
 
 ### Cursor backend (`@cursor/sdk` or CLI)
 

@@ -289,7 +289,7 @@ export function helpCard(): object {
         '',
         '- `/new` `/reset` — 清空当前 chat 的会话',
         '- `/new chat [name]` — 新建群+新会话，自动拉你进群',
-        '- `/new worktree <name>` — 创建 git worktree，并新建绑定群聊',
+        '- `/new worktree <name> [backend]` — 创建 git worktree，并新建绑定群聊',
         '- `/clear [--force|-f]` — 清理当前 worktree 群的本地状态',
         '- `/resume [N]` — 列出并恢复历史会话（最多 N 条）',
         '- `/cd <path>` — 切换工作目录（会重置 session）',

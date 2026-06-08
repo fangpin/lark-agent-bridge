@@ -358,8 +358,8 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
   const trimmed = args.trim();
 
   if (trimmed === 'worktree' || trimmed.startsWith('worktree ')) {
-    const name = trimmed === 'worktree' ? '' : trimmed.slice('worktree'.length).trim();
-    return handleNewWorktree(name, ctx);
+    const args = trimmed === 'worktree' ? '' : trimmed.slice('worktree'.length).trim();
+    return handleNewWorktree(args, ctx);
   }
 
   // /new chat [name]  — spin up a fresh group chat bound to a fresh session
@@ -387,11 +387,33 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
   );
 }
 
-async function handleNewWorktree(name: string, ctx: CommandContext): Promise<void> {
+async function handleNewWorktree(args: string, ctx: CommandContext): Promise<void> {
+  const [name = '', requestedBackend, ...extra] = args.split(/\s+/).filter(Boolean);
+  const usage = '用法：`/new worktree <name> [backend]`';
+  if (extra.length > 0) {
+    await reply(ctx, `❌ 参数过多。\n${usage}`);
+    return;
+  }
+
   const validationError = validateWorktreeName(name);
   if (validationError) {
-    await reply(ctx, `❌ ${validationError}\n用法：\`/new worktree <name>\``);
+    await reply(ctx, `❌ ${validationError}\n${usage}`);
     return;
+  }
+
+  const backendKey = requestedBackend === 'default'
+    ? (ctx.agentRegistry?.defaultKey() ?? ctx.backendKey)
+    : (requestedBackend ?? ctx.backendKey);
+  if (requestedBackend) {
+    if (ctx.agentRegistry) {
+      if (!ctx.agentRegistry.has(backendKey)) {
+        await reply(ctx, `未知 backend：\`${requestedBackend}\`\n可用 backend：${ctx.agentRegistry.keys().map((key) => `\`${key}\``).join(', ')}`);
+        return;
+      }
+    } else if (backendKey !== ctx.backendKey) {
+      await reply(ctx, '当前运行环境不支持多 backend。');
+      return;
+    }
   }
 
   const cwd = effectiveCwd(ctx);
@@ -408,7 +430,7 @@ async function handleNewWorktree(name: string, ctx: CommandContext): Promise<voi
   try {
     createdChat = await createBoundChat({
       channel: ctx.channel,
-      name: nameWithBackend(name, ctx.backendKey),
+      name: nameWithBackend(name, backendKey),
       inviteOpenId: ctx.msg.senderId,
     });
   } catch (err) {
@@ -421,7 +443,10 @@ async function handleNewWorktree(name: string, ctx: CommandContext): Promise<voi
   }
 
   ctx.workspaces.setCwd(createdChat.chatId, createdWorktree.path);
-  ctx.backendStore?.set(createdChat.chatId, ctx.backendKey);
+  if (ctx.backendStore) {
+    if (requestedBackend === 'default') ctx.backendStore.clear(createdChat.chatId);
+    else ctx.backendStore.set(createdChat.chatId, backendKey);
+  }
   await reply(
     ctx,
     `✓ 已创建 worktree 群聊：${createdChat.name}\n` +

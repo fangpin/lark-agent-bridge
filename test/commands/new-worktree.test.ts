@@ -28,6 +28,10 @@ function fakeAgent(key: string): AgentAdapter {
 function ctx(content: string, senderId = 'admin'): CommandContext {
   const send = vi.fn(async () => ({ messageId: 'sent-1' }));
   const create = vi.fn(async () => ({ data: { chat_id: 'chat-new' } }));
+  const agents = new Map([
+    ['codex', fakeAgent('codex')],
+    ['claude', fakeAgent('claude')],
+  ]);
   return {
     channel: { send, rawClient: { im: { v1: { chat: { create } } } } },
     msg: { chatId: 'chat-1', messageId: 'msg-1', senderId, content, rawContentType: 'text', resources: [], mentions: [], mentionAll: false, mentionedBot: true, createTime: Date.now() },
@@ -35,7 +39,13 @@ function ctx(content: string, senderId = 'admin'): CommandContext {
     chatMode: 'group',
     sessions: { clear: vi.fn(), getRaw: vi.fn() },
     workspaces: { cwdFor: () => '/home/me/repos/project_a', setCwd: vi.fn() },
-    agent: fakeAgent('codex'),
+    agent: agents.get('codex'),
+    agentRegistry: {
+      defaultKey: () => 'codex',
+      keys: () => [...agents.keys()],
+      has: (key: string) => agents.has(key),
+      get: async (key: string) => agents.get(key),
+    },
     backendKey: 'codex',
     backendStore: { get: vi.fn(), set: vi.fn(), clear: vi.fn() },
     activeRuns: { interrupt: vi.fn(() => false) },
@@ -75,6 +85,26 @@ describe('/new worktree', () => {
     expect(commandCtx.channel.send).toHaveBeenCalledWith('chat-1', { markdown: expect.stringContaining('pin/abc') }, { replyTo: 'msg-1' });
   });
 
+  test('creates a worktree group bound to the requested backend', async () => {
+    vi.spyOn(worktree, 'createGitWorktree').mockResolvedValue({
+      name: 'abc',
+      branch: 'pin/abc',
+      path: '/home/me/repos/project_a_pin_abc',
+      base: 'origin/main',
+    });
+    const commandCtx = ctx('/new worktree abc claude');
+
+    await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
+
+    expect(worktree.createGitWorktree).toHaveBeenCalledWith('/home/me/repos/project_a', 'pin', 'abc');
+    expect(commandCtx.channel.rawClient.im.v1.chat.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ name: 'abc · Claude' }),
+      params: { user_id_type: 'open_id' },
+    });
+    expect(commandCtx.backendStore?.set).toHaveBeenCalledWith('chat-new', 'claude');
+    expect(commandCtx.backendStore?.set).not.toHaveBeenCalledWith('chat-new', 'codex');
+  });
+
   test('keeps created worktree details visible when group chat creation fails', async () => {
     vi.spyOn(worktree, 'createGitWorktree').mockResolvedValue({
       name: 'abc',
@@ -109,11 +139,21 @@ describe('/new worktree', () => {
 
   test('rejects invalid worktree names before running git', async () => {
     const createGitWorktree = vi.spyOn(worktree, 'createGitWorktree');
-    const commandCtx = ctx('/new worktree fix login');
+    const commandCtx = ctx('/new worktree fix/login');
 
     await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
 
     expect(createGitWorktree).not.toHaveBeenCalled();
     expect(commandCtx.channel.send).toHaveBeenCalledWith('chat-1', { markdown: expect.stringContaining('只能包含') }, { replyTo: 'msg-1' });
+  });
+
+  test('rejects unknown backend before running git', async () => {
+    const createGitWorktree = vi.spyOn(worktree, 'createGitWorktree');
+    const commandCtx = ctx('/new worktree abc missing');
+
+    await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
+
+    expect(createGitWorktree).not.toHaveBeenCalled();
+    expect(commandCtx.channel.send).toHaveBeenCalledWith('chat-1', { markdown: expect.stringContaining('未知 backend') }, { replyTo: 'msg-1' });
   });
 });

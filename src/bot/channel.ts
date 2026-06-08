@@ -946,6 +946,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       handleInterrupted: handle.interrupted,
       pending,
       autoRetryKeys,
+      sessions,
+      sessionKey,
     });
     activeRuns.unregister(scope, run);
     if (reactionId) {
@@ -1108,8 +1110,10 @@ export function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
   handleInterrupted: boolean;
   pending: PendingQueue;
   autoRetryKeys: AutoRetryKeys;
+  sessions?: SessionStore;
+  sessionKey?: string;
 }): boolean {
-  const { scope, batch, finalState, handleInterrupted, pending, autoRetryKeys } = opts;
+  const { scope, batch, finalState, handleInterrupted, pending, autoRetryKeys, sessions, sessionKey } = opts;
   const key = autoRetryKey(scope, batch);
   if (
     !shouldAutoRetryOpaqueSdkError(finalState, handleInterrupted, pending.queuedSize(scope)) ||
@@ -1119,6 +1123,11 @@ export function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
   }
 
   rememberAutoRetryKey(autoRetryKeys, key);
+  let clearedSessionKey: string | undefined;
+  if (sessions && sessionKey === 'cursor:sdk') {
+    sessions.clear(scope, sessionKey);
+    clearedSessionKey = sessionKey;
+  }
   for (const msg of batch) {
     pending.push(scope, { ...msg });
   }
@@ -1127,6 +1136,7 @@ export function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
     batchSize: batch.length,
     runId: finalState.runId,
     errorMsg: finalState.errorMsg,
+    clearedSessionKey,
   });
   return true;
 }

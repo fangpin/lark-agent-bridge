@@ -1666,6 +1666,7 @@ describe('opaque Cursor SDK auto retry', () => {
         'sdk run failed (runId=run-87dd74df-deb6-45ca-8862-85847622ee9a, status=error); Cursor returned no error detail',
     };
     const autoRetryKeys = new Set<string>();
+    const clearSession = vi.fn();
 
     expect(
       maybeEnqueueAutoRetryForOpaqueSdkError({
@@ -1675,9 +1676,12 @@ describe('opaque Cursor SDK auto retry', () => {
         handleInterrupted: false,
         pending,
         autoRetryKeys,
+        sessions: { clear: clearSession } as unknown as SessionStore,
+        sessionKey: 'cursor:sdk',
       }),
     ).toBe(true);
     expect(pending.queuedSize('chat-1')).toBe(2);
+    expect(clearSession).toHaveBeenCalledWith('chat-1', 'cursor:sdk');
     pending.cancel('chat-1');
 
     expect(
@@ -1688,9 +1692,12 @@ describe('opaque Cursor SDK auto retry', () => {
         handleInterrupted: false,
         pending,
         autoRetryKeys,
+        sessions: { clear: clearSession } as unknown as SessionStore,
+        sessionKey: 'cursor:sdk',
       }),
     ).toBe(false);
     expect(pending.queuedSize('chat-1')).toBe(0);
+    expect(clearSession).toHaveBeenCalledTimes(1);
     expect(flushed).toEqual([]);
   });
 });

@@ -37,7 +37,7 @@ describe('runs cards', () => {
       '/new',
       '/reset',
       '/new chat [name]',
-      '/new worktree <name>',
+      '/new worktree <name> [backend]',
       '/resume [N]',
       '/cd <path>',
       '/ws list',
