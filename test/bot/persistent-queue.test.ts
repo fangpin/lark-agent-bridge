@@ -72,6 +72,31 @@ describe('PersistentQueue', () => {
     expect(reloaded.map((record) => record.id)).toEqual(['second']);
   });
 
+  test('serializes concurrent enqueues without losing records', async () => {
+    const file = queueFile();
+    const queue = new PersistentQueue(file, () => 1_000);
+
+    await Promise.all([
+      queue.enqueue('scope-a', [msg('m1')], { id: 'pq-1', now: 1_000 }),
+      queue.enqueue('scope-a', [msg('m2')], { id: 'pq-2', now: 1_001 }),
+    ]);
+
+    expect((await queue.recoverable()).map((record) => record.id).sort()).toEqual(['pq-1', 'pq-2']);
+  });
+
+  test('complete removes only one record when duplicate ids exist', async () => {
+    const file = queueFile();
+    const queue = new PersistentQueue(file, () => 1_000);
+    await queue.enqueue('scope-a', [msg('m1')], { id: 'same', now: 1_000 });
+    await queue.enqueue('scope-b', [msg('m2', 'scope-b message')], { id: 'same', now: 2_000 });
+
+    await expect(queue.complete('same')).resolves.toBe(true);
+
+    expect(await queue.recoverable()).toEqual([
+      expect.objectContaining({ id: 'same', scope: 'scope-b' }),
+    ]);
+  });
+
   test('cancels all records for a scope only', async () => {
     const file = queueFile();
     const queue = new PersistentQueue(file);
@@ -105,5 +130,23 @@ describe('PersistentQueue', () => {
 
     expect(records.map((record) => record.id)).toEqual(['valid']);
     expect(records[0]!.messages[0]!.messageId).toBe('m1');
+  });
+
+  test('skips records with malformed messages without dropping valid records', async () => {
+    const file = queueFile();
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        records: [
+          { id: 'valid', scope: 'scope-a', messages: [msg('m1')], state: 'queued', createdAt: 1_000, updatedAt: 1_000 },
+          { id: 'bad-message', scope: 'scope-a', messages: [null], state: 'queued', createdAt: 2_000, updatedAt: 2_000 },
+        ],
+      }),
+    );
+
+    expect(await new PersistentQueue(file).recoverable()).toEqual([
+      expect.objectContaining({ id: 'valid' }),
+    ]);
   });
 });

@@ -59,12 +59,24 @@ function isState(value: unknown): value is PersistentQueueState {
   return value === 'queued' || value === 'running';
 }
 
+function isMessage(value: unknown): value is NormalizedMessage {
+  if (!isObject(value)) return false;
+  return (
+    typeof value.messageId === 'string' &&
+    typeof value.chatId === 'string' &&
+    typeof value.chatType === 'string' &&
+    typeof value.senderId === 'string' &&
+    typeof value.rawContentType === 'string'
+  );
+}
+
 function isRecord(value: unknown): value is PersistentQueueRecord {
   if (!isObject(value)) return false;
   return (
     typeof value.id === 'string' &&
     typeof value.scope === 'string' &&
     Array.isArray(value.messages) &&
+    value.messages.every(isMessage) &&
     isState(value.state) &&
     typeof value.createdAt === 'number' &&
     Number.isFinite(value.createdAt) &&
@@ -78,6 +90,9 @@ function makeId(now: number): string {
 }
 
 export class PersistentQueue {
+  private tail: Promise<unknown> = Promise.resolve();
+  private writeCounter = 0;
+
   constructor(
     private readonly file: string = paths.persistentQueueFile,
     private readonly now: () => number = Date.now,
@@ -88,49 +103,58 @@ export class PersistentQueue {
     messages: NormalizedMessage[],
     opts: { id?: string; now?: number } = {},
   ): Promise<PersistentQueueRecord> {
-    const records = await this.readRecords();
-    const timestamp = opts.now ?? this.now();
-    const record: PersistentQueueRecord = {
-      id: opts.id ?? makeId(timestamp),
-      scope,
-      messages: messages.map((msg) => cloneMessage(msg)),
-      state: 'queued',
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-    records.push(record);
-    await this.writeRecords(records);
-    return cloneRecord(record);
+    return this.mutate(async () => {
+      const records = await this.readRecords();
+      const timestamp = opts.now ?? this.now();
+      const record: PersistentQueueRecord = {
+        id: opts.id ?? makeId(timestamp),
+        scope,
+        messages: messages.map((msg) => cloneMessage(msg)),
+        state: 'queued',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      records.push(record);
+      await this.writeRecords(records);
+      return cloneRecord(record);
+    });
   }
 
   async markRunning(
     id: string,
     opts: { now?: number } = {},
   ): Promise<PersistentQueueRecord | undefined> {
-    const records = await this.readRecords();
-    const record = records.find((entry) => entry.id === id);
-    if (!record) return undefined;
-    record.state = 'running';
-    record.updatedAt = opts.now ?? this.now();
-    await this.writeRecords(records);
-    return cloneRecord(record);
+    return this.mutate(async () => {
+      const records = await this.readRecords();
+      const record = records.find((entry) => entry.id === id);
+      if (!record) return undefined;
+      record.state = 'running';
+      record.updatedAt = opts.now ?? this.now();
+      await this.writeRecords(records);
+      return cloneRecord(record);
+    });
   }
 
   async complete(id: string): Promise<boolean> {
-    const records = await this.readRecords();
-    const next = records.filter((record) => record.id !== id);
-    if (next.length === records.length) return false;
-    await this.writeRecords(next);
-    return true;
+    return this.mutate(async () => {
+      const records = await this.readRecords();
+      const index = records.findIndex((record) => record.id === id);
+      if (index === -1) return false;
+      records.splice(index, 1);
+      await this.writeRecords(records);
+      return true;
+    });
   }
 
   async cancelScope(scope: string): Promise<number> {
-    const records = await this.readRecords();
-    const next = records.filter((record) => record.scope !== scope);
-    const removed = records.length - next.length;
-    if (removed === 0) return 0;
-    await this.writeRecords(next);
-    return removed;
+    return this.mutate(async () => {
+      const records = await this.readRecords();
+      const next = records.filter((record) => record.scope !== scope);
+      const removed = records.length - next.length;
+      if (removed === 0) return 0;
+      await this.writeRecords(next);
+      return removed;
+    });
   }
 
   async recoverable(): Promise<PersistentQueueRecord[]> {
@@ -138,6 +162,12 @@ export class PersistentQueue {
     return [...records]
       .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
       .map((record) => cloneRecord(record));
+  }
+
+  private async mutate<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.tail.then(fn, fn);
+    this.tail = run.catch(() => undefined);
+    return run;
   }
 
   private async readRecords(): Promise<PersistentQueueRecord[]> {
@@ -153,7 +183,15 @@ export class PersistentQueue {
     try {
       const parsed = JSON.parse(raw) as unknown;
       if (!isObject(parsed) || parsed.version !== 1 || !Array.isArray(parsed.records)) return [];
-      return parsed.records.filter(isRecord).map((record) => cloneRecord(record));
+      return parsed.records.flatMap((record): PersistentQueueRecord[] => {
+        if (!isRecord(record)) return [];
+        try {
+          return [cloneRecord(record)];
+        } catch (err) {
+          log.fail('queue', err, { step: 'persistent-read-record' });
+          return [];
+        }
+      });
     } catch (err) {
       log.fail('queue', err, { step: 'persistent-read' });
       return [];
@@ -166,7 +204,7 @@ export class PersistentQueue {
       records: records.map((record) => cloneRecord(record)),
     };
     await mkdir(dirname(this.file), { recursive: true });
-    const tmpFile = `${this.file}.tmp-${process.pid}`;
+    const tmpFile = `${this.file}.tmp-${process.pid}-${++this.writeCounter}`;
     await writeFile(tmpFile, `${JSON.stringify(data, null, 2)}\n`);
     await rename(tmpFile, this.file);
   }
