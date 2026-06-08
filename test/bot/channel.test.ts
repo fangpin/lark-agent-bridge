@@ -1301,6 +1301,48 @@ describe('persistent queue recovery', () => {
 
     await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
   });
+
+  test('/new cancels durable and memory queued work for the reset scope', async () => {
+    const persistentQueue = tempPersistentQueue();
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+    const pendingCancels: string[] = [];
+    const originalPushBatch = PendingQueue.prototype.pushBatch;
+    vi.spyOn(PendingQueue.prototype, 'pushBatch').mockImplementation(function (
+      this: PendingQueue,
+      scope,
+      batch,
+      opts = {},
+    ) {
+      const size = originalPushBatch.call(this, scope, batch, opts);
+      this.block(scope);
+      return size;
+    });
+    const originalCancel = PendingQueue.prototype.cancel;
+    vi.spyOn(PendingQueue.prototype, 'cancel').mockImplementation(function (this: PendingQueue, scope) {
+      pendingCancels.push(scope);
+      return originalCancel.call(this, scope);
+    });
+    await persistentQueue.enqueue('chat-1', [fakeMessage('seeded', 'seeded prompt')], { id: 'seeded', now: 1000 });
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent(() => {}),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    await vi.waitFor(() => expect(pendingCancels).toHaveLength(0));
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('new-msg', '/new'));
+
+    expect(pendingCancels).toContain('chat-1');
+    expect(await persistentQueue.recoverable()).toEqual([]);
+  });
 });
 
 describe('processAgentStream', () => {
@@ -1801,13 +1843,55 @@ describe('persistent queue restore ordering', () => {
       ...createFakeChannel(handlers),
       async connect() {
         order.push('connect');
-        void handlers.message?.(fakeMessage('live-1', 'live prompt'));
+        order.push('live-handler-started');
+        void handlers.message?.(fakeMessage('live-1', 'live prompt')).then(() => {
+          order.push('live-handler-done');
+        });
+        expect(prompts).toEqual([]);
+        expect(order).not.toContain('live-handler-done');
       },
     } as unknown as LarkChannel;
     const recoverable = vi.spyOn(persistentQueue, 'recoverable').mockImplementation(async () => {
       order.push('restore');
       return PersistentQueue.prototype.recoverable.call(persistentQueue);
     });
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent((opts) => {
+        prompts.push(opts.prompt);
+        order.push(`prompt:${opts.prompt.includes('old prompt') ? 'old' : 'live'}`);
+      }),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+    expect(recoverable).toHaveBeenCalled();
+    expect(order).toEqual([
+      'connect',
+      'live-handler-started',
+      'restore',
+      'prompt:old',
+      'live-handler-done',
+      'prompt:live',
+    ]);
+    expect(prompts[0]).toContain('old prompt');
+    expect(prompts[1]).toContain('live prompt');
+  });
+});
+
+describe('flush durable setup failures', () => {
+  test('requeues a durable batch in memory when markRunning fails before agent start', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const prompts: string[] = [];
+    const persistentQueue = tempPersistentQueue();
+    const markRunning = vi.spyOn(persistentQueue, 'markRunning');
+    markRunning.mockRejectedValueOnce(new Error('mark running failed'));
+    const fakeChannel = createFakeChannel(messages);
     vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
 
     await startChannel({
@@ -1819,11 +1903,14 @@ describe('persistent queue restore ordering', () => {
       persistentQueue,
     });
 
-    await vi.waitFor(() => expect(prompts).toHaveLength(2));
-    expect(recoverable).toHaveBeenCalled();
-    expect(order).toEqual(['connect', 'restore']);
-    expect(prompts[0]).toContain('old prompt');
-    expect(prompts[1]).toContain('live prompt');
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('setup-fails-once', 'retry after setup failure'));
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    expect(prompts[0]).toContain('retry after setup failure');
+    expect(markRunning).toHaveBeenCalledTimes(2);
+    await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
   });
 });
 
@@ -1936,22 +2023,22 @@ describe('opaque Cursor SDK auto retry', () => {
     ]);
   });
 
-  test('run cleanup completes original durable record when auto retry persistence fails', async () => {
+  test('run cleanup skips auto retry enqueue when original durable completion fails', async () => {
     const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
-    const completions: string[] = [];
+    let unregistered = false;
+    const activeRuns = new ActiveRuns();
+    const originalUnregister = activeRuns.unregister.bind(activeRuns);
+    vi.spyOn(activeRuns, 'unregister').mockImplementation((scope, run) => {
+      unregistered = true;
+      return originalUnregister(scope, run);
+    });
     const persistentQueue = tempPersistentQueue();
     const original = await persistentQueue.enqueue('chat-1', [fakeMessage('msg-1', 'trigger opaque error')], {
       id: 'original-1',
       now: 1000,
     });
-    const enqueue = vi.spyOn(persistentQueue, 'enqueue').mockImplementation(async (scope, batch, opts = {}) => {
-      if (!opts.id) throw new Error('auto retry durable enqueue failed');
-      return PersistentQueue.prototype.enqueue.call(persistentQueue, scope, batch, opts);
-    });
-    const complete = vi.spyOn(persistentQueue, 'complete').mockImplementation(async (id) => {
-      completions.push(id);
-      return PersistentQueue.prototype.complete.call(persistentQueue, id);
-    });
+    const complete = vi.spyOn(persistentQueue, 'complete').mockRejectedValueOnce(new Error('complete failed'));
+    const enqueue = vi.spyOn(persistentQueue, 'enqueue');
     const fakeChannel = createFakeChannel(messages);
     vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
 
@@ -1967,12 +2054,15 @@ describe('opaque Cursor SDK auto retry', () => {
       workspaces: fakeWorkspaces('/tmp/project'),
       controls: fakeControls(textReplyConfig()),
       persistentQueue,
+      activeRuns,
     });
 
     await vi.waitFor(() => expect(complete).toHaveBeenCalledWith(original.id));
-    expect(completions).toEqual([original.id]);
-    expect(enqueue).toHaveBeenCalledTimes(1);
-    expect(await persistentQueue.recoverable()).toEqual([]);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(await persistentQueue.recoverable()).toEqual([
+      expect.objectContaining({ id: original.id, scope: 'chat-1' }),
+    ]);
+    expect(unregistered).toBe(true);
   });
 });
 
