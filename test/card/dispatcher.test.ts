@@ -78,6 +78,7 @@ function deps(overrides: Partial<CardDispatchDeps> = {}): CardDispatchDeps {
         updatedAt: 1000,
       })),
       cancelScope: vi.fn(async () => 0),
+      cancelQueuedScope: vi.fn(async () => 0),
     } as unknown as PersistentQueue,
     runHistory: {},
     chatModeCache: {
@@ -196,7 +197,8 @@ describe('handleCardAction mutating command cleanup', () => {
 });
 
 describe('handleCardAction config/account submit cleanup', () => {
-  test('config submit aborts shared preferences mutation when queued cleanup fails', async () => {
+  test('config submit uses queued-only cleanup and preserves running durable work', async () => {
+    vi.useFakeTimers();
     const cfg: AppConfig = {
       accounts: { app: { id: 'app-id', secret: 'secret', tenant: 'feishu' } },
       preferences: {
@@ -243,20 +245,24 @@ describe('handleCardAction config/account submit cleanup', () => {
       persistentQueue: {
         enqueue: vi.fn(),
         cancelScope: vi.fn(async () => {
-          throw new Error('durable cancel failed');
+          throw new Error('full cleanup should preserve active running records');
         }),
+        cancelQueuedScope: vi.fn(async () => 1),
       } as unknown as PersistentQueue,
     });
 
     await handleCardAction(d);
+    await vi.runAllTimersAsync();
 
-    expect(d.persistentQueue.cancelScope).toHaveBeenCalledWith('chat-1');
-    expect(cfg.preferences?.messageReply).toBe('card');
-    expect(cfg.preferences?.showToolCalls).toBe(true);
-    expect(cfg.preferences?.maxConcurrentRuns).toBe(1);
+    expect(d.persistentQueue.cancelQueuedScope).toHaveBeenCalledWith('chat-1');
+    expect(d.persistentQueue.cancelScope).not.toHaveBeenCalled();
+    expect(cfg.preferences?.messageReply).toBe('markdown');
+    expect(cfg.preferences?.showToolCalls).toBe(false);
+    expect(cfg.preferences?.maxConcurrentRuns).toBe(7);
+    vi.useRealTimers();
   });
 
-  test('account submit aborts credential write and restart when queued cleanup fails', async () => {
+  test('account submit uses queued-only cleanup and preserves running durable work', async () => {
     vi.useFakeTimers();
     const restart = vi.fn(async () => undefined);
     const d = deps({
@@ -297,16 +303,18 @@ describe('handleCardAction config/account submit cleanup', () => {
       persistentQueue: {
         enqueue: vi.fn(),
         cancelScope: vi.fn(async () => {
-          throw new Error('durable cancel failed');
+          throw new Error('full cleanup should preserve active running records');
         }),
+        cancelQueuedScope: vi.fn(async () => 1),
       } as unknown as PersistentQueue,
     });
 
     await handleCardAction(d);
     await vi.runAllTimersAsync();
 
-    expect(d.persistentQueue.cancelScope).toHaveBeenCalledWith('chat-1');
-    expect(restart).not.toHaveBeenCalled();
+    expect(d.persistentQueue.cancelQueuedScope).toHaveBeenCalledWith('chat-1');
+    expect(d.persistentQueue.cancelScope).not.toHaveBeenCalled();
+    expect(restart).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
   });
 });

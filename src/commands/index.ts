@@ -81,6 +81,7 @@ export interface CommandContext {
   channel: LarkChannel;
   msg: NormalizedMessage;
   cancelQueuedWork?: (scope?: string) => Promise<void>;
+  cancelQueuedOnlyWork?: (scope?: string) => Promise<void>;
   cancelPendingQueuedWork?: (scope?: string) => Promise<void>;
   /**
    * Session scope string. For p2p / regular group it equals `msg.chatId`;
@@ -279,7 +280,11 @@ async function cancelQueuedWork(ctx: CommandContext, scope = ctx.scope): Promise
 }
 
 async function cancelPendingQueuedWork(ctx: CommandContext, scope = ctx.scope): Promise<void> {
-  await (ctx.cancelPendingQueuedWork ?? ctx.cancelQueuedWork)?.(scope);
+  await (ctx.cancelPendingQueuedWork ?? ctx.cancelQueuedOnlyWork ?? ctx.cancelQueuedWork)?.(scope);
+}
+
+async function cancelQueuedOnlyWork(ctx: CommandContext, scope = ctx.scope): Promise<void> {
+  await (ctx.cancelQueuedOnlyWork ?? ctx.cancelPendingQueuedWork ?? ctx.cancelQueuedWork)?.(scope);
 }
 
 async function cancelQueuedWorkBeforeMutation(ctx: CommandContext, scope = ctx.scope): Promise<boolean> {
@@ -299,6 +304,17 @@ async function cancelPendingQueuedWorkBeforeMutation(ctx: CommandContext, scope 
     return true;
   } catch (err) {
     log.fail('command', err, { step: 'cancel-pending-queued-work', scope });
+    await reply(ctx, `❌ 清理已排队任务失败：${err instanceof Error ? err.message : String(err)}\n状态未变更，请处理后重试。`);
+    return false;
+  }
+}
+
+async function cancelQueuedOnlyWorkBeforeMutation(ctx: CommandContext, scope = ctx.scope): Promise<boolean> {
+  try {
+    await cancelQueuedOnlyWork(ctx, scope);
+    return true;
+  } catch (err) {
+    log.fail('command', err, { step: 'cancel-queued-only-work', scope });
     await reply(ctx, `❌ 清理已排队任务失败：${err instanceof Error ? err.message : String(err)}\n状态未变更，请处理后重试。`);
     return false;
   }
@@ -1139,7 +1155,6 @@ async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, `重试排队失败：${err instanceof Error ? err.message : String(err)}`);
     return;
   }
-  const interruptedActive = ctx.activeRuns.interrupt(ctx.scope);
   try {
     await ctx.persistentQueue.cancelScopeExcept(ctx.scope, new Set([record.id]));
   } catch (err) {
@@ -1147,10 +1162,11 @@ async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
     await ctx.persistentQueue.complete(record.id).catch((completeErr) => {
       log.fail('command', completeErr, { cmd: '/retry', step: 'persistent-remove-failed-retry', scope: ctx.scope, runId, durableId: record.id });
     });
-    await reply(ctx, `清理已排队任务失败${interruptedActive ? '，当前运行已请求停止' : ''}：${err instanceof Error ? err.message : String(err)}`);
+    await reply(ctx, `清理已排队任务失败，当前运行未停止：${err instanceof Error ? err.message : String(err)}`);
     return;
   }
   ctx.pending.cancel(ctx.scope);
+  ctx.activeRuns.interrupt(ctx.scope);
   const size = ctx.pending.pushBatch(ctx.scope, retryBatch, { durableId: record.id });
   await reply(ctx, `已重新排队上次任务（${entry.batch.length} 条消息，当前队列 ${size}）。`);
 }
@@ -1882,7 +1898,7 @@ async function submitAccount(ctx: CommandContext): Promise<void> {
       return;
     }
 
-    if (!await cancelQueuedWorkBeforeMutation(ctx)) {
+    if (!await cancelQueuedOnlyWorkBeforeMutation(ctx)) {
       await finishFailure('清理已排队任务失败，凭据未保存；请检查日志后重试。');
       return;
     }
@@ -2089,7 +2105,7 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
       }
     };
 
-    if (!await cancelQueuedWorkBeforeMutation(ctx)) {
+    if (!await cancelQueuedOnlyWorkBeforeMutation(ctx)) {
       await waitForSettle();
       await updateManagedCard(channel, formMsgId, configCancelledCard()).catch(() => {});
       forgetManagedCard(formMsgId);

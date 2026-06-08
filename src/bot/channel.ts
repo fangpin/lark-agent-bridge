@@ -617,6 +617,16 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
         droppedPersistent,
       });
     },
+    cancelQueuedOnlyWork: async (targetScope = scope) => {
+      const droppedPersistent = await persistentQueue.cancelQueuedScope(targetScope);
+      const dropped = pending.cancel(targetScope);
+      log.info('intake', 'command-drop-pending-queued-only', {
+        scope: targetScope,
+        cmd: parsedCommand?.cmd,
+        droppedPending: dropped.length,
+        droppedPersistent,
+      });
+    },
     cancelPendingQueuedWork: async (targetScope = scope) => {
       const droppedPersistent = await persistentQueue.cancelQueuedScope(targetScope);
       const dropped = pending.cancel(targetScope);

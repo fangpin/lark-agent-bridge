@@ -121,6 +121,16 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
         droppedPersistent,
       });
     },
+    cancelQueuedOnlyWork: async (targetScope = scope) => {
+      const droppedPersistent = await deps.persistentQueue.cancelQueuedScope(targetScope);
+      const dropped = deps.pending.cancel(targetScope);
+      log.info('cardAction', 'command-drop-pending-queued-only', {
+        scope: targetScope,
+        cmd,
+        droppedPending: dropped.length,
+        droppedPersistent,
+      });
+    },
     formValue,
     fromCardAction: true,
   };

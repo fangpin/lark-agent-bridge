@@ -263,10 +263,10 @@ describe('/retry command', () => {
     expect(commandCtx.persistentQueue.cancelScopeExcept).toHaveBeenCalledWith('chat-1', new Set(['durable-retry-1']));
     expect(commandCtx.activeRuns.interrupt).toHaveBeenCalledWith('chat-1');
     expect(commandCtx.persistentQueue.complete).not.toHaveBeenCalled();
-    expect(callOrder).toEqual(['durable.enqueue', 'active.interrupt', 'durable.cancelExcept', 'memory.cancel', 'memory.pushBatch']);
+    expect(callOrder).toEqual(['durable.enqueue', 'durable.cancelExcept', 'memory.cancel', 'active.interrupt', 'memory.pushBatch']);
   });
 
-  test('interrupts active run before durable cleanup can orphan an auto-retry record', async () => {
+  test('cleans durable queued work before interrupting active run', async () => {
     const history = new RunHistory();
     const entry = history.create('chat-1', [msg('fix the bug')], {
       cwd: '/repo/project',
@@ -311,12 +311,12 @@ describe('/retry command', () => {
 
     await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
 
-    expect(activeInterruptedBeforeCleanup).toBe(true);
+    expect(activeInterruptedBeforeCleanup).toBe(false);
     expect(commandCtx.persistentQueue.cancelScopeExcept).toHaveBeenCalledWith('chat-1', new Set(['durable-retry-1']));
-    expect(callOrder).toEqual(['durable.enqueue', 'active.interrupt', 'durable.cancelExcept', 'memory.cancel', 'memory.pushBatch']);
+    expect(callOrder).toEqual(['durable.enqueue', 'durable.cancelExcept', 'memory.cancel', 'active.interrupt', 'memory.pushBatch']);
   });
 
-  test('removes failed retry record and reports active stop when durable cleanup fails after enqueue', async () => {
+  test('removes failed retry record and preserves active run when durable cleanup fails after enqueue', async () => {
     const history = new RunHistory();
     const entry = history.create('chat-1', [msg('fix the bug')], {
       cwd: '/repo/project',
@@ -345,12 +345,12 @@ describe('/retry command', () => {
     expect(commandCtx.persistentQueue.enqueue).toHaveBeenCalledWith('chat-1', [expect.objectContaining({ content: 'fix the bug' })]);
     expect(commandCtx.persistentQueue.cancelScopeExcept).toHaveBeenCalledWith('chat-1', new Set(['durable-retry-1']));
     expect(commandCtx.persistentQueue.complete).toHaveBeenCalledWith('durable-retry-1');
-    expect(commandCtx.activeRuns.interrupt).toHaveBeenCalledWith('chat-1');
+    expect(commandCtx.activeRuns.interrupt).not.toHaveBeenCalled();
     expect(commandCtx.pending?.cancel).not.toHaveBeenCalled();
     expect(commandCtx.pending?.pushBatch).not.toHaveBeenCalled();
     expect(commandCtx.channel.send).toHaveBeenCalledWith(
       'chat-1',
-      { markdown: expect.stringContaining('清理已排队任务失败') },
+      { markdown: expect.stringContaining('清理已排队任务失败，当前运行未停止') },
       { replyTo: 'msg-1' },
     );
   });
