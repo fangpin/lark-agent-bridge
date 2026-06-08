@@ -299,14 +299,25 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       } catch (err) {
         log.fail('flush', err);
         if (durableId && !startedRun) {
-          pending.pushBatch(scope, batch, { durableId, front: true });
-          unblockDelayMs = SETUP_RETRY_DELAY_MS;
-          log.warn('queue', 'persistent-requeued-after-setup-failure', {
-            scope,
-            durableId,
-            batchSize: batch.length,
-            delayMs: SETUP_RETRY_DELAY_MS,
-          });
+          let queuedRecord;
+          try {
+            queuedRecord = await persistentQueue.markQueued(durableId);
+          } catch (markErr) {
+            log.fail('queue', markErr, { step: 'persistent-mark-queued-after-setup-failure', scope, durableId });
+            queuedRecord = undefined;
+          }
+          if (queuedRecord) {
+            pending.pushBatch(scope, batch, { durableId, front: true });
+            unblockDelayMs = SETUP_RETRY_DELAY_MS;
+            log.warn('queue', 'persistent-requeued-after-setup-failure', {
+              scope,
+              durableId,
+              batchSize: batch.length,
+              delayMs: SETUP_RETRY_DELAY_MS,
+            });
+          } else {
+            log.warn('queue', 'persistent-requeue-skipped-after-setup-failure', { scope, durableId });
+          }
         }
       } finally {
         release();

@@ -353,11 +353,26 @@ export class PersistentQueue {
     id: string,
     opts: { now?: number } = {},
   ): Promise<PersistentQueueRecord | undefined> {
+    return this.markState(id, 'running', opts);
+  }
+
+  async markQueued(
+    id: string,
+    opts: { now?: number } = {},
+  ): Promise<PersistentQueueRecord | undefined> {
+    return this.markState(id, 'queued', opts);
+  }
+
+  private async markState(
+    id: string,
+    state: PersistentQueueState,
+    opts: { now?: number } = {},
+  ): Promise<PersistentQueueRecord | undefined> {
     return this.mutate(async () => {
       const records = await this.readRecordsForMutation();
       const record = records.find((entry) => entry.id === id);
       if (!record) return undefined;
-      record.state = 'running';
+      record.state = state;
       record.updatedAt = opts.now ?? this.now();
       await this.writeRecords(records);
       return cloneRecord(record);

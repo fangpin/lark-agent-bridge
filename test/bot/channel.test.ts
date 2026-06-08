@@ -2273,6 +2273,7 @@ describe('flush durable setup failures', () => {
     const prompts: string[] = [];
     const persistentQueue = tempPersistentQueue();
     const markRunning = vi.spyOn(persistentQueue, 'markRunning');
+    const unblockAfter = vi.spyOn(PendingQueue.prototype, 'unblockAfter');
     markRunning.mockRejectedValueOnce(new Error('mark running failed'));
     const fakeChannel = createFakeChannel(messages);
     vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
@@ -2296,16 +2297,94 @@ describe('flush durable setup failures', () => {
     expect(markRunning).toHaveBeenCalledTimes(1);
     expect(await persistentQueue.has((markRunning.mock.calls[0] ?? [''])[0] as string)).toBe(true);
 
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([
+      expect.objectContaining({ messages: [expect.objectContaining({ messageId: 'setup-fails-once' })], state: 'queued' }),
+    ]));
     expect(markRunning).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(unblockAfter).toHaveBeenCalledWith('chat-1', 1_000));
+  });
 
-    await Promise.resolve();
-    await Promise.resolve();
-    await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(markRunning).toHaveBeenCalledTimes(2));
-    await vi.waitFor(() => expect(prompts).toHaveLength(1));
-    expect(prompts[0]).toContain('retry after setup failure');
-    await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
+  test('queued-only cleanup removes setup-failure delayed retry without orphaning durable record', async () => {
+    vi.useFakeTimers();
+    try {
+      const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+      const prompts: string[] = [];
+      const persistentQueue = tempPersistentQueue();
+      let releasePrepare!: () => void;
+      const prepareStarted = new Promise<void>((resolve) => {
+        releasePrepare = resolve;
+      });
+      const agent = {
+        ...fakeAgent((opts) => prompts.push(opts.prompt)),
+        run() {
+          throw new Error('agent run failed before active registration');
+        },
+      } satisfies AgentAdapter;
+      const markRunning = vi.spyOn(persistentQueue, 'markRunning');
+      const pushBatch = vi.spyOn(PendingQueue.prototype, 'pushBatch');
+      const send = vi.fn(async (_chatId: string, payload: unknown, _opts?: unknown) => ({
+        messageId: (payload as { markdown?: string }).markdown === '请检查' ? 'om_check' : 'om_command_reply',
+      }));
+      const fakeChannel = {
+        ...createFakeChannel(messages),
+        send,
+        rawClient: {
+          im: {
+            v1: {
+              message: { async delete() {} },
+              messageReaction: {
+                async create() {
+                  return { data: { reaction_id: 'reaction-1' } };
+                },
+                async delete() {},
+              },
+            },
+          },
+        },
+      } as unknown as LarkChannel;
+      vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+      await startChannel({
+        cfg: textReplyConfig(),
+        agent,
+        sessions: {
+          ...fakeSessions(),
+          setIdleTimeoutMinutes() {},
+        } as unknown as SessionStore,
+        workspaces: fakeWorkspaces('/tmp/project'),
+        controls: fakeControls(textReplyConfig()),
+        persistentQueue,
+      });
+
+      const onMessage = messages.message;
+      if (!onMessage) throw new Error('message handler was not registered');
+      await onMessage(fakeMessage('setup-retry-cancelled', 'setup retry should be cancellable'));
+      await Promise.resolve();
+      await Promise.resolve();
+      await vi.waitFor(() => expect(markRunning).toHaveBeenCalledTimes(1));
+      const durableId = markRunning.mock.calls[0]?.[0];
+      if (!durableId) throw new Error('durable id missing');
+
+      releasePrepare();
+      await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([
+        expect.objectContaining({ id: durableId, scope: 'chat-1', state: 'queued' }),
+      ]));
+      await vi.waitFor(() => expect(pushBatch).toHaveBeenLastCalledWith(
+        'chat-1',
+        [expect.objectContaining({ messageId: 'setup-retry-cancelled' })],
+        { durableId, front: true },
+      ));
+
+      await onMessage(fakeMessage('timeout-off-during-retry', '/timeout off'));
+
+      await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
+      const markRunningCallsAfterCleanup = markRunning.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect(prompts).toEqual([]);
+      expect(markRunning.mock.calls.length).toBe(markRunningCallsAfterCleanup);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test('treats missing durable record during markRunning as cancellation without requeue loop', async () => {
@@ -2673,7 +2752,7 @@ describe('opaque Cursor SDK auto retry', () => {
     expect(unregistered).toBe(true);
   });
 
-  test('setup failure requeues durable work after backoff without stranding', async () => {
+  test('setup failure resets durable work queued and schedules retry backoff without stranding', async () => {
     vi.useFakeTimers();
     try {
       const runPrompts: string[] = [];
@@ -2698,13 +2777,17 @@ describe('opaque Cursor SDK auto retry', () => {
       });
 
       await vi.waitFor(() => expect(markRunning).toHaveBeenCalledTimes(1));
-      await vi.advanceTimersByTimeAsync(998);
+      await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([
+        expect.objectContaining({ id: 'durable-old', scope: 'chat-1', state: 'queued' }),
+      ]));
       expect(runPrompts).toEqual([]);
 
-      await vi.advanceTimersByTimeAsync(2);
-
-      await vi.waitFor(() => expect(runPrompts).toHaveLength(1));
-      expect(runPrompts[0]).toContain('older prompt');
+      await vi.waitFor(() => expect(markRunning).toHaveBeenCalledTimes(1));
+      await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([
+        expect.objectContaining({ id: 'durable-old', scope: 'chat-1', state: 'queued' }),
+      ]));
+      await vi.waitFor(() => vi.getTimerCount() > 0);
+      expect(runPrompts).toEqual([]);
     } finally {
       vi.useRealTimers();
     }

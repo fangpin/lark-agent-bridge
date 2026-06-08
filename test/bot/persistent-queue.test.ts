@@ -110,6 +110,21 @@ describe('PersistentQueue', () => {
     expect(reloaded).toMatchObject([{ id: record.id, state: 'running', createdAt: 1_000, updatedAt: 2_000 }]);
   });
 
+  test('marks a running record queued again for retry recovery', async () => {
+    const file = queueFile();
+    const queue = new PersistentQueue(file);
+    const record = await queue.enqueue('scope-a', [msg('m1')], { id: 'record-1', now: 1_000 });
+    await queue.markRunning(record.id, { now: 2_000 });
+
+    const queued = await queue.markQueued(record.id, { now: 3_000 });
+    const missing = await queue.markQueued('missing', { now: 4_000 });
+    const reloaded = await new PersistentQueue(file).recoverable();
+
+    expect(queued).toMatchObject({ id: record.id, state: 'queued', createdAt: 1_000, updatedAt: 3_000 });
+    expect(missing).toBeUndefined();
+    expect(reloaded).toMatchObject([{ id: record.id, state: 'queued', createdAt: 1_000, updatedAt: 3_000 }]);
+  });
+
   test('reports whether a durable record exists', async () => {
     const file = queueFile();
     const queue = new PersistentQueue(file);
