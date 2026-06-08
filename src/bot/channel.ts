@@ -246,6 +246,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       // Pool slot acquired here, released in finally. Across-the-bridge cap.
       const release = await pool.acquire();
       let startedRun = false;
+      let unblockDelayMs: number | undefined;
       try {
         if (durableId) {
           const runningRecord = await persistentQueue.markRunning(durableId);
@@ -280,26 +281,24 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       } catch (err) {
         log.fail('flush', err);
         if (durableId && !startedRun) {
-          const exists = await persistentQueue.has(durableId).catch((retryErr) => {
-            log.fail('queue', retryErr, { step: 'persistent-setup-retry-check', scope, durableId });
-            return false;
+          pending.pushBatch(scope, batch, { durableId });
+          unblockDelayMs = SETUP_RETRY_DELAY_MS;
+          log.warn('queue', 'persistent-requeued-after-setup-failure', {
+            scope,
+            durableId,
+            batchSize: batch.length,
+            delayMs: SETUP_RETRY_DELAY_MS,
           });
-          if (exists) {
-            pending.unblockAfter(scope, SETUP_RETRY_DELAY_MS);
-            pending.pushBatch(scope, batch, { durableId });
-            log.warn('queue', 'persistent-requeued-after-setup-failure', {
-              scope,
-              durableId,
-              batchSize: batch.length,
-              delayMs: SETUP_RETRY_DELAY_MS,
-            });
-          } else {
-            log.warn('queue', 'persistent-setup-retry-skipped', { scope, durableId });
-          }
         }
       } finally {
         release();
-        if (startedRun) pending.unblock(scope);
+        if (unblockDelayMs !== undefined) {
+          pending.unblockAfter(scope, unblockDelayMs);
+        } else if (!startedRun) {
+          pending.unblock(scope);
+        } else {
+          pending.unblock(scope);
+        }
         log.info('flush', 'end');
       }
     });
@@ -438,10 +437,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     channel,
     disconnect: async () => {
       keepalive.stop();
+      await activeRuns.stopAll('lifecycle');
       commentQueue.cancelAll();
       pending.cancelAll();
       await channel.disconnect();
-      await activeRuns.stopAll('lifecycle');
       await Promise.allSettled([sessions.flush(), workspaces.flush()]);
     },
   };
@@ -764,6 +763,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     quotes: quotes.length,
   });
 
+  const handle = activeRuns.registerPreRun(scope);
   const sessionKey = agent.sessionKey;
   let resumeFrom = sessions.resumeFor(scope, cwd, sessionKey);
   if (resumeFrom && agent.canResumeSession?.(resumeFrom) === false) {
@@ -800,7 +800,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     cwd,
   });
 
-  const handle = activeRuns.registerPreRun(scope);
   if (durableId && !(await persistentQueue.has(durableId))) {
     log.warn('queue', 'persistent-cancelled-before-agent-run', { scope, durableId });
     runHistory.finish(historyEntry.runId, 'interrupted', '任务已取消');
@@ -1279,7 +1278,6 @@ export async function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
     return false;
   }
 
-  rememberAutoRetryKey(autoRetryKeys, key);
   const retryBatch = batch.map((msg) => ({ ...msg }));
   let record;
   if (persistentQueue) {
@@ -1291,6 +1289,7 @@ export async function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
     }
   }
   pending.pushBatch(scope, retryBatch, record ? { durableId: record.id } : undefined);
+  rememberAutoRetryKey(autoRetryKeys, key);
   log.warn('run', 'auto-retry-opaque-sdk-error', {
     scope,
     batchSize: batch.length,

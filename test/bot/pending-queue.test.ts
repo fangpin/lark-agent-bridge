@@ -138,4 +138,28 @@ describe('PendingQueue', () => {
     ]);
     expect(queue.queuedSize('chat-1')).toBe(0);
   });
+
+  test('delays unblock even when no entry exists yet', async () => {
+    vi.useFakeTimers();
+    try {
+      const flushed: string[][] = [];
+      const queue = new PendingQueue(0, (_scope, batch) => {
+        flushed.push(batch.map((m) => m.messageId));
+      });
+
+      queue.block('chat-1');
+      queue.unblockAfter('chat-1', 1000);
+      queue.push('chat-1', msg('m1'));
+
+      expect(flushed).toEqual([]);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(flushed).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(flushed).toEqual([['m1']]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

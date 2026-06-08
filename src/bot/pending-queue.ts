@@ -11,6 +11,11 @@ interface PendingEntry {
   timer?: NodeJS.Timeout;
 }
 
+interface DelayedUnblock {
+  timer: NodeJS.Timeout;
+  dueAt: number;
+}
+
 export type FlushHandler = (scope: string, batch: NormalizedMessage[], durableId?: string) => void;
 
 export interface PendingPushOptions {
@@ -32,6 +37,7 @@ export interface PendingPushOptions {
 export class PendingQueue {
   private readonly map = new Map<string, PendingEntry>();
   private readonly blocked = new Set<string>();
+  private readonly delayedUnblocks = new Map<string, DelayedUnblock>();
   private readonly delayMs: number;
   private readonly onFlush: FlushHandler;
 
@@ -50,8 +56,11 @@ export class PendingQueue {
       entry = { batches: [] };
       this.map.set(scope, entry);
     } else if (entry.timer) {
-      clearTimeout(entry.timer);
-      entry.timer = undefined;
+      const delayed = this.delayedUnblocks.get(scope);
+      if (entry.timer !== delayed?.timer) {
+        clearTimeout(entry.timer);
+        entry.timer = undefined;
+      }
     }
 
     const lastBatch = entry.batches.at(-1);
@@ -79,6 +88,9 @@ export class PendingQueue {
 
   cancel(scope: string): NormalizedMessage[] {
     const entry = this.map.get(scope);
+    const delayed = this.delayedUnblocks.get(scope);
+    if (delayed) clearTimeout(delayed.timer);
+    this.delayedUnblocks.delete(scope);
     if (!entry) return [];
     if (entry.timer) clearTimeout(entry.timer);
     this.map.delete(scope);
@@ -93,8 +105,12 @@ export class PendingQueue {
     for (const entry of this.map.values()) {
       if (entry.timer) clearTimeout(entry.timer);
     }
+    for (const delayed of this.delayedUnblocks.values()) {
+      clearTimeout(delayed.timer);
+    }
     this.map.clear();
     this.blocked.clear();
+    this.delayedUnblocks.clear();
   }
 
   /** Pause the debounce timer; pushed messages keep accumulating. */
@@ -118,18 +134,29 @@ export class PendingQueue {
   unblockAfter(scope: string, delayMs: number): void {
     if (!this.blocked.has(scope)) return;
     if (delayMs > 0) {
-      const entry = this.map.get(scope);
-      if (entry?.timer) clearTimeout(entry.timer);
+      const existingDelayed = this.delayedUnblocks.get(scope);
+      if (existingDelayed) clearTimeout(existingDelayed.timer);
+      const dueAt = Date.now() + delayMs;
       const timer = setTimeout(() => {
+        const currentDelayed = this.delayedUnblocks.get(scope);
+        if (currentDelayed?.timer === timer) this.delayedUnblocks.delete(scope);
         const current = this.map.get(scope);
         if (current?.timer === timer) current.timer = undefined;
         this.unblockAfter(scope, 0);
       }, delayMs);
-      if (entry) entry.timer = timer;
+      this.delayedUnblocks.set(scope, { timer, dueAt });
+      const entry = this.map.get(scope);
+      if (entry) {
+        if (entry.timer) clearTimeout(entry.timer);
+        entry.timer = timer;
+      }
       log.info('queue', 'unblock-delayed', { scope, queued: this.queuedSize(scope), delayMs });
       return;
     }
     if (delayMs <= 0) {
+      const delayed = this.delayedUnblocks.get(scope);
+      if (delayed) clearTimeout(delayed.timer);
+      this.delayedUnblocks.delete(scope);
       const existing = this.map.get(scope);
       if (existing?.timer) {
         clearTimeout(existing.timer);
