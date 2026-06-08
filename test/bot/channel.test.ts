@@ -2744,8 +2744,8 @@ describe('flush durable setup failures', () => {
       PersistentQueue.prototype.enqueue.call(persistentQueue, scope, batch, { id: 'race-durable', now: 1000 }),
     );
     let stopSent = false;
-    const has = vi.spyOn(persistentQueue, 'has').mockImplementation(async (id: string) => {
-      const exists = await PersistentQueue.prototype.has.call(persistentQueue, id);
+    const has = vi.spyOn(persistentQueue, 'hasStrict').mockImplementation(async (id: string) => {
+      const exists = await PersistentQueue.prototype.hasStrict.call(persistentQueue, id);
       if (id === 'race-durable' && exists && !stopSent) {
         stopSent = true;
         await messages.message?.(fakeMessage('stop-race', '/stop'));
@@ -3456,6 +3456,174 @@ describe('opaque Cursor SDK auto retry', () => {
         yield { type: 'text', delta: 'working' };
         await streamReleased;
         yield { type: 'error', message: 'backend shutdown error after idle timeout' };
+      })(),
+      async stop() {
+        releaseStream();
+      },
+      async waitForExit() {
+        return true;
+      },
+    };
+    const handle: RunHandle = { run, interrupted: false };
+
+    const processing = processAgentStream(
+      handle,
+      {} as SessionStore,
+      'chat-1',
+      '/tmp/project',
+      'agent:test',
+      1000,
+      async (state) => {
+        flushed.push(state.terminal);
+      },
+      5000,
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    const finalState = await processing;
+
+    expect(handle.interrupted).toBe(true);
+    expect(finalState.terminal).toBe('idle_timeout');
+    expect(flushed.at(-1)).toBe('idle_timeout');
+  });
+
+  test('lifecycle done after interruption completes durable record', async () => {
+    const persistentQueue = tempPersistentQueue();
+    const complete = vi.spyOn(persistentQueue, 'complete');
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+    let releaseDone!: () => void;
+    const doneReleased = new Promise<void>((resolve) => {
+      releaseDone = resolve;
+    });
+    const stop = vi.fn(async () => {
+      releaseDone();
+    });
+
+    const bridge = await startChannel({
+      cfg: textReplyConfig(),
+      agent: {
+        ...fakeAgent(() => {}),
+        run(): AgentRun {
+          return {
+            events: (async function* (): AsyncGenerator<AgentEvent> {
+              yield { type: 'text', delta: 'working' };
+              await doneReleased;
+              yield { type: 'done' };
+            })(),
+            stop,
+            async waitForExit() {
+              return true;
+            },
+          };
+        },
+      },
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('durable-lifecycle-done-after-interrupt', 'terminal prompt'));
+    await vi.waitFor(async () => expect((await persistentQueue.recoverable())[0]).toMatchObject({ state: 'running' }));
+    const disconnecting = bridge.disconnect();
+    releaseDone();
+    await disconnecting;
+
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
+    await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
+  });
+
+  test('persistent read failure after agent registration does not cancel the run', async () => {
+    const prompts: string[] = [];
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const backingQueue = tempPersistentQueue();
+    const persistentQueue = Object.create(backingQueue) as PersistentQueue;
+    Object.assign(persistentQueue, backingQueue);
+    const hasStrict = vi.fn(async (id: string) => {
+      if (hasStrict.mock.calls.length === 2) throw new Error('transient durable read failed');
+      return PersistentQueue.prototype.hasStrict.call(backingQueue, id);
+    });
+    persistentQueue.hasStrict = hasStrict;
+    const complete = vi.spyOn(persistentQueue, 'complete');
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent((opts) => prompts.push(opts.prompt)),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('durable-transient-has', 'must continue'));
+
+    await vi.waitFor(() => expect(prompts).toEqual([expect.stringContaining('must continue')]));
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
+    await vi.waitFor(async () => expect(await backingQueue.recoverable()).toEqual([]));
+  });
+
+  test('does not let terminal done after user stop override interrupted state', async () => {
+    let releaseStream!: () => void;
+    const streamReleased = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const flushed: string[] = [];
+    const run: AgentRun = {
+      events: (async function* (): AsyncGenerator<AgentEvent> {
+        yield { type: 'text', delta: 'working' };
+        await streamReleased;
+        yield { type: 'done' };
+      })(),
+      async stop() {
+        releaseStream();
+      },
+      async waitForExit() {
+        return true;
+      },
+    };
+    const handle: RunHandle = { run, interrupted: false };
+
+    const processing = processAgentStream(
+      handle,
+      {} as SessionStore,
+      'chat-1',
+      '/tmp/project',
+      'agent:test',
+      undefined,
+      async (state) => {
+        flushed.push(state.terminal);
+      },
+      5000,
+    );
+    await vi.waitFor(() => expect(flushed).toContain('running'));
+    handle.interrupted = true;
+    handle.interruptReason = 'user';
+    await run.stop();
+    const finalState = await processing;
+
+    expect(finalState.terminal).toBe('interrupted');
+    expect(flushed.at(-1)).toBe('interrupted');
+  });
+
+  test('does not let terminal done after idle timeout override idle_timeout state', async () => {
+    vi.useFakeTimers();
+    let releaseStream!: () => void;
+    const streamReleased = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const flushed: string[] = [];
+    const run: AgentRun = {
+      events: (async function* (): AsyncGenerator<AgentEvent> {
+        yield { type: 'text', delta: 'working' };
+        await streamReleased;
+        yield { type: 'done' };
       })(),
       async stop() {
         releaseStream();

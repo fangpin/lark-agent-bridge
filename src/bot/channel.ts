@@ -911,11 +911,19 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     cwd,
   });
 
-  if (durableId && !(await persistentQueue.has(durableId))) {
-    log.warn('queue', 'persistent-cancelled-before-agent-run', { scope, durableId });
-    runHistory.finish(historyEntry.runId, 'interrupted', '任务已取消');
-    activeRuns.unregister(scope, handle);
-    return;
+  if (durableId) {
+    let durableExists = true;
+    try {
+      durableExists = await persistentQueue.hasStrict(durableId);
+    } catch (err) {
+      log.fail('queue', err, { step: 'persistent-has-before-agent-run', scope, durableId, fallback: 'continue' });
+    }
+    if (!durableExists) {
+      log.warn('queue', 'persistent-cancelled-before-agent-run', { scope, durableId });
+      runHistory.finish(historyEntry.runId, 'interrupted', '任务已取消');
+      activeRuns.unregister(scope, handle);
+      return;
+    }
   }
   if (shouldPreserveBeforeAgentRun('before-agent-run')) return;
 
@@ -929,18 +937,26 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   });
   activeRuns.attachRun(scope, handle, run);
   onRunRegistered?.();
-  if (durableId && !(await persistentQueue.has(durableId))) {
-    log.warn('queue', 'persistent-cancelled-after-agent-register', { scope, durableId });
-    handle.interrupted = true;
-    await run.stop().catch((err) => {
-      log.fail('queue', err, { step: 'stop-after-persistent-cancel', scope, durableId });
-    });
-    await persistentQueue.complete(durableId).catch((err) => {
-      log.fail('queue', err, { step: 'complete-after-persistent-cancel', scope, durableId });
-    });
-    runHistory.finish(historyEntry.runId, 'interrupted', '任务已取消');
-    activeRuns.unregister(scope, handle);
-    return;
+  if (durableId) {
+    let durableExists = true;
+    try {
+      durableExists = await persistentQueue.hasStrict(durableId);
+    } catch (err) {
+      log.fail('queue', err, { step: 'persistent-has-after-agent-register', scope, durableId, fallback: 'continue' });
+    }
+    if (!durableExists) {
+      log.warn('queue', 'persistent-cancelled-after-agent-register', { scope, durableId });
+      handle.interrupted = true;
+      await run.stop().catch((err) => {
+        log.fail('queue', err, { step: 'stop-after-persistent-cancel', scope, durableId });
+      });
+      await persistentQueue.complete(durableId).catch((err) => {
+        log.fail('queue', err, { step: 'complete-after-persistent-cancel', scope, durableId });
+      });
+      runHistory.finish(historyEntry.runId, 'interrupted', '任务已取消');
+      activeRuns.unregister(scope, handle);
+      return;
+    }
   }
   log.info('run', 'timeline', {
     runId: historyEntry.runId,
@@ -1651,6 +1667,7 @@ export async function processAgentStream(
       const lifecycleInterruptedBeforeTerminal = interruptedBeforeTerminal
         && handle.interruptReason === 'lifecycle';
       if (handle.interrupted && !terminalEvent) break;
+      if (interruptedBeforeTerminal && !lifecycleInterruptedBeforeTerminal) break;
       if (evt.type === 'error' && interruptedBeforeTerminal) break;
 
       // Track tool flight before re-arming the idle timer so the arm step
@@ -1696,7 +1713,7 @@ export async function processAgentStream(
       const prevTerminal = state.terminal;
       const prevFooter = state.footer;
       state = reduce(state, evt);
-      if (lifecycleInterruptedBeforeTerminal && state.terminal !== 'running') {
+      if (lifecycleInterruptedBeforeTerminal && evt.type === 'error' && state.terminal !== 'running') {
         handle.terminalAfterLifecycleInterrupt = true;
       }
       if (state.footer !== prevFooter || state.terminal !== prevTerminal) {
@@ -1734,6 +1751,9 @@ export async function processAgentStream(
     } else {
       state = finalizeIfRunning(state);
     }
+  }
+  if (state.terminal === 'done' && idleFired && idleTimeoutMs !== undefined) {
+    state = markIdleTimeout(state, Math.round(idleTimeoutMs / 60_000));
   }
   log.info('card', 'final', { terminal: state.terminal, interrupted: handle.interrupted });
   try {
