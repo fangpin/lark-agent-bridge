@@ -457,30 +457,56 @@ describe('PersistentQueue', () => {
     expect(records.map((record) => record.id)).toEqual(['valid']);
   });
 
-  test('skips messages with malformed optional normalized fields', async () => {
+  test('filters malformed optional normalized fields while preserving messages', async () => {
     const file = queueFile();
-    const withField = (id: string, field: string, value: unknown): unknown => ({
-      ...msg(id),
-      [field]: value,
-    });
     await writeFile(
       file,
       JSON.stringify({
         version: 1,
         records: [
-          { id: 'valid', scope: 'scope-a', messages: [msg('m1')], state: 'queued', createdAt: 1_000, updatedAt: 1_000 },
-          { id: 'bad-thread', scope: 'scope-a', messages: [withField('m2', 'threadId', 123)], state: 'queued', createdAt: 2_000, updatedAt: 2_000 },
-          { id: 'bad-reply', scope: 'scope-a', messages: [withField('m3', 'replyToMessageId', {})], state: 'queued', createdAt: 3_000, updatedAt: 3_000 },
-          { id: 'bad-root', scope: 'scope-a', messages: [withField('m4', 'rootId', false)], state: 'queued', createdAt: 4_000, updatedAt: 4_000 },
-          { id: 'bad-sender-name', scope: 'scope-a', messages: [withField('m5', 'senderName', [])], state: 'queued', createdAt: 5_000, updatedAt: 5_000 },
+          {
+            id: 'optional-fields',
+            scope: 'scope-a',
+            messages: [
+              {
+                ...msg('m1'),
+                senderName: [],
+                rootId: false,
+                threadId: 123,
+                replyToMessageId: {},
+              },
+              {
+                ...msg('m2'),
+                senderName: 'Sender Name',
+                rootId: 'root-1',
+                threadId: 'thread-1',
+                replyToMessageId: 'reply-1',
+              },
+            ],
+            state: 'queued',
+            createdAt: 1_000,
+            updatedAt: 1_000,
+          },
         ],
       }),
     );
 
     const records = await new PersistentQueue(file).recoverable();
 
-    expect(records.map((record) => record.id)).toEqual(['valid']);
-    expect(records[0]!.messages[0]!.messageId).toBe('m1');
+    expect(records).toHaveLength(1);
+    expect(records[0]!.messages).toHaveLength(2);
+    expect(records[0]!.messages[0]).toMatchObject({ messageId: 'm1' });
+    expect(records[0]!.messages[0]).not.toHaveProperty('senderName');
+    expect(records[0]!.messages[0]).not.toHaveProperty('rootId');
+    expect(records[0]!.messages[0]).not.toHaveProperty('threadId');
+    expect(records[0]!.messages[0]).not.toHaveProperty('replyToMessageId');
+    expect(records[0]!.messages[1]).toMatchObject({
+      messageId: 'm2',
+      senderName: 'Sender Name',
+      rootId: 'root-1',
+      threadId: 'thread-1',
+      replyToMessageId: 'reply-1',
+    });
   });
 
   test('persists messages with non-json raw data without throwing', async () => {

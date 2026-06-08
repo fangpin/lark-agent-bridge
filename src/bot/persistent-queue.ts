@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
@@ -140,18 +140,19 @@ function normalizeMessage(value: unknown): NormalizedMessage | undefined {
   if (typeof value.senderId !== 'string') return undefined;
   if (typeof value.content !== 'string') return undefined;
   if (typeof value.rawContentType !== 'string') return undefined;
-  if (!isOptionalString(value.senderName)) return undefined;
-  if (!isOptionalString(value.rootId)) return undefined;
-  if (!isOptionalString(value.threadId)) return undefined;
-  if (!isOptionalString(value.replyToMessageId)) return undefined;
   if (!Array.isArray(value.resources)) return undefined;
   if (!Array.isArray(value.mentions)) return undefined;
   if (typeof value.mentionAll !== 'boolean') return undefined;
   if (typeof value.mentionedBot !== 'boolean') return undefined;
   if (typeof value.createTime !== 'number' || !Number.isFinite(value.createTime)) return undefined;
 
-  return {
-    ...value,
+  const message: NormalizedMessage = {
+    messageId: value.messageId,
+    chatId: value.chatId,
+    chatType: value.chatType,
+    senderId: value.senderId,
+    content: value.content,
+    rawContentType: value.rawContentType,
     resources: value.resources.flatMap((resource) => {
       const normalized = normalizeResource(resource);
       return normalized === undefined ? [] : [normalized];
@@ -160,8 +161,18 @@ function normalizeMessage(value: unknown): NormalizedMessage | undefined {
       const normalized = normalizeMention(mention);
       return normalized === undefined ? [] : [normalized];
     }),
+    mentionAll: value.mentionAll,
+    mentionedBot: value.mentionedBot,
+    createTime: value.createTime,
     raw: toJsonSafe(value.raw),
   } as NormalizedMessage;
+
+  if (typeof value.senderName === 'string') message.senderName = value.senderName;
+  if (typeof value.rootId === 'string') message.rootId = value.rootId;
+  if (typeof value.threadId === 'string') message.threadId = value.threadId;
+  if (typeof value.replyToMessageId === 'string') message.replyToMessageId = value.replyToMessageId;
+
+  return message;
 }
 
 function normalizeRecord(value: unknown): PersistentQueueRecord | undefined {
@@ -204,10 +215,14 @@ function makeUniqueId(now: number, records: PersistentQueueRecord[]): string {
 const mutationTails = new Map<string, Promise<unknown>>();
 
 export class PersistentQueue {
+  private readonly lockKey: string;
+
   constructor(
     private readonly file: string = paths.persistentQueueFile,
     private readonly now: () => number = Date.now,
-  ) {}
+  ) {
+    this.lockKey = resolve(file);
+  }
 
   async enqueue(
     scope: string,
@@ -280,9 +295,15 @@ export class PersistentQueue {
   }
 
   private async mutate<T>(fn: () => Promise<T>): Promise<T> {
-    const previous = mutationTails.get(this.file) ?? Promise.resolve();
+    const previous = mutationTails.get(this.lockKey) ?? Promise.resolve();
     const run = previous.then(fn, fn);
-    mutationTails.set(this.file, run.catch(() => undefined));
+    const tail = run.catch(() => undefined);
+    mutationTails.set(this.lockKey, tail);
+    tail.finally(() => {
+      if (mutationTails.get(this.lockKey) === tail) {
+        mutationTails.delete(this.lockKey);
+      }
+    });
     return run;
   }
 
