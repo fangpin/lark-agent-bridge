@@ -226,6 +226,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const channel = createLarkChannel(opts);
   const media = new MediaCache(channel);
   const persistentQueue = deps.persistentQueue ?? new PersistentQueue();
+  let closing = false;
   let resolveRestoreGate!: () => void;
   const restoreGate = new Promise<void>((resolve) => {
     resolveRestoreGate = resolve;
@@ -248,6 +249,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       let startedRun = false;
       let unblockDelayMs: number | undefined;
       try {
+        if (closing) {
+          log.warn('flush', 'skip-closing-before-setup', { scope, durableId });
+          return;
+        }
         if (durableId) {
           const runningRecord = await persistentQueue.markRunning(durableId);
           if (!runningRecord) {
@@ -256,8 +261,20 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           }
           log.info('queue', 'persistent-running', { scope, durableId });
         }
+        if (closing) {
+          log.warn('flush', 'skip-closing-after-mark-running', { scope, durableId });
+          return;
+        }
         const mode = await chatModeCache.resolve(channel, firstMsg.chatId);
+        if (closing) {
+          log.warn('flush', 'skip-closing-after-chat-mode', { scope, durableId });
+          return;
+        }
         const resolved = await resolveAgentForScope(scope, agentDeps);
+        if (closing) {
+          log.warn('flush', 'skip-closing-before-run', { scope, durableId });
+          return;
+        }
         await runAgentBatch({
           channel,
           agent: resolved.agent,
@@ -281,7 +298,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       } catch (err) {
         log.fail('flush', err);
         if (durableId && !startedRun) {
-          pending.pushBatch(scope, batch, { durableId });
+          pending.pushBatch(scope, batch, { durableId, front: true });
           unblockDelayMs = SETUP_RETRY_DELAY_MS;
           log.warn('queue', 'persistent-requeued-after-setup-failure', {
             scope,
@@ -436,6 +453,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   return {
     channel,
     disconnect: async () => {
+      closing = true;
       keepalive.stop();
       await activeRuns.stopAll('lifecycle');
       commentQueue.cancelAll();

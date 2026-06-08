@@ -162,4 +162,27 @@ describe('PendingQueue', () => {
       vi.useRealTimers();
     }
   });
+
+  test('cancel during delayed unblock clears blocked state for later work', async () => {
+    vi.useFakeTimers();
+    try {
+      const flushed: string[][] = [];
+      const queue = new PendingQueue(0, (_scope, batch) => {
+        flushed.push(batch.map((m) => m.messageId));
+      });
+
+      queue.block('chat-1');
+      queue.push('chat-1', msg('old'));
+      queue.unblockAfter('chat-1', 1000);
+
+      expect(queue.cancel('chat-1').map((m) => m.messageId)).toEqual(['old']);
+      queue.push('chat-1', msg('new'));
+
+      expect(flushed).toEqual([['new']]);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(flushed).toEqual([['new']]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -20,6 +20,7 @@ export type FlushHandler = (scope: string, batch: NormalizedMessage[], durableId
 
 export interface PendingPushOptions {
   durableId?: string;
+  front?: boolean;
 }
 
 /**
@@ -63,22 +64,31 @@ export class PendingQueue {
       }
     }
 
-    const lastBatch = entry.batches.at(-1);
-    if (lastBatch && lastBatch.durableId === opts.durableId) {
-      lastBatch.messages.push(...messages);
-      if (this.blocked.has(scope) && entry.timer) {
-        return this.queuedSize(scope);
+    if (opts.front) {
+      const firstBatch = entry.batches[0];
+      if (firstBatch && firstBatch.durableId === opts.durableId) {
+        firstBatch.messages.unshift(...messages);
+      } else {
+        entry.batches.unshift({ messages: [...messages], durableId: opts.durableId });
       }
     } else {
-      if (entry.batches.length > 0 && !this.blocked.has(scope)) {
-        this.flush(scope);
-        entry = this.map.get(scope);
-        if (!entry) {
-          entry = { batches: [] };
-          this.map.set(scope, entry);
+      const lastBatch = entry.batches.at(-1);
+      if (lastBatch && lastBatch.durableId === opts.durableId) {
+        lastBatch.messages.push(...messages);
+        if (this.blocked.has(scope) && entry.timer) {
+          return this.queuedSize(scope);
         }
+      } else {
+        if (entry.batches.length > 0 && !this.blocked.has(scope)) {
+          this.flush(scope);
+          entry = this.map.get(scope);
+          if (!entry) {
+            entry = { batches: [] };
+            this.map.set(scope, entry);
+          }
+        }
+        entry.batches.push({ messages: [...messages], durableId: opts.durableId });
       }
-      entry.batches.push({ messages: [...messages], durableId: opts.durableId });
     }
 
     const size = this.queuedSize(scope);
@@ -91,6 +101,7 @@ export class PendingQueue {
     const delayed = this.delayedUnblocks.get(scope);
     if (delayed) clearTimeout(delayed.timer);
     this.delayedUnblocks.delete(scope);
+    this.blocked.delete(scope);
     if (!entry) return [];
     if (entry.timer) clearTimeout(entry.timer);
     this.map.delete(scope);

@@ -2667,13 +2667,13 @@ describe('opaque Cursor SDK auto retry', () => {
   });
 
   test('lifecycle disconnect during setup prevents agent run and preserves durable record', async () => {
-    let resumeSetup!: () => void;
-    const setupPaused = new Promise<void>((resolve) => {
-      resumeSetup = resolve;
+    let resumeChatMode!: () => void;
+    const chatModePaused = new Promise<void>((resolve) => {
+      resumeChatMode = resolve;
     });
-    let setupStarted!: () => void;
-    const setupStartedPromise = new Promise<void>((resolve) => {
-      setupStarted = resolve;
+    let chatModeStarted!: () => void;
+    const chatModeStartedPromise = new Promise<void>((resolve) => {
+      chatModeStarted = resolve;
     });
     const runCalls: AgentRunOptions[] = [];
     const persistentQueue = tempPersistentQueue();
@@ -2682,29 +2682,28 @@ describe('opaque Cursor SDK auto retry', () => {
       now: 1000,
     });
     const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
-    const fakeChannel = createFakeChannel(messages);
-    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
-    const agent = {
-      ...fakeAgent((opts) => runCalls.push(opts)),
-      async prepareSession() {
-        setupStarted();
-        await setupPaused;
-        return 'prepared-session';
+    const fakeChannel = {
+      ...createFakeChannel(messages),
+      async getChatMode() {
+        chatModeStarted();
+        await chatModePaused;
+        return 'group';
       },
-    } satisfies AgentAdapter;
+    } as unknown as LarkChannel;
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
 
     const bridge = await startChannel({
       cfg: textReplyConfig(),
-      agent,
+      agent: fakeAgent((opts) => runCalls.push(opts)),
       sessions: fakeSessions(),
       workspaces: fakeWorkspaces('/tmp/project'),
       controls: fakeControls(textReplyConfig()),
       persistentQueue,
     });
-    await setupStartedPromise;
+    await chatModeStartedPromise;
 
     const disconnectPromise = bridge.disconnect();
-    resumeSetup();
+    resumeChatMode();
     await disconnectPromise;
 
     expect(runCalls).toEqual([]);
