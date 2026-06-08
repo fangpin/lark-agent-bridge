@@ -111,6 +111,16 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     pending: deps.pending,
     persistentQueue: deps.persistentQueue,
     runHistory: deps.runHistory,
+    cancelQueuedWork: async (targetScope = scope) => {
+      const droppedPersistent = await deps.persistentQueue.cancelScope(targetScope);
+      const dropped = deps.pending.cancel(targetScope);
+      log.info('cardAction', 'command-drop-pending', {
+        scope: targetScope,
+        cmd,
+        droppedPending: dropped.length,
+        droppedPersistent,
+      });
+    },
     formValue,
     fromCardAction: true,
   };

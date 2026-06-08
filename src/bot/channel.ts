@@ -586,7 +586,21 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
-  const record = await persistentQueue.enqueue(scope, [msg]);
+  let record;
+  try {
+    record = await persistentQueue.enqueue(scope, [msg]);
+  } catch (err) {
+    log.fail('intake', err, { step: 'persistent-enqueue', scope, messageId: msg.messageId });
+    try {
+      await channel.send(msg.chatId, { markdown: '❌ 队列持久化失败，消息未入队。请稍后重试。' }, {
+        replyTo: msg.messageId,
+        ...(msg.threadId ? { replyInThread: true as const } : {}),
+      });
+    } catch (sendErr) {
+      log.fail('intake', sendErr, { step: 'persistent-enqueue-reply', scope, messageId: msg.messageId });
+    }
+    return;
+  }
   const size = pending.push(scope, msg, { durableId: record.id });
   log.info('intake', 'queued', { scope, queueSize: size, flushDelayMs: PENDING_FLUSH_DELAY_MS, durableId: record.id });
 }

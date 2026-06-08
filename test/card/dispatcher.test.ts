@@ -28,7 +28,9 @@ function deps(overrides: Partial<CardDispatchDeps> = {}): CardDispatchDeps {
     },
     evt: callbackEvent(),
     sessions: {},
-    workspaces: {},
+    workspaces: {
+      cwdFor: vi.fn(() => '/repo'),
+    },
     activeRuns: {
       interrupt: vi.fn(() => false),
     },
@@ -101,6 +103,68 @@ describe('handleCardAction callback forwarding', () => {
 
     expect(pushBatch).not.toHaveBeenCalled();
     expect(d.pending.queuedSize('chat-1')).toBe(0);
+  });
+});
+
+describe('handleCardAction mutating command cleanup', () => {
+  test('card backend switch cancels durable and memory queued work before mutating backend state', async () => {
+    const callOrder: string[] = [];
+    const backendStore = {
+      get: vi.fn(() => 'claude'),
+      set: vi.fn((_scope: string, _key: string) => {
+        callOrder.push('backend.set');
+      }),
+      clear: vi.fn(),
+    };
+    const makeAgent = (key: string) => ({
+      id: key,
+      displayName: key,
+      sessionKey: key,
+      commandLabel: key,
+      descriptor: {
+        id: key,
+        label: key,
+        runtime: 'test',
+        sessionKey: key,
+        commandLabel: key,
+        supportsRetry: true,
+        supportsWorkers: false,
+      },
+      evictScope: vi.fn(async () => undefined),
+    });
+    const d = deps({
+      evt: callbackEvent({ cmd: 'backend', arg: 'codex' }),
+      agent: makeAgent('claude') as never,
+      agentRegistry: {
+        keys: () => ['claude', 'codex'],
+        defaultKey: () => 'claude',
+        has: (key: string) => ['claude', 'codex'].includes(key),
+        get: async (key: string) => makeAgent(key),
+        getOrDefault: async (key?: string) => makeAgent(key ?? 'claude'),
+      } as never,
+      backendStore: backendStore as never,
+      persistentQueue: {
+        enqueue: vi.fn(),
+        cancelScope: vi.fn(async () => {
+          callOrder.push('durable.cancel');
+          return 1;
+        }),
+      } as unknown as PersistentQueue,
+    });
+    d.pending.push('chat-1', fakeMessage('msg-pending'));
+    const originalCancel = d.pending.cancel.bind(d.pending);
+    const cancel = vi.spyOn(d.pending, 'cancel').mockImplementation((scope) => {
+      callOrder.push('memory.cancel');
+      return originalCancel(scope);
+    });
+
+    await handleCardAction(d);
+
+    expect(d.persistentQueue.cancelScope).toHaveBeenCalledWith('chat-1');
+    expect(cancel).toHaveBeenCalledWith('chat-1');
+    expect(backendStore.set).toHaveBeenCalledWith('chat-1', 'codex');
+    expect(d.pending.queuedSize('chat-1')).toBe(0);
+    expect(callOrder).toEqual(['durable.cancel', 'memory.cancel', 'backend.set']);
   });
 });
 

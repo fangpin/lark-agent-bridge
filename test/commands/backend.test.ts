@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
 import type { AgentAdapter } from '../../src/agent/types';
 import { tryHandleCommand, type CommandContext } from '../../src/commands';
@@ -95,5 +98,32 @@ describe('/backend command', () => {
     await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
 
     expect(commandCtx.channel.send).toHaveBeenCalledWith('chat-1', { markdown: expect.stringContaining('未知 backend') }, { replyTo: 'msg-1' });
+  });
+
+  test('/cd does not mutate cwd or session when queued work cancellation fails', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'lark-bridge-cd-'));
+    const cancelQueuedWork = vi.fn(async () => {
+      throw new Error('durable cancel failed');
+    });
+    const commandCtx = ctx(`/cd ${cwd}`, {
+      cancelQueuedWork,
+      workspaces: {
+        cwdFor: vi.fn(() => '/repo'),
+        setCwd: vi.fn(),
+      } as never,
+      sessions: {
+        clear: vi.fn(),
+        getRaw: vi.fn(),
+        resumeFor: vi.fn(() => undefined),
+      } as never,
+    });
+
+    await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
+
+    expect(cancelQueuedWork).toHaveBeenCalledWith('chat-1');
+    expect(commandCtx.workspaces.setCwd).not.toHaveBeenCalled();
+    expect(commandCtx.sessions.clear).not.toHaveBeenCalled();
+    expect(commandCtx.activeRuns.interrupt).not.toHaveBeenCalled();
+    expect(commandCtx.channel.send).toHaveBeenCalledWith('chat-1', { markdown: expect.stringContaining('清理已排队任务失败') }, { replyTo: 'msg-1' });
   });
 });

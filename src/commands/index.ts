@@ -277,6 +277,17 @@ async function cancelQueuedWork(ctx: CommandContext, scope = ctx.scope): Promise
   await ctx.cancelQueuedWork?.(scope);
 }
 
+async function cancelQueuedWorkBeforeMutation(ctx: CommandContext, scope = ctx.scope): Promise<boolean> {
+  try {
+    await cancelQueuedWork(ctx, scope);
+    return true;
+  } catch (err) {
+    log.fail('command', err, { step: 'cancel-queued-work', scope });
+    await reply(ctx, `❌ 清理已排队任务失败：${err instanceof Error ? err.message : String(err)}\n状态未变更，请处理后重试。`);
+    return false;
+  }
+}
+
 interface CommandStatusCardOpts {
   title: string;
   status: 'success' | 'warning' | 'info' | 'error';
@@ -375,12 +386,12 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
     return handleNewChat(rawName, ctx);
   }
 
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
   const wasRunning = ctx.activeRuns.interrupt(ctx.scope);
   await ctx.agent.evictScope?.(ctx.scope, workspaceCwd(ctx));
   ctx.sessions.clear(ctx.scope, ctx.agent.sessionKey);
   const cwd = effectiveCwd(ctx);
   await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, cwd);
-  await cancelQueuedWork(ctx);
   await replyCard(
     ctx,
     commandStatusCard({
@@ -495,12 +506,12 @@ async function handleCd(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, `路径不存在：\`${absolute}\``);
     return;
   }
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
   ctx.activeRuns.interrupt(ctx.scope);
   await ctx.agent.evictScope?.(ctx.scope, workspaceCwd(ctx));
   ctx.workspaces.setCwd(workspaceScope(ctx), absolute);
   ctx.sessions.clear(ctx.scope, ctx.agent.sessionKey);
   await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, absolute);
-  await cancelQueuedWork(ctx);
   await reply(ctx, `✓ 已切换 cwd 到 \`${absolute}\`\n（session 已重置）`);
 }
 
@@ -555,12 +566,12 @@ async function handleWsUse(name: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, `未找到工作空间：\`${name}\``);
     return;
   }
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
   ctx.activeRuns.interrupt(ctx.scope);
   await ctx.agent.evictScope?.(ctx.scope, workspaceCwd(ctx));
   ctx.workspaces.setCwd(workspaceScope(ctx), cwd);
   ctx.sessions.clear(ctx.scope, ctx.agent.sessionKey);
   await ensureResumeSession(ctx.agent, ctx.sessions, ctx.scope, cwd);
-  await cancelQueuedWork(ctx);
   await reply(ctx, `✓ 已切换到 \`${name}\` (${cwd})\n（session 已重置）`);
 }
 
@@ -609,9 +620,9 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
 
 async function applyResume(sessionId: string, ctx: CommandContext): Promise<void> {
   const cwd = effectiveCwd(ctx);
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
   ctx.activeRuns.interrupt(ctx.scope);
   ctx.sessions.set(ctx.scope, ctx.agent.sessionKey, sessionId, cwd);
-  await cancelQueuedWork(ctx);
   await reply(
     ctx,
     `✓ 已恢复会话 \`${sessionId.slice(0, 8)}…\`。接着发消息就行。`,
@@ -666,11 +677,11 @@ async function handleBackend(args: string, ctx: CommandContext): Promise<void> {
   }
 
   const nextAgent = await ctx.agentRegistry.get(nextKey);
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
   ctx.activeRuns.interrupt(ctx.scope);
   await ctx.agent.evictScope?.(ctx.scope, workspaceCwd(ctx));
   if (requested === 'default') ctx.backendStore.clear(ctx.scope);
   else ctx.backendStore.set(ctx.scope, nextKey);
-  await cancelQueuedWork(ctx);
 
   let renameStatus = '';
   if (ctx.chatMode === 'group') {
@@ -742,12 +753,12 @@ async function handleDocBindCurrentChat(docInput: string, ctx: CommandContext): 
   const previousAgent = await ctx.agentRegistry.getOrDefault(previousKey);
   const cwd = currentSession.cwd ?? effectiveCwd(ctx);
 
+  if (!await cancelQueuedWorkBeforeMutation(ctx, scope)) return;
   ctx.activeRuns.interrupt(scope);
   await previousAgent.evictScope?.(scope, cwd);
   if (currentBackend) ctx.backendStore.set(scope, backendKey);
   else ctx.backendStore.clear(scope);
   ctx.sessions.set(scope, nextAgent.sessionKey, currentSession.sessionId, cwd);
-  await cancelQueuedWork(ctx, scope);
 
   await replyCard(
     ctx,
@@ -793,12 +804,12 @@ async function handleDocBindExplicit(parts: string[], ctx: CommandContext): Prom
   const nextAgent = await ctx.agentRegistry.get(backendKey);
   const cwd = ctx.workspaces.cwdFor(scope) ?? homedir();
 
+  if (!await cancelQueuedWorkBeforeMutation(ctx, scope)) return;
   ctx.activeRuns.interrupt(scope);
   await previousAgent.evictScope?.(scope, cwd);
   if (backendInput === 'default') ctx.backendStore.clear(scope);
   else ctx.backendStore.set(scope, backendKey);
   ctx.sessions.set(scope, nextAgent.sessionKey, sessionId, cwd);
-  await cancelQueuedWork(ctx, scope);
 
   await replyCard(
     ctx,
@@ -863,12 +874,12 @@ async function handleDocClear(parts: string[], ctx: CommandContext): Promise<voi
   const cwd = ctx.workspaces.cwdFor(scope) ?? homedir();
   const previousKey = ctx.backendStore?.get(scope);
   const previousAgent = ctx.agentRegistry ? await ctx.agentRegistry.getOrDefault(previousKey) : ctx.agent;
+  if (!await cancelQueuedWorkBeforeMutation(ctx, scope)) return;
   ctx.activeRuns.interrupt(scope);
   await previousAgent.evictScope?.(scope, cwd);
   const clearedBackend = ctx.backendStore?.clear(scope) ?? false;
   const hadSessions = Boolean(ctx.sessions.getRaw(scope));
   ctx.sessions.clear(scope);
-  await cancelQueuedWork(ctx, scope);
 
   await replyCard(
     ctx,

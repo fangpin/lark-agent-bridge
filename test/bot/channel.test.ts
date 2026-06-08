@@ -1302,6 +1302,57 @@ describe('persistent queue recovery', () => {
     await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
   });
 
+  test('durable enqueue failure sends a visible reply and does not enqueue memory work', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const sends: Array<{ chatId: string; payload: unknown; opts: unknown }> = [];
+    const fakeChannel = {
+      ...createFakeChannel(messages),
+      async send(chatId: string, payload: unknown, opts: unknown) {
+        sends.push({ chatId, payload, opts });
+        return { messageId: 'enqueue-failed-reply' };
+      },
+    } as unknown as LarkChannel;
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+    const pendingPush = vi.spyOn(PendingQueue.prototype, 'push');
+    const pendingPushBatch = vi.spyOn(PendingQueue.prototype, 'pushBatch');
+    const runCalls: AgentRunOptions[] = [];
+    const persistentQueue = {
+      enqueue: vi.fn(async () => {
+        throw new Error('durable enqueue failed');
+      }),
+      recoverable: vi.fn(async () => []),
+      markRunning: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancelScope: vi.fn(async () => 0),
+    } as unknown as PersistentQueue;
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent((opts) => runCalls.push(opts)),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('msg-durable-fail', 'normal prompt'));
+
+    expect(persistentQueue.enqueue).toHaveBeenCalledWith('chat-1', [expect.objectContaining({ messageId: 'msg-durable-fail' })]);
+    expect(pendingPush).not.toHaveBeenCalled();
+    expect(pendingPushBatch).not.toHaveBeenCalled();
+    expect(runCalls).toEqual([]);
+    expect(sends).toEqual([
+      {
+        chatId: 'chat-1',
+        payload: { markdown: expect.stringContaining('队列持久化失败') },
+        opts: { replyTo: 'msg-durable-fail' },
+      },
+    ]);
+  });
+
   test('/new cancels durable and memory queued work for the reset scope', async () => {
     const persistentQueue = tempPersistentQueue();
     const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
