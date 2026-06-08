@@ -161,7 +161,7 @@ describe('channel streamMessageId persistence', () => {
       id: 'durable-timeout',
       now: 1000,
     });
-    const cancelQueuedScope = vi.spyOn(persistentQueue, 'cancelQueuedScope').mockRejectedValueOnce(new Error('disk cleanup failed'));
+    const cancelQueuedScopeIds = vi.spyOn(persistentQueue, 'cancelQueuedScopeIds').mockRejectedValueOnce(new Error('disk cleanup failed'));
     const setIdleTimeoutMinutes = vi.fn();
     const sessions = {
       ...fakeSessions(),
@@ -185,7 +185,7 @@ describe('channel streamMessageId persistence', () => {
     if (!onMessage) throw new Error('message handler was not registered');
     await onMessage(fakeMessage('timeout-off', '/timeout off'));
 
-    expect(cancelQueuedScope).toHaveBeenCalledWith('chat-1');
+    expect(cancelQueuedScopeIds).toHaveBeenCalledWith('chat-1');
     expect(setIdleTimeoutMinutes).not.toHaveBeenCalled();
     expect(send).toHaveBeenCalledWith(
       'chat-1',
@@ -204,7 +204,7 @@ describe('channel streamMessageId persistence', () => {
       id: 'durable-timeout-success',
       now: 1000,
     });
-    const cancelQueuedScope = vi.spyOn(persistentQueue, 'cancelQueuedScope');
+    const cancelQueuedScopeIds = vi.spyOn(persistentQueue, 'cancelQueuedScopeIds');
     const clearIdleTimeoutOverride = vi.fn(() => true);
     const sessions = {
       ...fakeSessions(),
@@ -227,7 +227,7 @@ describe('channel streamMessageId persistence', () => {
     if (!onMessage) throw new Error('message handler was not registered');
     await onMessage(fakeMessage('timeout-default', '/timeout default'));
 
-    expect(cancelQueuedScope).toHaveBeenCalledWith('chat-1');
+    expect(cancelQueuedScopeIds).toHaveBeenCalledWith('chat-1');
     expect(clearIdleTimeoutOverride).toHaveBeenCalledWith('chat-1');
     await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
   });
@@ -240,7 +240,7 @@ describe('channel streamMessageId persistence', () => {
       now: 2000,
     });
     await persistentQueue.markRunning('running-timeout', { now: 3000 });
-    const cancelQueuedScope = vi.spyOn(persistentQueue, 'cancelQueuedScope');
+    const cancelQueuedScopeIds = vi.spyOn(persistentQueue, 'cancelQueuedScopeIds');
     const activeRuns = new ActiveRuns();
     const stop = vi.fn(async () => undefined);
     activeRuns.register('chat-1', {
@@ -273,12 +273,66 @@ describe('channel streamMessageId persistence', () => {
     if (!onMessage) throw new Error('message handler was not registered');
     await onMessage(fakeMessage('timeout-off-active', '/timeout off'));
 
-    expect(cancelQueuedScope).toHaveBeenCalledWith('chat-1');
+    expect(cancelQueuedScopeIds).toHaveBeenCalledWith('chat-1');
     expect(setIdleTimeoutMinutes).toHaveBeenCalledWith('chat-1', 0);
     expect(stop).not.toHaveBeenCalled();
     expect(await persistentQueue.recoverable()).toEqual([
       expect.objectContaining({ id: 'running-timeout', scope: 'chat-1', state: 'running' }),
     ]);
+  });
+
+  test('/timeout off during an active run does not unblock the scope for concurrent work', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    let releaseFirst!: () => void;
+    const firstReleased = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const prompts: string[] = [];
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: {
+        ...fakeAgent(() => {}),
+        run(opts: AgentRunOptions): AgentRun {
+          prompts.push(opts.prompt);
+          return {
+            events: (async function* (): AsyncGenerator<AgentEvent> {
+              yield { type: 'text', delta: 'working' };
+              if (prompts.length === 1) await firstReleased;
+              yield { type: 'done' };
+            })(),
+            async stop() {},
+            async waitForExit() {
+              return true;
+            },
+          };
+        },
+      },
+      sessions: {
+        ...fakeSessions(),
+        setIdleTimeoutMinutes: vi.fn(),
+        getIdleTimeoutMinutes: vi.fn(() => 15),
+      } as unknown as SessionStore,
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue: tempPersistentQueue(),
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('active-1', 'first prompt'));
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    await onMessage(fakeMessage('timeout-during-active', '/timeout off'));
+    await onMessage(fakeMessage('active-2', 'second prompt'));
+    await delay(20);
+
+    expect(prompts).toHaveLength(1);
+
+    releaseFirst();
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+    expect(prompts[1]).toContain('second prompt');
   });
 
   test('exact /stop replies with failure and leaves active run running when durable cancel fails', async () => {
@@ -1686,12 +1740,42 @@ describe('persistent queue recovery', () => {
     pending.block('chat-1');
 
     await restorePersistentQueue(persistentQueue, pending);
-    const droppedPersistent = await persistentQueue.cancelQueuedScope('chat-1');
+    const droppedPersistent = await persistentQueue.cancelQueuedScopeIds('chat-1');
     const droppedPending = pending.cancel('chat-1');
 
-    expect(droppedPersistent).toBe(1);
+    expect(droppedPersistent).toEqual(['restored-running']);
     expect(droppedPending.map((message) => message.messageId)).toEqual(['restored-running']);
     expect(await persistentQueue.recoverable()).toEqual([]);
+  });
+
+  test('queued-only cleanup does not drop restored running memory work when markQueued failed', async () => {
+    const persistentQueue = tempPersistentQueue();
+    await persistentQueue.enqueue('chat-1', [fakeMessage('restored-running-still-running', 'restored running prompt')], {
+      id: 'restored-running-still-running',
+      now: 1000,
+    });
+    await persistentQueue.markRunning('restored-running-still-running', { now: 2000 });
+    await persistentQueue.enqueue('chat-1', [fakeMessage('restored-queued-cancelled', 'queued prompt')], {
+      id: 'restored-queued-cancelled',
+      now: 3000,
+    });
+    vi.spyOn(persistentQueue, 'markQueued').mockRejectedValueOnce(new Error('mark queued unavailable during restore'));
+    const pending = new PendingQueue(1000, () => {});
+    pending.block('chat-1');
+
+    await restorePersistentQueue(persistentQueue, pending);
+    const droppedPersistent = await persistentQueue.cancelQueuedScopeIds('chat-1');
+    const droppedPending = pending.cancel('chat-1', {
+      keepBlocked: true,
+      durableIds: new Set(droppedPersistent),
+    });
+
+    expect(droppedPersistent).toEqual(['restored-queued-cancelled']);
+    expect(droppedPending.map((message) => message.messageId)).toEqual(['restored-queued-cancelled']);
+    expect(pending.queuedSize('chat-1')).toBe(1);
+    expect(await persistentQueue.recoverable()).toEqual([
+      expect.objectContaining({ id: 'restored-running-still-running', state: 'running' }),
+    ]);
   });
 
   test('/new cancels durable and memory queued work for the reset scope', async () => {
@@ -1901,6 +1985,93 @@ describe('processAgentStream', () => {
       terminal: 'error',
       errorMsg: expect.stringContaining('read ECONNRESET'),
     });
+  });
+
+  test('preserves lifecycle interruption when the agent stream throws after lifecycle stop', async () => {
+    let releaseStream!: () => void;
+    const streamReleased = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const flushed: string[] = [];
+    const run: AgentRun = {
+      events: (async function* (): AsyncGenerator<AgentEvent> {
+        yield { type: 'text', delta: 'working' };
+        await streamReleased;
+        throw new Error('transport closed after disconnect');
+      })(),
+      async stop() {
+        releaseStream();
+      },
+      async waitForExit() {
+        return true;
+      },
+    };
+    const handle: RunHandle = { run, interrupted: false };
+
+    const processing = processAgentStream(
+      handle,
+      {} as SessionStore,
+      'chat-1',
+      '/tmp/project',
+      'agent:test',
+      undefined,
+      async (state) => {
+        flushed.push(state.terminal);
+      },
+      5000,
+    );
+    await vi.waitFor(() => expect(flushed).toContain('running'));
+    handle.interrupted = true;
+    handle.interruptReason = 'lifecycle';
+    await run.stop();
+    const finalState = await processing;
+
+    expect(finalState.terminal).toBe('interrupted');
+    expect(handle.terminalAfterLifecycleInterrupt).toBe(true);
+    expect(flushed.at(-1)).toBe('interrupted');
+  });
+
+  test('does not let a terminal error after user stop override interrupted state', async () => {
+    let releaseStream!: () => void;
+    const streamReleased = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const flushed: string[] = [];
+    const run: AgentRun = {
+      events: (async function* (): AsyncGenerator<AgentEvent> {
+        yield { type: 'text', delta: 'working' };
+        await streamReleased;
+        yield { type: 'error', message: 'backend shutdown error after stop' };
+      })(),
+      async stop() {
+        releaseStream();
+      },
+      async waitForExit() {
+        return true;
+      },
+    };
+    const handle: RunHandle = { run, interrupted: false };
+
+    const processing = processAgentStream(
+      handle,
+      {} as SessionStore,
+      'chat-1',
+      '/tmp/project',
+      'agent:test',
+      undefined,
+      async (state) => {
+        flushed.push(state.terminal);
+      },
+      5000,
+    );
+    await vi.waitFor(() => expect(flushed).toContain('running'));
+    handle.interrupted = true;
+    handle.interruptReason = 'user';
+    await run.stop();
+    const finalState = await processing;
+
+    expect(finalState.terminal).toBe('interrupted');
+    expect(flushed.at(-1)).toBe('interrupted');
   });
 
   test('does not convert card flush failures into agent stream errors', async () => {
@@ -3252,6 +3423,48 @@ describe('opaque Cursor SDK auto retry', () => {
       markIdleTimeout(createInitialState('pre-terminal-idle-timeout'), 1),
     );
 
+    expect(finalState.terminal).toBe('idle_timeout');
+    expect(flushed.at(-1)).toBe('idle_timeout');
+  });
+
+  test('does not let a terminal error after idle timeout override idle_timeout state', async () => {
+    vi.useFakeTimers();
+    let releaseStream!: () => void;
+    const streamReleased = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const flushed: string[] = [];
+    const run: AgentRun = {
+      events: (async function* (): AsyncGenerator<AgentEvent> {
+        yield { type: 'text', delta: 'working' };
+        await streamReleased;
+        yield { type: 'error', message: 'backend shutdown error after idle timeout' };
+      })(),
+      async stop() {
+        releaseStream();
+      },
+      async waitForExit() {
+        return true;
+      },
+    };
+    const handle: RunHandle = { run, interrupted: false };
+
+    const processing = processAgentStream(
+      handle,
+      {} as SessionStore,
+      'chat-1',
+      '/tmp/project',
+      'agent:test',
+      1000,
+      async (state) => {
+        flushed.push(state.terminal);
+      },
+      5000,
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    const finalState = await processing;
+
+    expect(handle.interrupted).toBe(true);
     expect(finalState.terminal).toBe('idle_timeout');
     expect(flushed.at(-1)).toBe('idle_timeout');
   });

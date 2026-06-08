@@ -666,23 +666,29 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       });
     },
     cancelQueuedOnlyWork: async (targetScope = scope) => {
-      const droppedPersistent = await persistentQueue.cancelQueuedScope(targetScope);
-      const dropped = pending.cancel(targetScope);
+      const droppedIds = await persistentQueue.cancelQueuedScopeIds(targetScope);
+      const dropped = pending.cancel(targetScope, {
+        keepBlocked: true,
+        durableIds: new Set(droppedIds),
+      });
       log.info('intake', 'command-drop-pending-queued-only', {
         scope: targetScope,
         cmd: parsedCommand?.cmd,
         droppedPending: dropped.length,
-        droppedPersistent,
+        droppedPersistent: droppedIds.length,
       });
     },
     cancelPendingQueuedWork: async (targetScope = scope) => {
-      const droppedPersistent = await persistentQueue.cancelQueuedScope(targetScope);
-      const dropped = pending.cancel(targetScope);
+      const droppedIds = await persistentQueue.cancelQueuedScopeIds(targetScope);
+      const dropped = pending.cancel(targetScope, {
+        keepBlocked: true,
+        durableIds: new Set(droppedIds),
+      });
       log.info('intake', 'command-drop-pending', {
         scope: targetScope,
         cmd: parsedCommand?.cmd,
         droppedPending: dropped.length,
-        droppedPersistent,
+        droppedPersistent: droppedIds.length,
       });
     },
   });
@@ -1641,10 +1647,11 @@ export async function processAgentStream(
   try {
     for await (const evt of handle.run.events) {
       const terminalEvent = evt.type === 'done' || evt.type === 'error';
-      const lifecycleInterruptedBeforeTerminal = terminalEvent
-        && handle.interrupted
+      const interruptedBeforeTerminal = terminalEvent && handle.interrupted;
+      const lifecycleInterruptedBeforeTerminal = interruptedBeforeTerminal
         && handle.interruptReason === 'lifecycle';
       if (handle.interrupted && !terminalEvent) break;
+      if (evt.type === 'error' && interruptedBeforeTerminal) break;
 
       // Track tool flight before re-arming the idle timer so the arm step
       // sees the correct set size. tool_use opens a window; tool_result
@@ -1704,7 +1711,10 @@ export async function processAgentStream(
   } catch (err) {
     if (err instanceof FlushFailure) throw err.cause;
     log.fail('agent-stream', err);
-    if (state.terminal === 'running') {
+    if (state.terminal === 'running' && handle.interrupted && handle.interruptReason === 'lifecycle') {
+      handle.terminalAfterLifecycleInterrupt = true;
+      state = markInterrupted(state);
+    } else if (state.terminal === 'running') {
       state = reduce(state, { type: 'error', message: formatAgentStreamError(err) });
     }
   } finally {

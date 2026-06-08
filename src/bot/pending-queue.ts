@@ -23,6 +23,11 @@ export interface PendingPushOptions {
   front?: boolean;
 }
 
+export interface PendingCancelOptions {
+  keepBlocked?: boolean;
+  durableIds?: ReadonlySet<string>;
+}
+
 /**
  * Per-scope pending queue. `scope` is the session scope string (typically
  * `chatId` for p2p / regular group, `chatId:threadId` for topic groups).
@@ -96,16 +101,37 @@ export class PendingQueue {
     return size;
   }
 
-  cancel(scope: string): NormalizedMessage[] {
+  cancel(scope: string, opts: PendingCancelOptions = {}): NormalizedMessage[] {
     const entry = this.map.get(scope);
     const delayed = this.delayedUnblocks.get(scope);
     if (delayed) clearTimeout(delayed.timer);
     this.delayedUnblocks.delete(scope);
-    this.blocked.delete(scope);
+    if (!opts.keepBlocked) this.blocked.delete(scope);
     if (!entry) return [];
     if (entry.timer) clearTimeout(entry.timer);
-    this.map.delete(scope);
-    return entry.batches.flatMap((batch) => batch.messages);
+
+    if (!opts.durableIds) {
+      this.map.delete(scope);
+      return entry.batches.flatMap((batch) => batch.messages);
+    }
+
+    const dropped: NormalizedMessage[] = [];
+    const kept: PendingBatch[] = [];
+    for (const batch of entry.batches) {
+      if (batch.durableId && opts.durableIds.has(batch.durableId)) {
+        dropped.push(...batch.messages);
+      } else {
+        kept.push(batch);
+      }
+    }
+
+    if (kept.length === 0) {
+      this.map.delete(scope);
+    } else {
+      entry.batches = kept;
+      entry.timer = this.blocked.has(scope) ? undefined : this.scheduleFlush(scope);
+    }
+    return dropped;
   }
 
   queuedSize(scope: string): number {

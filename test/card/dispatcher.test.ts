@@ -78,7 +78,7 @@ function deps(overrides: Partial<CardDispatchDeps> = {}): CardDispatchDeps {
         updatedAt: 1000,
       })),
       cancelScope: vi.fn(async () => 0),
-      cancelQueuedScope: vi.fn(async () => 0),
+      cancelQueuedScopeIds: vi.fn(async () => []),
     } as unknown as PersistentQueue,
     runHistory: {},
     chatModeCache: {
@@ -247,14 +247,14 @@ describe('handleCardAction config/account submit cleanup', () => {
         cancelScope: vi.fn(async () => {
           throw new Error('full cleanup should preserve active running records');
         }),
-        cancelQueuedScope: vi.fn(async () => 1),
+        cancelQueuedScopeIds: vi.fn(async () => ['queued-durable']),
       } as unknown as PersistentQueue,
     });
 
     await handleCardAction(d);
     await vi.runAllTimersAsync();
 
-    expect(d.persistentQueue.cancelQueuedScope).toHaveBeenCalledWith('chat-1');
+    expect(d.persistentQueue.cancelQueuedScopeIds).toHaveBeenCalledWith('chat-1');
     expect(d.persistentQueue.cancelScope).not.toHaveBeenCalled();
     expect(cfg.preferences?.messageReply).toBe('markdown');
     expect(cfg.preferences?.showToolCalls).toBe(false);
@@ -305,14 +305,14 @@ describe('handleCardAction config/account submit cleanup', () => {
         cancelScope: vi.fn(async () => {
           throw new Error('full cleanup should preserve active running records');
         }),
-        cancelQueuedScope: vi.fn(async () => 1),
+        cancelQueuedScopeIds: vi.fn(async () => ['queued-durable']),
       } as unknown as PersistentQueue,
     });
 
     await handleCardAction(d);
     await vi.runAllTimersAsync();
 
-    expect(d.persistentQueue.cancelQueuedScope).toHaveBeenCalledWith('chat-1');
+    expect(d.persistentQueue.cancelQueuedScopeIds).toHaveBeenCalledWith('chat-1');
     expect(d.persistentQueue.cancelScope).not.toHaveBeenCalled();
     expect(restart).toHaveBeenCalledTimes(1);
     vi.useRealTimers();

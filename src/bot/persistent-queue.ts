@@ -400,13 +400,21 @@ export class PersistentQueue {
   }
 
   async cancelQueuedScope(scope: string): Promise<number> {
+    const ids = await this.cancelQueuedScopeIds(scope);
+    return ids.length;
+  }
+
+  async cancelQueuedScopeIds(scope: string): Promise<string[]> {
     return this.mutate(async () => {
       const records = await this.readRecordsForMutation();
-      const next = records.filter((record) => record.scope !== scope || record.state !== 'queued');
-      const removed = records.length - next.length;
-      if (removed === 0) return 0;
+      const removedIds = records
+        .filter((record) => record.scope === scope && record.state === 'queued')
+        .map((record) => record.id);
+      if (removedIds.length === 0) return [];
+      const removed = new Set(removedIds);
+      const next = records.filter((record) => !removed.has(record.id));
       await this.writeRecords(next);
-      return removed;
+      return removedIds;
     });
   }
 

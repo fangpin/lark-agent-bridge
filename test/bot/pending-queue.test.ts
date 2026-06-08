@@ -185,4 +185,47 @@ describe('PendingQueue', () => {
       vi.useRealTimers();
     }
   });
+
+  test('queued-only cancel can preserve the active block', () => {
+    const flushed: string[][] = [];
+    const queue = new PendingQueue(0, (_scope, batch) => {
+      flushed.push(batch.map((m) => m.messageId));
+    });
+
+    queue.block('chat-1');
+    queue.push('chat-1', msg('old'));
+
+    expect(queue.cancel('chat-1', { keepBlocked: true }).map((m) => m.messageId)).toEqual(['old']);
+    queue.push('chat-1', msg('new'));
+
+    expect(flushed).toEqual([]);
+    expect(queue.queuedSize('chat-1')).toBe(1);
+
+    queue.unblock('chat-1');
+
+    expect(flushed).toEqual([['new']]);
+  });
+
+  test('queued-only cancel can drop only selected durable batches', () => {
+    const flushed: Array<{ durableId: string | undefined; ids: string[] }> = [];
+    const queue = new PendingQueue(0, (_scope, batch, durableId) => {
+      flushed.push({ durableId, ids: batch.map((m) => m.messageId) });
+    });
+
+    queue.block('chat-1');
+    queue.push('chat-1', msg('running'), { durableId: 'running-durable' });
+    queue.push('chat-1', msg('queued'), { durableId: 'queued-durable' });
+
+    const dropped = queue.cancel('chat-1', {
+      keepBlocked: true,
+      durableIds: new Set(['queued-durable']),
+    });
+
+    expect(dropped.map((m) => m.messageId)).toEqual(['queued']);
+    expect(queue.queuedSize('chat-1')).toBe(1);
+
+    queue.unblock('chat-1');
+
+    expect(flushed).toEqual([{ durableId: 'running-durable', ids: ['running'] }]);
+  });
 });
