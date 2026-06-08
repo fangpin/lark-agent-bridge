@@ -89,85 +89,104 @@ function isState(value: unknown): value is PersistentQueueState {
   return value === 'queued' || value === 'running';
 }
 
-function isStringField(value: unknown): boolean {
+type ResourceDescriptor = NormalizedMessage['resources'][number];
+type MentionInfo = NormalizedMessage['mentions'][number];
+
+function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === 'string';
 }
 
-function isNumberField(value: unknown): boolean {
+function isOptionalNumber(value: unknown): value is number | undefined {
   return value === undefined || (typeof value === 'number' && Number.isFinite(value));
 }
 
-function isOptionalStringField(value: unknown): boolean {
-  return value === undefined || typeof value === 'string';
-}
-
-function isBooleanField(value: unknown): boolean {
+function isOptionalBoolean(value: unknown): value is boolean | undefined {
   return value === undefined || typeof value === 'boolean';
 }
 
-function isResource(value: unknown): boolean {
-  if (!isObject(value)) return false;
-  return (
-    (value.type === 'image' ||
-      value.type === 'file' ||
-      value.type === 'audio' ||
-      value.type === 'video' ||
-      value.type === 'sticker') &&
-    typeof value.fileKey === 'string' &&
-    isStringField(value.fileName) &&
-    isNumberField(value.durationMs) &&
-    isStringField(value.coverImageKey)
-  );
+function normalizeResource(value: unknown): ResourceDescriptor | undefined {
+  if (!isObject(value)) return undefined;
+  if (
+    value.type !== 'image' &&
+    value.type !== 'file' &&
+    value.type !== 'audio' &&
+    value.type !== 'video' &&
+    value.type !== 'sticker'
+  ) return undefined;
+  if (typeof value.fileKey !== 'string') return undefined;
+  if (!isOptionalString(value.fileName)) return undefined;
+  if (!isOptionalNumber(value.durationMs)) return undefined;
+  if (!isOptionalString(value.coverImageKey)) return undefined;
+
+  return clonePlainData(value as unknown as ResourceDescriptor);
 }
 
-function isMention(value: unknown): boolean {
-  if (!isObject(value)) return false;
-  return (
-    typeof value.key === 'string' &&
-    isStringField(value.openId) &&
-    isStringField(value.userId) &&
-    isStringField(value.name) &&
-    isBooleanField(value.isBot)
-  );
+function normalizeMention(value: unknown): MentionInfo | undefined {
+  if (!isObject(value)) return undefined;
+  if (typeof value.key !== 'string') return undefined;
+  if (!isOptionalString(value.openId)) return undefined;
+  if (!isOptionalString(value.userId)) return undefined;
+  if (!isOptionalString(value.name)) return undefined;
+  if (!isOptionalBoolean(value.isBot)) return undefined;
+
+  return clonePlainData(value as unknown as MentionInfo);
 }
 
-function isMessage(value: unknown): value is NormalizedMessage {
-  if (!isObject(value)) return false;
-  return (
-    typeof value.messageId === 'string' &&
-    typeof value.chatId === 'string' &&
-    typeof value.chatType === 'string' &&
-    typeof value.senderId === 'string' &&
-    typeof value.content === 'string' &&
-    typeof value.rawContentType === 'string' &&
-    isOptionalStringField(value.senderName) &&
-    isOptionalStringField(value.rootId) &&
-    isOptionalStringField(value.threadId) &&
-    isOptionalStringField(value.replyToMessageId) &&
-    Array.isArray(value.resources) &&
-    value.resources.every(isResource) &&
-    Array.isArray(value.mentions) &&
-    value.mentions.every(isMention) &&
-    typeof value.mentionAll === 'boolean' &&
-    typeof value.mentionedBot === 'boolean' &&
-    typeof value.createTime === 'number' &&
-    Number.isFinite(value.createTime)
-  );
+function normalizeMessage(value: unknown): NormalizedMessage | undefined {
+  if (!isObject(value)) return undefined;
+  if (typeof value.messageId !== 'string') return undefined;
+  if (typeof value.chatId !== 'string') return undefined;
+  if (typeof value.chatType !== 'string') return undefined;
+  if (typeof value.senderId !== 'string') return undefined;
+  if (typeof value.content !== 'string') return undefined;
+  if (typeof value.rawContentType !== 'string') return undefined;
+  if (!isOptionalString(value.senderName)) return undefined;
+  if (!isOptionalString(value.rootId)) return undefined;
+  if (!isOptionalString(value.threadId)) return undefined;
+  if (!isOptionalString(value.replyToMessageId)) return undefined;
+  if (!Array.isArray(value.resources)) return undefined;
+  if (!Array.isArray(value.mentions)) return undefined;
+  if (typeof value.mentionAll !== 'boolean') return undefined;
+  if (typeof value.mentionedBot !== 'boolean') return undefined;
+  if (typeof value.createTime !== 'number' || !Number.isFinite(value.createTime)) return undefined;
+
+  return {
+    ...value,
+    resources: value.resources.flatMap((resource) => {
+      const normalized = normalizeResource(resource);
+      return normalized === undefined ? [] : [normalized];
+    }),
+    mentions: value.mentions.flatMap((mention) => {
+      const normalized = normalizeMention(mention);
+      return normalized === undefined ? [] : [normalized];
+    }),
+    raw: toJsonSafe(value.raw),
+  } as NormalizedMessage;
 }
 
-function isRecord(value: unknown): value is PersistentQueueRecord {
-  if (!isObject(value)) return false;
-  return (
-    typeof value.id === 'string' &&
-    typeof value.scope === 'string' &&
-    Array.isArray(value.messages) &&
-    value.messages.every(isMessage) &&
-    isState(value.state) &&
-    typeof value.createdAt === 'number' &&
-    Number.isFinite(value.createdAt) &&
-    typeof value.updatedAt === 'number' &&
-    Number.isFinite(value.updatedAt)
-  );
+function normalizeRecord(value: unknown): PersistentQueueRecord | undefined {
+  if (!isObject(value)) return undefined;
+  if (typeof value.id !== 'string') return undefined;
+  if (typeof value.scope !== 'string') return undefined;
+  if (!Array.isArray(value.messages)) return undefined;
+  if (!isState(value.state)) return undefined;
+  if (typeof value.createdAt !== 'number' || !Number.isFinite(value.createdAt)) return undefined;
+  if (typeof value.updatedAt !== 'number' || !Number.isFinite(value.updatedAt)) return undefined;
+
+  const messages = value.messages.flatMap((message) => {
+    const normalized = normalizeMessage(message);
+    return normalized === undefined ? [] : [normalized];
+  });
+  if (messages.length === 0) return undefined;
+
+  return {
+    id: value.id,
+    scope: value.scope,
+    messages,
+    state: value.state,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+  };
 }
 
 function makeId(now: number): string {
@@ -304,17 +323,18 @@ export class PersistentQueue {
 
     const seenIds = new Set<string>();
     return parsed.records.flatMap((record): PersistentQueueRecord[] => {
-      if (!isRecord(record)) return [];
-      if (seenIds.has(record.id)) {
+      const normalized = normalizeRecord(record);
+      if (!normalized) return [];
+      if (seenIds.has(normalized.id)) {
         log.fail('queue', new Error('persistent queue duplicate record id skipped'), {
-          recordId: record.id,
+          recordId: normalized.id,
           step: 'persistent-read-record',
         });
         return [];
       }
-      seenIds.add(record.id);
+      seenIds.add(normalized.id);
       try {
-        return [cloneRecord(record)];
+        return [cloneRecord(normalized)];
       } catch (err) {
         log.fail('queue', err, { step: 'persistent-read-record' });
         return [];
@@ -364,7 +384,11 @@ export class PersistentQueue {
     } catch (err) {
       log.warn('queue', 'persistent-dir-fsync-failed', { dir, err: err instanceof Error ? err.message : String(err) });
     } finally {
-      await handle?.close();
+      try {
+        await handle?.close();
+      } catch (err) {
+        log.warn('queue', 'persistent-dir-close-failed', { dir, err: err instanceof Error ? err.message : String(err) });
+      }
     }
   }
 }

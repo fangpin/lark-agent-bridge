@@ -137,6 +137,38 @@ describe('PersistentQueue filesystem writes', () => {
     expect(fs.rm).not.toHaveBeenCalled();
   });
 
+  test('logs and tolerates directory close failures after successful sync', async () => {
+    const file = '/tmp/persistent-queue-fs/queue.json';
+    const dir = dirname(file);
+    fs.open.mockImplementation(async (path: string) => {
+      const handle = makeHandle(path);
+      if (path === dir) {
+        handle.close.mockRejectedValue(new Error('dir close failed'));
+      }
+      return handle;
+    });
+    const [{ PersistentQueue }, { log }] = await Promise.all([
+      import('../../src/bot/persistent-queue'),
+      import('../../src/core/logger'),
+    ]);
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
+
+    await expect(new PersistentQueue(file).enqueue('scope-a', [msg('m1')], { id: 'record-1', now: 1_000 })).resolves.toMatchObject({
+      id: 'record-1',
+    });
+
+    const directory = dirHandle(dir);
+    expect(fs.rename).toHaveBeenCalledWith(tmpHandle().path, file);
+    expect(directory.sync).toHaveBeenCalledTimes(1);
+    expect(directory.close).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      'queue',
+      'persistent-dir-close-failed',
+      expect.objectContaining({ dir, err: 'dir close failed' }),
+    );
+    expect(fs.rm).not.toHaveBeenCalled();
+  });
+
   test('removes the temporary file when rename fails after writing and syncing', async () => {
     const file = '/tmp/persistent-queue-fs/queue.json';
     fs.rename.mockRejectedValue(new Error('rename failed'));

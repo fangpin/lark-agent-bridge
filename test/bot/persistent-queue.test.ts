@@ -318,7 +318,33 @@ describe('PersistentQueue', () => {
     expect((rerecovered[0]!.messages[0]!.raw as { event: { message: { message_id: string } } }).event.message.message_id).toBe('m1');
   });
 
-  test('skips records with malformed messages without dropping valid records', async () => {
+  test('preserves valid messages in a record while skipping malformed messages', async () => {
+    const file = queueFile();
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        records: [
+          {
+            id: 'mixed-messages',
+            scope: 'scope-a',
+            messages: [msg('m1'), null, { messageId: 'missing-required-fields' }, msg('m2')],
+            state: 'queued',
+            createdAt: 1_000,
+            updatedAt: 1_000,
+          },
+        ],
+      }),
+    );
+
+    const records = await new PersistentQueue(file).recoverable();
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.id).toBe('mixed-messages');
+    expect(records[0]!.messages.map((message) => message.messageId)).toEqual(['m1', 'm2']);
+  });
+
+  test('skips records when all messages are malformed', async () => {
     const file = queueFile();
     await writeFile(
       file,
@@ -336,13 +362,48 @@ describe('PersistentQueue', () => {
     ]);
   });
 
-  test('skips records with malformed resources or mentions', async () => {
+  test('preserves messages while filtering malformed resources and mentions', async () => {
     const file = queueFile();
-    const withResources = (id: string, resources: unknown[]): unknown => ({
+    const validResource = { type: 'image', fileKey: 'file-m1' };
+    const validMention = { key: 'user-m1', name: 'User m1' };
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        records: [
+          {
+            id: 'mixed-nested-items',
+            scope: 'scope-a',
+            messages: [
+              {
+                ...msg('m1'),
+                resources: [validResource, null, { type: 'image' }],
+                mentions: [validMention, null, {}],
+              },
+            ],
+            state: 'queued',
+            createdAt: 1_000,
+            updatedAt: 1_000,
+          },
+        ],
+      }),
+    );
+
+    const records = await new PersistentQueue(file).recoverable();
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.messages).toHaveLength(1);
+    expect(records[0]!.messages[0]!.resources).toEqual([validResource]);
+    expect(records[0]!.messages[0]!.mentions).toEqual([validMention]);
+  });
+
+  test('skips messages when resources or mentions are not arrays', async () => {
+    const file = queueFile();
+    const withResources = (id: string, resources: unknown): unknown => ({
       ...msg(id),
       resources,
     });
-    const withMentions = (id: string, mentions: unknown[]): unknown => ({
+    const withMentions = (id: string, mentions: unknown): unknown => ({
       ...msg(id),
       mentions,
     });
@@ -352,10 +413,8 @@ describe('PersistentQueue', () => {
         version: 1,
         records: [
           { id: 'valid', scope: 'scope-a', messages: [msg('m1')], state: 'queued', createdAt: 1_000, updatedAt: 1_000 },
-          { id: 'null-resource', scope: 'scope-a', messages: [withResources('m2', [null])], state: 'queued', createdAt: 2_000, updatedAt: 2_000 },
-          { id: 'missing-file-key', scope: 'scope-a', messages: [withResources('m3', [{ type: 'image' }])], state: 'queued', createdAt: 3_000, updatedAt: 3_000 },
-          { id: 'null-mention', scope: 'scope-a', messages: [withMentions('m4', [null])], state: 'queued', createdAt: 4_000, updatedAt: 4_000 },
-          { id: 'missing-mention-key', scope: 'scope-a', messages: [withMentions('m5', [{}])], state: 'queued', createdAt: 5_000, updatedAt: 5_000 },
+          { id: 'bad-resources', scope: 'scope-a', messages: [withResources('m2', null)], state: 'queued', createdAt: 2_000, updatedAt: 2_000 },
+          { id: 'bad-mentions', scope: 'scope-a', messages: [withMentions('m3', {})], state: 'queued', createdAt: 3_000, updatedAt: 3_000 },
         ],
       }),
     );
