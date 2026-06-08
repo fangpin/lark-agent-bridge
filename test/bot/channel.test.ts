@@ -2170,6 +2170,55 @@ describe('flush durable setup failures', () => {
     ]);
   });
 
+  test('stops registered agent when durable setup is cancelled between pre-run check and registration', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const persistentQueue = tempPersistentQueue();
+    const has = vi.spyOn(persistentQueue, 'has');
+    let hasCalls = 0;
+    has.mockImplementation(async (id: string) => {
+      hasCalls++;
+      return hasCalls === 1 ? true : false;
+    });
+    const stop = vi.fn(async () => undefined);
+    const prompts: string[] = [];
+    const agent: AgentAdapter = {
+      ...fakeAgent((opts) => prompts.push(opts.prompt)),
+      run(opts: AgentRunOptions): AgentRun {
+        prompts.push(opts.prompt);
+        return {
+          events: (async function* (): AsyncGenerator<AgentEvent> {
+            yield { type: 'text', delta: 'should not process' };
+            yield { type: 'done' };
+          })(),
+          stop,
+          async waitForExit() {
+            return true;
+          },
+        };
+      },
+    };
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent,
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('cancel-between-has-register', 'cancel after pre-run check'));
+
+    await vi.waitFor(() => expect(stop).toHaveBeenCalledTimes(1));
+    expect(has).toHaveBeenCalledTimes(2);
+    expect(prompts).toHaveLength(1);
+    await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
+  });
+
   test('does not start agent when durable setup is cancelled before run', async () => {
     const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
     let releasePrepare!: () => void;

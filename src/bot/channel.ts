@@ -819,6 +819,19 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   });
   const handle = activeRuns.register(scope, run);
   onRunRegistered?.();
+  if (durableId && !(await persistentQueue.has(durableId))) {
+    log.warn('queue', 'persistent-cancelled-after-agent-register', { scope, durableId });
+    handle.interrupted = true;
+    await run.stop().catch((err) => {
+      log.fail('queue', err, { step: 'stop-after-persistent-cancel', scope, durableId });
+    });
+    await persistentQueue.complete(durableId).catch((err) => {
+      log.fail('queue', err, { step: 'complete-after-persistent-cancel', scope, durableId });
+    });
+    runHistory.finish(historyEntry.runId, 'interrupted', '任务已取消');
+    activeRuns.unregister(scope, run);
+    return;
+  }
   log.info('run', 'timeline', {
     runId: historyEntry.runId,
     step: 'agent',

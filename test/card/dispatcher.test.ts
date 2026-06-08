@@ -1,8 +1,25 @@
 import { describe, expect, test, vi } from 'vitest';
 import type { CardActionEvent, NormalizedMessage } from '@larksuiteoapi/node-sdk';
+
+vi.mock('../../src/utils/feishu-auth', () => ({
+  validateAppCredentials: vi.fn(async () => ({ ok: true, botName: 'bot' })),
+}));
+
+vi.mock('../../src/config/keystore', () => ({
+  setSecret: vi.fn(async () => undefined),
+}));
+
+vi.mock('../../src/config/store', () => ({
+  buildEncryptedAccountConfig: vi.fn(async (appId: string, tenant: string, preferences: unknown) => ({
+    accounts: { app: { id: appId, secret: { source: 'exec', id: appId }, tenant } },
+    preferences,
+  })),
+  saveConfig: vi.fn(async () => undefined),
+}));
 import { PendingQueue } from '../../src/bot/pending-queue';
 import { PersistentQueue } from '../../src/bot/persistent-queue';
 import { handleCardAction, type CardDispatchDeps } from '../../src/card/dispatcher';
+import type { AppConfig } from '../../src/config/schema';
 
 function callbackEvent(value: Record<string, unknown> = { __claude_cb: true, action: 'approve' }): CardActionEvent {
   return {
@@ -175,6 +192,122 @@ describe('handleCardAction mutating command cleanup', () => {
     expect(backendStore.set).toHaveBeenCalledWith('chat-1', 'codex');
     expect(d.pending.queuedSize('chat-1')).toBe(0);
     expect(callOrder).toEqual(['durable.cancel', 'memory.cancel', 'backend.set']);
+  });
+});
+
+describe('handleCardAction config/account submit cleanup', () => {
+  test('config submit aborts shared preferences mutation when queued cleanup fails', async () => {
+    const cfg: AppConfig = {
+      accounts: { app: { id: 'app-id', secret: 'secret', tenant: 'feishu' } },
+      preferences: {
+        messageReply: 'card',
+        messageReplyMigrated: true,
+        showToolCalls: true,
+        maxConcurrentRuns: 1,
+        access: { admins: ['ou_user'] },
+      },
+    };
+    const update = vi.fn(async () => ({}));
+    const d = deps({
+      evt: {
+        ...callbackEvent({ cmd: 'config.submit' }),
+        raw: {
+          action: {
+            form_value: {
+              message_reply: 'markdown',
+              show_tool_calls: 'hide',
+              max_concurrent_runs: '7',
+              run_idle_timeout_minutes: '15',
+              require_mention_in_group: 'yes',
+              admins: 'ou_user',
+            },
+          },
+        },
+      } as unknown as CardActionEvent,
+      channel: {
+        async getChatMode() {
+          return 'p2p';
+        },
+        async send() {
+          return { messageId: 'om-command-reply' };
+        },
+        rawClient: { cardkit: { v1: { card: { update } } } },
+      } as unknown as CardDispatchDeps['channel'],
+      controls: {
+        cfg,
+        configPath: '/tmp/config.json',
+        processId: 'proc',
+        restart: vi.fn(async () => undefined),
+        exit: vi.fn(async () => undefined),
+      },
+      persistentQueue: {
+        enqueue: vi.fn(),
+        cancelScope: vi.fn(async () => {
+          throw new Error('durable cancel failed');
+        }),
+      } as unknown as PersistentQueue,
+    });
+
+    await handleCardAction(d);
+
+    expect(d.persistentQueue.cancelScope).toHaveBeenCalledWith('chat-1');
+    expect(cfg.preferences?.messageReply).toBe('card');
+    expect(cfg.preferences?.showToolCalls).toBe(true);
+    expect(cfg.preferences?.maxConcurrentRuns).toBe(1);
+  });
+
+  test('account submit aborts credential write and restart when queued cleanup fails', async () => {
+    vi.useFakeTimers();
+    const restart = vi.fn(async () => undefined);
+    const d = deps({
+      evt: {
+        ...callbackEvent({ cmd: 'account.submit' }),
+        raw: {
+          action: {
+            form_value: {
+              app_id: 'cli_a_new',
+              app_secret: 'new-secret',
+              tenant: 'feishu',
+            },
+          },
+        },
+      } as unknown as CardActionEvent,
+      channel: {
+        async getChatMode() {
+          return 'p2p';
+        },
+        async send() {
+          return { messageId: 'om-command-reply' };
+        },
+        rawClient: {
+          cardkit: { v1: { card: { update: vi.fn(async () => ({})) } } },
+          im: { v1: { message: { create: vi.fn(async () => ({ data: { message_id: 'retry-card' } })) } } },
+        },
+      } as unknown as CardDispatchDeps['channel'],
+      controls: {
+        cfg: {
+          accounts: { app: { id: 'app-id', secret: 'secret', tenant: 'feishu' } },
+          preferences: { access: { admins: ['ou_user'] } },
+        },
+        configPath: '/tmp/config.json',
+        processId: 'proc',
+        restart,
+        exit: vi.fn(async () => undefined),
+      },
+      persistentQueue: {
+        enqueue: vi.fn(),
+        cancelScope: vi.fn(async () => {
+          throw new Error('durable cancel failed');
+        }),
+      } as unknown as PersistentQueue,
+    });
+
+    await handleCardAction(d);
+    await vi.runAllTimersAsync();
+
+    expect(d.persistentQueue.cancelScope).toHaveBeenCalledWith('chat-1');
+    expect(restart).not.toHaveBeenCalled();
+    vi.useRealTimers();
   });
 });
 

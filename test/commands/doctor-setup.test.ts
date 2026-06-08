@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from 'vitest';
 import { tryHandleCommand, type CommandContext } from '../../src/commands';
+import type { AgentEvent, AgentRun } from '../../src/agent/types';
 
 function ctx(): CommandContext {
   const send = vi.fn(async () => ({ messageId: 'sent-1' }));
@@ -65,6 +66,39 @@ function ctx(): CommandContext {
 }
 
 describe('/doctor setup', () => {
+  test('/doctor aborts before interrupting active run when queued cleanup fails', async () => {
+    const stop = vi.fn(async () => undefined);
+    const run: AgentRun = {
+      events: (async function* (): AsyncGenerator<AgentEvent> {
+        yield { type: 'done' };
+      })(),
+      stop,
+      waitForExit: vi.fn(async () => true),
+    };
+    const commandCtx = ctx();
+    commandCtx.msg.content = '/doctor stuck run';
+    commandCtx.cancelQueuedWork = vi.fn(async () => {
+      throw new Error('durable cancel failed');
+    });
+    commandCtx.activeRuns = {
+      interrupt: vi.fn(() => true),
+      register: vi.fn(() => ({ run, interrupted: false })),
+      unregister: vi.fn(),
+    } as unknown as CommandContext['activeRuns'];
+    commandCtx.agent.run = vi.fn(() => run);
+
+    await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
+
+    expect(commandCtx.cancelQueuedWork).toHaveBeenCalledWith('chat-1');
+    expect(commandCtx.activeRuns.interrupt).not.toHaveBeenCalled();
+    expect(commandCtx.agent.run).not.toHaveBeenCalled();
+    expect(commandCtx.channel.send).toHaveBeenCalledWith(
+      'chat-1',
+      { markdown: expect.stringContaining('清理已排队任务失败') },
+      { replyTo: 'msg-1' },
+    );
+  });
+
   test('sends setup diagnostics card without starting a doctor agent run', async () => {
     const commandCtx = ctx();
 

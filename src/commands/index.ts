@@ -1115,6 +1115,8 @@ async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
   const retryBatch = entry.batch.map((msg) => ({ ...msg }));
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
+  ctx.activeRuns.interrupt(ctx.scope);
   let record;
   try {
     record = await ctx.persistentQueue.enqueue(ctx.scope, retryBatch);
@@ -1123,7 +1125,6 @@ async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, `重试排队失败：${err instanceof Error ? err.message : String(err)}`);
     return;
   }
-  ctx.activeRuns.interrupt(ctx.scope);
   const size = ctx.pending.pushBatch(ctx.scope, retryBatch, { durableId: record.id });
   await reply(ctx, `已重新排队上次任务（${entry.batch.length} 条消息，当前队列 ${size}）。`);
 }
@@ -1620,6 +1621,8 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
     chatMode: ctx.chatMode,
   });
   // Killing any in-flight run on this chat — /doctor is a "I'm stuck" call.
+  // Clean durable + memory queues first so interrupted runs cannot recover.
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
   ctx.activeRuns.interrupt(ctx.scope);
 
   const rawLogs = await readRecentLogs({ maxBytes: 60_000 });
@@ -1853,6 +1856,11 @@ async function submitAccount(ctx: CommandContext): Promise<void> {
       return;
     }
 
+    if (!await cancelQueuedWorkBeforeMutation(ctx)) {
+      await finishFailure('清理已排队任务失败，凭据未保存；请检查日志后重试。');
+      return;
+    }
+
     // Encrypted-at-rest path: store the plaintext secret in the AES keystore,
     // and write config.json with an exec-provider SecretRef instead of the
     // raw secret. lark-cli's `config bind --source lark-channel` reads the
@@ -2054,6 +2062,13 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
         await new Promise<void>((r) => setTimeout(r, FORM_SETTLE_MS - elapsed));
       }
     };
+
+    if (!await cancelQueuedWorkBeforeMutation(ctx)) {
+      await waitForSettle();
+      await updateManagedCard(channel, formMsgId, configCancelledCard()).catch(() => {});
+      forgetManagedCard(formMsgId);
+      return;
+    }
 
     // In-place mutation — the cfg object is shared by reference with
     // runAgentBatch's reads, so this takes effect on the next message.
