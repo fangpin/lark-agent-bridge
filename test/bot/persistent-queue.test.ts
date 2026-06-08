@@ -1,5 +1,5 @@
 import { mkdtempSync } from 'node:fs';
-import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
@@ -26,6 +26,26 @@ function msg(id: string, content = id): NormalizedMessage {
     createTime: 1_000,
     raw: { event: { message: { message_id: id } } },
   } as NormalizedMessage;
+}
+
+async function lockFile(file: string): Promise<() => Promise<void>> {
+  const lockPath = `${file}.lock`;
+  const handle = await open(lockPath, 'wx');
+  let released = false;
+  await handle.writeFile(JSON.stringify({ pid: process.pid, createdAt: Date.now() }));
+
+  return async () => {
+    if (released) return;
+    released = true;
+    await handle.close();
+    await rm(lockPath, { force: true });
+  };
+}
+
+async function waitForQueuedMicrotasks(count = 5): Promise<void> {
+  for (let index = 0; index < count; index += 1) {
+    await Promise.resolve();
+  }
 }
 
 describe('PersistentQueue', () => {
@@ -113,6 +133,51 @@ describe('PersistentQueue', () => {
     ]);
 
     expect((await new PersistentQueue(file).recoverable()).map((record) => record.id).sort()).toEqual(['pq-1', 'pq-2']);
+  });
+
+  test('waits for an existing lock file before mutating the queue', async () => {
+    const file = queueFile();
+    const releaseLock = await lockFile(file);
+    const queue = new PersistentQueue(file, () => 1_000, { lockPollMs: 5, lockTimeoutMs: 1_000 });
+    let completed = false;
+
+    const enqueue = queue.enqueue('scope-a', [msg('m1')], { id: 'record-1', now: 1_000 }).then((record) => {
+      completed = true;
+      return record;
+    });
+    await waitForQueuedMicrotasks();
+
+    expect(completed).toBe(false);
+
+    await releaseLock();
+
+    await expect(enqueue).resolves.toMatchObject({ id: 'record-1' });
+    expect((await new PersistentQueue(file).recoverable()).map((record) => record.id)).toEqual(['record-1']);
+  });
+
+  test('rejects a mutation without overwriting when lock acquisition times out', async () => {
+    const file = queueFile();
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        records: [
+          { id: 'existing', scope: 'scope-a', messages: [msg('m0')], state: 'queued', createdAt: 1_000, updatedAt: 1_000 },
+        ],
+      }),
+    );
+    const original = await readFile(file, 'utf8');
+    const releaseLock = await lockFile(file);
+    const queue = new PersistentQueue(file, () => 2_000, { lockPollMs: 5, lockTimeoutMs: 10, staleLockMs: 60_000 });
+
+    try {
+      await expect(queue.enqueue('scope-a', [msg('m1')], { id: 'blocked', now: 2_000 })).rejects.toThrow(
+        `persistent queue lock timeout: ${file}`,
+      );
+      expect(await readFile(file, 'utf8')).toBe(original);
+    } finally {
+      await releaseLock();
+    }
   });
 
   test('rejects duplicate caller-provided ids', async () => {

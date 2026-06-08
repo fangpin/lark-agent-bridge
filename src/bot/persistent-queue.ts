@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
@@ -20,6 +21,16 @@ interface PersistentQueueFile {
   version: 1;
   records: PersistentQueueRecord[];
 }
+
+export interface PersistentQueueOptions {
+  lockTimeoutMs?: number;
+  lockPollMs?: number;
+  staleLockMs?: number;
+}
+
+const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
+const DEFAULT_LOCK_POLL_MS = 50;
+const DEFAULT_STALE_LOCK_MS = 60_000;
 
 function clonePlainData<T>(value: T): T {
   if (typeof structuredClone === 'function') {
@@ -216,12 +227,21 @@ const mutationTails = new Map<string, Promise<unknown>>();
 
 export class PersistentQueue {
   private readonly lockKey: string;
+  private readonly lockFile: string;
+  private readonly lockTimeoutMs: number;
+  private readonly lockPollMs: number;
+  private readonly staleLockMs: number;
 
   constructor(
     private readonly file: string = paths.persistentQueueFile,
     private readonly now: () => number = Date.now,
+    options: PersistentQueueOptions = {},
   ) {
     this.lockKey = resolve(file);
+    this.lockFile = `${this.lockKey}.lock`;
+    this.lockTimeoutMs = options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
+    this.lockPollMs = options.lockPollMs ?? DEFAULT_LOCK_POLL_MS;
+    this.staleLockMs = options.staleLockMs ?? DEFAULT_STALE_LOCK_MS;
   }
 
   async enqueue(
@@ -296,7 +316,7 @@ export class PersistentQueue {
 
   private async mutate<T>(fn: () => Promise<T>): Promise<T> {
     const previous = mutationTails.get(this.lockKey) ?? Promise.resolve();
-    const run = previous.then(fn, fn);
+    const run = previous.then(() => this.withFileLock(fn), () => this.withFileLock(fn));
     const tail = run.catch(() => undefined);
     mutationTails.set(this.lockKey, tail);
     tail.finally(() => {
@@ -305,6 +325,68 @@ export class PersistentQueue {
       }
     });
     return run;
+  }
+
+  private async withFileLock<T>(fn: () => Promise<T>): Promise<T> {
+    await this.acquireFileLock();
+    try {
+      return await fn();
+    } finally {
+      await this.releaseFileLock();
+    }
+  }
+
+  private async acquireFileLock(): Promise<void> {
+    const startedAt = Date.now();
+    const lockDir = dirname(this.lockFile);
+    await mkdir(lockDir, { recursive: true });
+
+    while (true) {
+      try {
+        const handle = await open(this.lockFile, 'wx');
+        try {
+          await handle.writeFile(JSON.stringify({ pid: process.pid, createdAt: Date.now() }));
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        return;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== 'EEXIST') throw err;
+      }
+
+      await this.removeStaleLock();
+      if (Date.now() - startedAt >= this.lockTimeoutMs) {
+        throw new Error(`persistent queue lock timeout: ${this.file}`);
+      }
+      await delay(Math.max(1, this.lockPollMs));
+    }
+  }
+
+  private async removeStaleLock(): Promise<void> {
+    try {
+      const info = await stat(this.lockFile);
+      if (Date.now() - info.mtimeMs < this.staleLockMs) return;
+      await rm(this.lockFile, { force: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      log.warn('queue', 'persistent-lock-stale-check-failed', {
+        lockFile: this.lockFile,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  private async releaseFileLock(): Promise<void> {
+    try {
+      await rm(this.lockFile, { force: true });
+    } catch (err) {
+      log.warn('queue', 'persistent-lock-release-failed', {
+        lockFile: this.lockFile,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   private async readRecords(): Promise<PersistentQueueRecord[]> {

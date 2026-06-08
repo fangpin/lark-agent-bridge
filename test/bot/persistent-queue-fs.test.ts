@@ -67,6 +67,10 @@ function dirHandle(dir: string): FakeHandle {
   return handle;
 }
 
+function nonLockRmCalls(): unknown[][] {
+  return fs.rm.mock.calls.filter(([path]) => !String(path).endsWith('.lock'));
+}
+
 describe('PersistentQueue filesystem writes', () => {
   beforeEach(() => {
     fs.handles.length = 0;
@@ -103,7 +107,7 @@ describe('PersistentQueue filesystem writes', () => {
     expect(fs.mkdir).not.toHaveBeenCalled();
     expect(fs.open).not.toHaveBeenCalled();
     expect(fs.rename).not.toHaveBeenCalled();
-    expect(fs.rm).not.toHaveBeenCalled();
+    expect(nonLockRmCalls()).toEqual([]);
   });
 
   test('rejects mutation read failures without writing or replacing the queue file', async () => {
@@ -115,10 +119,10 @@ describe('PersistentQueue filesystem writes', () => {
       `persistent queue read failed: ${file}`,
     );
 
-    expect(fs.mkdir).not.toHaveBeenCalled();
-    expect(fs.open).not.toHaveBeenCalled();
+    expect(fs.mkdir).toHaveBeenCalledWith(dirname(file), { recursive: true });
+    expect(fs.open).toHaveBeenCalledWith(`${file}.lock`, 'wx');
     expect(fs.rename).not.toHaveBeenCalled();
-    expect(fs.rm).not.toHaveBeenCalled();
+    expect(nonLockRmCalls()).toEqual([]);
   });
 
   test('uses a unique temporary path for each write', async () => {
@@ -136,7 +140,7 @@ describe('PersistentQueue filesystem writes', () => {
     expect(tmpPaths).toHaveLength(3);
     expect(new Set(tmpPaths).size).toBe(3);
     expect(fs.rename.mock.calls.map(([tmpPath]) => tmpPath)).toEqual(tmpPaths);
-    expect(fs.rm).not.toHaveBeenCalled();
+    expect(nonLockRmCalls()).toEqual([]);
   });
 
   test('syncs the file before rename and syncs the directory after rename', async () => {
@@ -158,7 +162,7 @@ describe('PersistentQueue filesystem writes', () => {
     expect(directory.close).toHaveBeenCalledTimes(1);
     expect(temp.sync.mock.invocationCallOrder[0]).toBeLessThan(fs.rename.mock.invocationCallOrder[0]!);
     expect(fs.rename.mock.invocationCallOrder[0]).toBeLessThan(directory.sync.mock.invocationCallOrder[0]!);
-    expect(fs.rm).not.toHaveBeenCalled();
+    expect(nonLockRmCalls()).toEqual([]);
   });
 
   test('logs and tolerates directory sync failures after rename', async () => {
@@ -190,7 +194,7 @@ describe('PersistentQueue filesystem writes', () => {
       'persistent-dir-fsync-failed',
       expect.objectContaining({ dir, err: 'dir fsync failed' }),
     );
-    expect(fs.rm).not.toHaveBeenCalled();
+    expect(nonLockRmCalls()).toEqual([]);
   });
 
   test('logs and tolerates directory close failures after successful sync', async () => {
@@ -222,7 +226,7 @@ describe('PersistentQueue filesystem writes', () => {
       'persistent-dir-close-failed',
       expect.objectContaining({ dir, err: 'dir close failed' }),
     );
-    expect(fs.rm).not.toHaveBeenCalled();
+    expect(nonLockRmCalls()).toEqual([]);
   });
 
   test('removes the temporary file when rename fails after writing and syncing', async () => {
