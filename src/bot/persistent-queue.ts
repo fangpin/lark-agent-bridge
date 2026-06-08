@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
@@ -66,7 +67,14 @@ function isMessage(value: unknown): value is NormalizedMessage {
     typeof value.chatId === 'string' &&
     typeof value.chatType === 'string' &&
     typeof value.senderId === 'string' &&
-    typeof value.rawContentType === 'string'
+    typeof value.content === 'string' &&
+    typeof value.rawContentType === 'string' &&
+    Array.isArray(value.resources) &&
+    Array.isArray(value.mentions) &&
+    typeof value.mentionAll === 'boolean' &&
+    typeof value.mentionedBot === 'boolean' &&
+    typeof value.createTime === 'number' &&
+    Number.isFinite(value.createTime)
   );
 }
 
@@ -89,10 +97,9 @@ function makeId(now: number): string {
   return `queue-${now.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export class PersistentQueue {
-  private tail: Promise<unknown> = Promise.resolve();
-  private writeCounter = 0;
+const mutationTails = new Map<string, Promise<unknown>>();
 
+export class PersistentQueue {
   constructor(
     private readonly file: string = paths.persistentQueueFile,
     private readonly now: () => number = Date.now,
@@ -165,8 +172,9 @@ export class PersistentQueue {
   }
 
   private async mutate<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.tail.then(fn, fn);
-    this.tail = run.catch(() => undefined);
+    const previous = mutationTails.get(this.file) ?? Promise.resolve();
+    const run = previous.then(fn, fn);
+    mutationTails.set(this.file, run.catch(() => undefined));
     return run;
   }
 
@@ -204,7 +212,7 @@ export class PersistentQueue {
       records: records.map((record) => cloneRecord(record)),
     };
     await mkdir(dirname(this.file), { recursive: true });
-    const tmpFile = `${this.file}.tmp-${process.pid}-${++this.writeCounter}`;
+    const tmpFile = `${this.file}.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString('hex')}`;
     await writeFile(tmpFile, `${JSON.stringify(data, null, 2)}\n`);
     await rename(tmpFile, this.file);
   }

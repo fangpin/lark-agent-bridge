@@ -84,6 +84,19 @@ describe('PersistentQueue', () => {
     expect((await queue.recoverable()).map((record) => record.id).sort()).toEqual(['pq-1', 'pq-2']);
   });
 
+  test('serializes concurrent enqueues from separate instances for the same file', async () => {
+    const file = queueFile();
+    const first = new PersistentQueue(file, () => 1_000);
+    const second = new PersistentQueue(file, () => 2_000);
+
+    await Promise.all([
+      first.enqueue('scope-a', [msg('m1')], { id: 'pq-1', now: 1_000 }),
+      second.enqueue('scope-a', [msg('m2')], { id: 'pq-2', now: 2_000 }),
+    ]);
+
+    expect((await new PersistentQueue(file).recoverable()).map((record) => record.id).sort()).toEqual(['pq-1', 'pq-2']);
+  });
+
   test('complete removes only one record when duplicate ids exist', async () => {
     const file = queueFile();
     const queue = new PersistentQueue(file, () => 1_000);
@@ -148,5 +161,38 @@ describe('PersistentQueue', () => {
     expect(await new PersistentQueue(file).recoverable()).toEqual([
       expect.objectContaining({ id: 'valid' }),
     ]);
+  });
+
+  test('skips messages missing required normalized fields', async () => {
+    const file = queueFile();
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        records: [
+          { id: 'valid', scope: 'scope-a', messages: [msg('m1')], state: 'queued', createdAt: 1_000, updatedAt: 1_000 },
+          {
+            id: 'missing-fields',
+            scope: 'scope-a',
+            messages: [
+              {
+                messageId: 'm2',
+                chatId: 'chat-1',
+                chatType: 'p2p',
+                senderId: 'user-1',
+                rawContentType: 'text',
+              },
+            ],
+            state: 'queued',
+            createdAt: 2_000,
+            updatedAt: 2_000,
+          },
+        ],
+      }),
+    );
+
+    const records = await new PersistentQueue(file).recoverable();
+
+    expect(records.map((record) => record.id)).toEqual(['valid']);
   });
 });
