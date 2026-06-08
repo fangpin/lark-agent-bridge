@@ -6,6 +6,7 @@ export interface RunHandle {
   run: AgentRun;
   interrupted: boolean;
   interruptReason?: InterruptReason;
+  terminalAfterLifecycleInterrupt?: boolean;
 }
 
 function noopRun(): AgentRun {

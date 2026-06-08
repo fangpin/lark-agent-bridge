@@ -1184,7 +1184,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       errorMsg: finalState.errorMsg,
     });
     const preserveDurable = handle.interruptReason === 'lifecycle'
-      && (finalState.terminal === 'interrupted' || finalState.terminal === 'running');
+      && (
+        finalState.terminal === 'interrupted'
+        || finalState.terminal === 'running'
+        || handle.terminalAfterLifecycleInterrupt === true
+      );
     let durableCompleted = !durableId || finalState.terminal === 'running' || preserveDurable;
     if (durableId && finalState.terminal !== 'running' && !preserveDurable) {
       await persistentQueue.complete(durableId).then(
@@ -1637,6 +1641,9 @@ export async function processAgentStream(
   try {
     for await (const evt of handle.run.events) {
       const terminalEvent = evt.type === 'done' || evt.type === 'error';
+      const lifecycleInterruptedBeforeTerminal = terminalEvent
+        && handle.interrupted
+        && handle.interruptReason === 'lifecycle';
       if (handle.interrupted && !terminalEvent) break;
 
       // Track tool flight before re-arming the idle timer so the arm step
@@ -1682,6 +1689,9 @@ export async function processAgentStream(
       const prevTerminal = state.terminal;
       const prevFooter = state.footer;
       state = reduce(state, evt);
+      if (lifecycleInterruptedBeforeTerminal && state.terminal !== 'running') {
+        handle.terminalAfterLifecycleInterrupt = true;
+      }
       if (state.footer !== prevFooter || state.terminal !== prevTerminal) {
         log.info('card', 'transition', { footer: state.footer, terminal: state.terminal });
       }

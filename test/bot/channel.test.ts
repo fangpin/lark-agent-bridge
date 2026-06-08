@@ -3113,6 +3113,68 @@ describe('opaque Cursor SDK auto retry', () => {
     ]);
   });
 
+  test('disconnect preserves active durable record when stopped agent emits terminal error after lifecycle interruption', async () => {
+    let stopReleased!: () => void;
+    const stopped = new Promise<void>((resolve) => {
+      stopReleased = resolve;
+    });
+    const persistentQueue = tempPersistentQueue();
+    await persistentQueue.enqueue('chat-1', [fakeMessage('durable-stop-error', 'terminal stop prompt')], {
+      id: 'durable-stop-error',
+      now: 1000,
+    });
+    const complete = vi.spyOn(persistentQueue, 'complete');
+    const stop = vi.fn(async () => {
+      stopReleased();
+    });
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const send = vi.fn(async () => ({ messageId: 'om_lifecycle_check' }));
+    const fakeChannel = {
+      ...createFakeChannel(messages),
+      send,
+    } as unknown as LarkChannel;
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    const bridge = await startChannel({
+      cfg: textReplyConfig(),
+      agent: {
+        ...fakeAgent(() => {}),
+        run(): AgentRun {
+          return {
+            events: (async function* (): AsyncGenerator<AgentEvent> {
+              yield { type: 'text', delta: 'working before shutdown' };
+              await stopped;
+              yield { type: 'error', message: 'agent stopped during lifecycle shutdown' };
+            })(),
+            stop,
+            async waitForExit() {
+              return true;
+            },
+          };
+        },
+      },
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+    await vi.waitFor(async () => expect((await persistentQueue.recoverable())[0]).toMatchObject({ state: 'running' }));
+
+    await bridge.disconnect();
+    await vi.waitFor(() => expect(send).toHaveBeenCalledWith('chat-1', { markdown: '请检查' }));
+
+    expect(stop).toHaveBeenCalled();
+    expect(complete).not.toHaveBeenCalledWith('durable-stop-error');
+    expect(await persistentQueue.recoverable()).toEqual([
+      expect.objectContaining({
+        id: 'durable-stop-error',
+        scope: 'chat-1',
+        state: 'running',
+        messages: [expect.objectContaining({ messageId: 'durable-stop-error' })],
+      }),
+    ]);
+  });
+
   test('lifecycle disconnect after terminal error completes durable record', async () => {
     let terminalReached!: () => void;
     const terminalReachedPromise = new Promise<void>((resolve) => {
