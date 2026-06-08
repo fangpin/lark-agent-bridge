@@ -1,6 +1,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { createLarkChannel } from '@larksuiteoapi/node-sdk';
@@ -2710,6 +2711,126 @@ describe('opaque Cursor SDK auto retry', () => {
     expect(await persistentQueue.recoverable()).toEqual([
       expect.objectContaining({ id: 'durable-setup', scope: 'chat-1', state: 'running' }),
     ]);
+  });
+
+  test('lifecycle disconnect during media setup prevents agent run and preserves durable record', async () => {
+    const activeRuns = new ActiveRuns();
+    const interrupt = vi.spyOn(activeRuns, 'interrupt');
+    let resumeMedia!: () => void;
+    const mediaPaused = new Promise<void>((resolve) => {
+      resumeMedia = resolve;
+    });
+    let mediaStarted!: () => void;
+    const mediaStartedPromise = new Promise<void>((resolve) => {
+      mediaStarted = resolve;
+    });
+    const runCalls: AgentRunOptions[] = [];
+    const persistentQueue = tempPersistentQueue();
+    await persistentQueue.enqueue(
+      'chat-1',
+      [
+        fakeMessage('durable-media-setup', 'setup prompt', {
+          resources: [{ type: 'image', fileKey: 'lifecycle-media-setup-image' }],
+        }),
+      ],
+      { id: 'durable-media-setup', now: 1000 },
+    );
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const fakeChannel = {
+      ...createFakeChannel(messages),
+      rawClient: {
+        ...createFakeChannel(messages).rawClient,
+        im: {
+          v1: {
+            ...createFakeChannel(messages).rawClient.im.v1,
+            messageResource: {
+              async get() {
+                mediaStarted();
+                await mediaPaused;
+                return {
+                  async writeFile() {},
+                };
+              },
+            },
+          },
+        },
+      },
+    } as unknown as LarkChannel;
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    const bridge = await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent((opts) => runCalls.push(opts)),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+      activeRuns,
+    });
+    await mediaStartedPromise;
+
+    const disconnectPromise = bridge.disconnect();
+    resumeMedia();
+    await disconnectPromise;
+    await delay(0);
+
+    interrupt.mockRestore();
+    expect(activeRuns.interrupt('chat-1')).toBe(false);
+    expect(runCalls).toEqual([]);
+    expect(await persistentQueue.recoverable()).toEqual([
+      expect.objectContaining({ id: 'durable-media-setup', scope: 'chat-1', state: 'running' }),
+    ]);
+  });
+
+  test('lifecycle disconnect after terminal done completes durable record', async () => {
+    let terminalReached!: () => void;
+    const terminalReachedPromise = new Promise<void>((resolve) => {
+      terminalReached = resolve;
+    });
+    let releaseExit!: () => void;
+    const exitReleased = new Promise<void>((resolve) => {
+      releaseExit = resolve;
+    });
+    const persistentQueue = tempPersistentQueue();
+    await persistentQueue.enqueue('chat-1', [fakeMessage('durable-terminal-done', 'terminal prompt')], {
+      id: 'durable-terminal-done',
+      now: 1000,
+    });
+    const complete = vi.spyOn(persistentQueue, 'complete');
+    const stop = vi.fn(async () => {});
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    const bridge = await startChannel({
+      cfg: textReplyConfig(),
+      agent: {
+        ...fakeAgent(() => {}),
+        run(): AgentRun {
+          return {
+            events: (async function* (): AsyncGenerator<AgentEvent> {
+              yield { type: 'done' };
+            })(),
+            stop,
+            async waitForExit() {
+              terminalReached();
+              await exitReleased;
+              return true;
+            },
+          };
+        },
+      },
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+    await terminalReachedPromise;
+    await bridge.disconnect();
+    releaseExit();
+
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledWith('durable-terminal-done'));
+    await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
   });
 
   test('disconnect marks active runs lifecycle-interrupted before channel disconnect side effects', async () => {

@@ -294,6 +294,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           onRunRegistered: () => {
             startedRun = true;
           },
+          isClosing: () => closing,
         });
       } catch (err) {
         log.fail('flush', err);
@@ -680,6 +681,7 @@ interface RunBatchDeps {
   durableId?: string;
   autoRetryKeys: AutoRetryKeys;
   onRunRegistered?: () => void;
+  isClosing?: () => boolean;
 }
 
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
@@ -700,6 +702,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     durableId,
     autoRetryKeys,
     onRunRegistered,
+    isClosing,
   } = deps;
   if (batch.length === 0) return;
   const firstMsg = batch[0];
@@ -718,6 +721,19 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   log.info('run', 'timeline', { runId: historyEntry.runId, step: 'intake', batchSize: batch.length });
   log.info('run', 'timeline', { runId: historyEntry.runId, step: 'queue', scope, batchSize: batch.length });
 
+  const handle = activeRuns.registerPreRun(scope);
+  const shouldPreserveBeforeAgentRun = (step: string): boolean => {
+    if (!handle.interrupted && isClosing?.()) {
+      handle.interrupted = true;
+      handle.interruptReason = 'lifecycle';
+    }
+    if (!handle.interrupted) return false;
+    log.warn('queue', 'persistent-interrupted-before-agent-run', { scope, durableId, step, reason: handle.interruptReason });
+    runHistory.finish(historyEntry.runId, 'interrupted', '任务已取消');
+    activeRuns.unregister(scope, handle);
+    return true;
+  };
+
   const resourceItems = batch.flatMap((m) =>
     m.resources.map((r) => ({ messageId: m.messageId, resource: r })),
   );
@@ -732,6 +748,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       return [];
     });
   }
+  if (shouldPreserveBeforeAgentRun('media')) return;
   if (attachments.length > 0) {
     log.info('media', 'resolved', { count: attachments.length });
   }
@@ -762,6 +779,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       log.fail('quote', err, { messageId: targetId, fallback: 'skip-quote' });
       return undefined;
     });
+    if (shouldPreserveBeforeAgentRun('quote')) return;
     if (q) {
       quotes.push(q);
       log.info('quote', 'fetched', {
@@ -781,7 +799,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     quotes: quotes.length,
   });
 
-  const handle = activeRuns.registerPreRun(scope);
   const sessionKey = agent.sessionKey;
   let resumeFrom = sessions.resumeFor(scope, cwd, sessionKey);
   if (resumeFrom && agent.canResumeSession?.(resumeFrom) === false) {
@@ -807,10 +824,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       log.fail('session', err, { cwd, sessionKey, fallback: 'run-without-precreated-session' });
       return undefined;
     });
+    if (shouldPreserveBeforeAgentRun('session')) return;
     if (resumeFrom) {
       log.info('session', 'resume-precreate', { sessionId: resumeFrom, cwd, sessionKey });
     }
   }
+  if (shouldPreserveBeforeAgentRun('session')) return;
   log.info('run', 'timeline', {
     runId: historyEntry.runId,
     step: 'session',
@@ -824,12 +843,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     activeRuns.unregister(scope, handle);
     return;
   }
-  if (handle.interrupted) {
-    log.warn('queue', 'persistent-interrupted-before-agent-run', { scope, durableId });
-    runHistory.finish(historyEntry.runId, 'interrupted', '任务已取消');
-    activeRuns.unregister(scope, handle);
-    return;
-  }
+  if (shouldPreserveBeforeAgentRun('before-agent-run')) return;
 
   const agentStopGraceMs = getAgentStopGraceMs(controls.cfg);
   const run = agent.run({
@@ -1099,7 +1113,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       terminal: finalState.terminal,
       errorMsg: finalState.errorMsg,
     });
-    const preserveDurable = handle.interruptReason === 'lifecycle';
+    const preserveDurable = handle.interruptReason === 'lifecycle' && finalState.terminal === 'running';
     let durableCompleted = !durableId || finalState.terminal === 'running' || preserveDurable;
     if (durableId && finalState.terminal !== 'running' && !preserveDurable) {
       await persistentQueue.complete(durableId).then(
