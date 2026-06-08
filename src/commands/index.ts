@@ -1410,6 +1410,8 @@ async function handleClear(args: string, ctx: CommandContext): Promise<void> {
     force,
   };
 
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
+
   let interrupted = false;
   let historyPaths: string[] = [];
   try {
@@ -1427,7 +1429,6 @@ async function handleClear(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
-  await cancelQueuedWork(ctx);
   await reply(ctx, formatClearSuccess(target, force, interrupted, historyPaths));
 }
 

@@ -2034,6 +2034,45 @@ describe('flush durable setup failures', () => {
     ]);
   });
 
+  test('does not start agent when durable setup is cancelled before run', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    let releasePrepare!: () => void;
+    const prepareStarted = new Promise<void>((resolve) => {
+      releasePrepare = resolve;
+    });
+    const persistentQueue = tempPersistentQueue();
+    const runSpy = vi.fn();
+    const agent = {
+      ...fakeAgent(runSpy),
+      async prepareSession() {
+        await prepareStarted;
+        return 'prepared-session';
+      },
+    } satisfies AgentAdapter;
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent,
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('cancel-during-setup', 'cancel before run'));
+    await vi.waitFor(() => expect(persistentQueue.markRunning('cancel-during-setup')).resolves.toBeUndefined());
+    await persistentQueue.cancelScope('chat-1');
+    releasePrepare();
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(runSpy).not.toHaveBeenCalled();
+    expect(await persistentQueue.recoverable()).toEqual([]);
+  });
+
   test('requeues durable batch after synchronous agent.run failure before active registration', async () => {
     const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
     const prompts: string[] = [];

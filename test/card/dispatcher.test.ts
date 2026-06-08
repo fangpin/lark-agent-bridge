@@ -88,8 +88,15 @@ describe('handleCardAction callback forwarding', () => {
     });
   });
 
-  test('does not push callback work into memory when durable enqueue fails', async () => {
+  test('sends visible failure and does not push callback work when durable enqueue fails', async () => {
+    const send = vi.fn(async () => ({ messageId: 'om-failure' }));
     const d = deps({
+      channel: {
+        async getChatMode() {
+          return 'p2p';
+        },
+        send,
+      } as unknown as CardDispatchDeps['channel'],
       persistentQueue: {
         enqueue: vi.fn(async () => {
           throw new Error('durable enqueue failed');
@@ -103,6 +110,9 @@ describe('handleCardAction callback forwarding', () => {
 
     expect(pushBatch).not.toHaveBeenCalled();
     expect(d.pending.queuedSize('chat-1')).toBe(0);
+    expect(send).toHaveBeenCalledWith('chat-1', {
+      markdown: expect.stringContaining('durable enqueue failed'),
+    }, { replyTo: 'om-card' });
   });
 });
 

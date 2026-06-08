@@ -781,6 +781,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     cwd,
   });
 
+  if (durableId && !(await persistentQueue.has(durableId))) {
+    log.warn('queue', 'persistent-cancelled-before-agent-run', { scope, durableId });
+    runHistory.finish(historyEntry.runId, 'interrupted', '任务已取消');
+    return;
+  }
+
   const agentStopGraceMs = getAgentStopGraceMs(controls.cfg);
   const run = agent.run({
     prompt,

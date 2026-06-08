@@ -110,6 +110,17 @@ describe('PersistentQueue', () => {
     expect(reloaded).toMatchObject([{ id: record.id, state: 'running', createdAt: 1_000, updatedAt: 2_000 }]);
   });
 
+  test('reports whether a durable record exists', async () => {
+    const file = queueFile();
+    const queue = new PersistentQueue(file);
+    const record = await queue.enqueue('scope-a', [msg('m1')], { id: 'record-1', now: 1_000 });
+
+    await expect(queue.has(record.id)).resolves.toBe(true);
+    await queue.complete(record.id);
+
+    await expect(queue.has(record.id)).resolves.toBe(false);
+  });
+
   test('removes completed records', async () => {
     const file = queueFile();
     const queue = new PersistentQueue(file);

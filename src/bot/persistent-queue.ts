@@ -375,6 +375,11 @@ export class PersistentQueue {
     });
   }
 
+  async has(id: string): Promise<boolean> {
+    const records = await this.readRecords();
+    return records.some((record) => record.id === id);
+  }
+
   async cancelScope(scope: string): Promise<number> {
     return this.mutate(async () => {
       const records = await this.readRecordsForMutation();

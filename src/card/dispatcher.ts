@@ -208,6 +208,12 @@ async function forwardToClaude(
     deps.pending.pushBatch(scope, [synthetic], { durableId: record.id });
   } catch (err) {
     log.fail('cardAction', err, { step: 'forward-claude-persist', scope });
+    const message = err instanceof Error ? err.message : String(err);
+    await deps.channel.send(deps.evt.chatId, {
+      markdown: `❌ 按钮操作提交失败：${message}`,
+    }, { replyTo: deps.evt.messageId }).catch((sendErr) => {
+      log.fail('cardAction', sendErr, { step: 'forward-claude-persist-reply', scope });
+    });
   }
 }
 

@@ -133,6 +133,28 @@ describe('/clear', () => {
     expect(commandCtx.channel.send).toHaveBeenCalledWith('chat-1', { markdown: expect.stringContaining('/clear --force') }, { replyTo: 'msg-1' });
   });
 
+  test('aborts before mutating state when queued work cleanup fails', async () => {
+    vi.spyOn(worktree, 'inspectWorktreeClearTarget').mockResolvedValue(clearTarget());
+    const remove = vi.spyOn(worktree, 'removeGitWorktreeAndBranch');
+    const commandCtx = ctx('/clear', {
+      cancelQueuedWork: vi.fn(async () => {
+        throw new Error('durable cancel failed');
+      }),
+    });
+
+    await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
+
+    expect(commandCtx.activeRuns.interrupt).not.toHaveBeenCalled();
+    expect(commandCtx.agent.evictScope).not.toHaveBeenCalled();
+    expect(commandCtx.sessions.clear).not.toHaveBeenCalled();
+    expect(commandCtx.workspaces.clearCwd).not.toHaveBeenCalled();
+    expect(commandCtx.backendStore?.clear).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(commandCtx.channel.send).toHaveBeenCalledWith('chat-1', {
+      markdown: expect.stringContaining('durable cancel failed'),
+    }, { replyTo: 'msg-1' });
+  });
+
   test('cleans state, removes history and worktree without dissolving the group', async () => {
     const target = clearTarget();
     vi.spyOn(worktree, 'inspectWorktreeClearTarget').mockResolvedValue(target);
