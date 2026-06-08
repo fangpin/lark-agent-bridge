@@ -1406,10 +1406,14 @@ describe('persistent queue recovery', () => {
     await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
   });
 
-  test('disconnect stops active runs without deleting running durable records', async () => {
+  test('disconnect preserves active running durable records after run cleanup settles', async () => {
     const persistentQueue = tempPersistentQueue();
     const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
-    const fakeChannel = createFakeChannel(messages);
+    const send = vi.fn(async () => ({ messageId: 'om_sent' }));
+    const fakeChannel = {
+      ...createFakeChannel(messages),
+      send,
+    } as unknown as LarkChannel;
     vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
     let releaseRun!: () => void;
     const runReleased = new Promise<void>((resolve) => {
@@ -1447,8 +1451,9 @@ describe('persistent queue recovery', () => {
     await vi.waitFor(async () => expect((await persistentQueue.recoverable())[0]).toMatchObject({ state: 'running' }));
 
     await bridge.disconnect();
+    await vi.waitFor(() => expect(send).toHaveBeenCalledWith('chat-1', { markdown: '请检查' }));
 
-    expect(stop).toHaveBeenCalledTimes(1);
+    expect(stop).toHaveBeenCalled();
     expect(await persistentQueue.recoverable()).toEqual([
       expect.objectContaining({ scope: 'chat-1', state: 'running', messages: [expect.objectContaining({ messageId: 'durable-disconnect' })] }),
     ]);

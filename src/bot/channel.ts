@@ -1113,7 +1113,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       terminal: finalState.terminal,
       errorMsg: finalState.errorMsg,
     });
-    const preserveDurable = handle.interruptReason === 'lifecycle' && finalState.terminal === 'running';
+    const preserveDurable = handle.interruptReason === 'lifecycle' && finalState.terminal === 'interrupted';
     let durableCompleted = !durableId || finalState.terminal === 'running' || preserveDurable;
     if (durableId && finalState.terminal !== 'running' && !preserveDurable) {
       await persistentQueue.complete(durableId).then(
