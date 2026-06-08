@@ -56,6 +56,7 @@ import { RunHistory } from './run-history';
 import { TimeoutError, withTimeout } from '../utils/timeout';
 
 const PENDING_FLUSH_DELAY_MS = 0;
+const SETUP_RETRY_DELAY_MS = 1_000;
 const MEDIA_RESOLVE_TIMEOUT_MS = 20_000;
 const QUOTE_FETCH_TIMEOUT_MS = 10_000;
 const SESSION_PRECREATE_TIMEOUT_MS = 20_000;
@@ -279,12 +280,25 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       } catch (err) {
         log.fail('flush', err);
         if (durableId && !startedRun) {
-          pending.pushBatch(scope, batch, { durableId });
-          log.warn('queue', 'persistent-requeued-after-setup-failure', {
-            scope,
-            durableId,
-            batchSize: batch.length,
-          });
+          setTimeout(() => {
+            void withTrace({ chatId: firstMsg.chatId }, async () => {
+              const exists = await persistentQueue.has(durableId).catch((retryErr) => {
+                log.fail('queue', retryErr, { step: 'persistent-setup-retry-check', scope, durableId });
+                return false;
+              });
+              if (!exists) {
+                log.warn('queue', 'persistent-setup-retry-skipped', { scope, durableId });
+                return;
+              }
+              pending.pushBatch(scope, batch, { durableId });
+              log.warn('queue', 'persistent-requeued-after-setup-failure', {
+                scope,
+                durableId,
+                batchSize: batch.length,
+                delayMs: SETUP_RETRY_DELAY_MS,
+              });
+            });
+          }, SETUP_RETRY_DELAY_MS);
         }
       } finally {
         release();
@@ -543,13 +557,21 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const resolved = await resolveAgentForScope(scope, { agent, agentRegistry, backendStore });
 
   if (isStopCommandText(msg.content)) {
-    const result = await interruptScopeNow(activeRuns, pending, persistentQueue, scope);
-    log.info('intake', 'immediate-stop', {
-      scope,
-      interrupted: result.interrupted,
-      droppedPending: result.droppedPending,
-      droppedPersistent: result.droppedPersistent,
-    });
+    try {
+      const result = await interruptScopeNow(activeRuns, pending, persistentQueue, scope);
+      log.info('intake', 'immediate-stop', {
+        scope,
+        interrupted: result.interrupted,
+        droppedPending: result.droppedPending,
+        droppedPersistent: result.droppedPersistent,
+      });
+    } catch (err) {
+      log.fail('intake', err, { step: 'immediate-stop', scope });
+      await channel.send(msg.chatId, { markdown: '❌ 终止任务失败：持久化队列清理失败，已保留运行中任务和内存队列以避免状态不一致。请检查日志后重试 `/stop`。' }, {
+        replyTo: msg.messageId,
+        ...(msg.threadId ? { replyInThread: true as const } : {}),
+      }).catch((sendErr) => log.fail('intake', sendErr, { step: 'immediate-stop-reply', scope }));
+    }
     return;
   }
 
@@ -1246,6 +1268,7 @@ export async function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
       record = await persistentQueue.enqueue(scope, retryBatch);
     } catch (err) {
       log.fail('run', err, { step: 'auto-retry-persistent-enqueue', scope, runId: finalState.runId });
+      return false;
     }
   }
   pending.pushBatch(scope, retryBatch, record ? { durableId: record.id } : undefined);

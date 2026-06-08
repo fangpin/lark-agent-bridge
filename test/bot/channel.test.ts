@@ -152,6 +152,132 @@ describe('channel streamMessageId persistence', () => {
     expect(sessions.resumeFor).toHaveBeenCalledWith('chat-1:thread-1', '/tmp/shared-topic-cwd', 'fake:test');
   });
 
+
+  test('/timeout off aborts before mutating timeout override when queued cleanup fails', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const persistentQueue = tempPersistentQueue();
+    await persistentQueue.enqueue('chat-1', [fakeMessage('durable-1', 'queued durable work')], {
+      id: 'durable-timeout',
+      now: 1000,
+    });
+    const cancelScope = vi.spyOn(persistentQueue, 'cancelScope').mockRejectedValueOnce(new Error('disk cleanup failed'));
+    const setIdleTimeoutMinutes = vi.fn();
+    const sessions = {
+      ...fakeSessions(),
+      setIdleTimeoutMinutes,
+      getIdleTimeoutMinutes: vi.fn(() => 15),
+    } as unknown as SessionStore;
+    const fakeChannel = createFakeChannel(messages);
+    const send = vi.spyOn(fakeChannel, 'send');
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent(() => {}),
+      sessions,
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('timeout-off', '/timeout off'));
+
+    expect(cancelScope).toHaveBeenCalledWith('chat-1');
+    expect(setIdleTimeoutMinutes).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledWith(
+      'chat-1',
+      { markdown: expect.stringContaining('清理已排队任务失败') },
+      { replyTo: 'timeout-off' },
+    );
+    expect(await persistentQueue.recoverable()).toEqual([
+      expect.objectContaining({ id: 'durable-timeout', scope: 'chat-1' }),
+    ]);
+  });
+
+  test('/timeout default clears queued work before clearing timeout override', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const persistentQueue = tempPersistentQueue();
+    await persistentQueue.enqueue('chat-1', [fakeMessage('durable-1', 'queued durable work')], {
+      id: 'durable-timeout-success',
+      now: 1000,
+    });
+    const cancelScope = vi.spyOn(persistentQueue, 'cancelScope');
+    const clearIdleTimeoutOverride = vi.fn(() => true);
+    const sessions = {
+      ...fakeSessions(),
+      clearIdleTimeoutOverride,
+      getIdleTimeoutMinutes: vi.fn(() => 15),
+    } as unknown as SessionStore;
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent(() => {}),
+      sessions,
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('timeout-default', '/timeout default'));
+
+    expect(cancelScope).toHaveBeenCalledWith('chat-1');
+    expect(clearIdleTimeoutOverride).toHaveBeenCalledWith('chat-1');
+    expect(await persistentQueue.recoverable()).toEqual([]);
+  });
+
+  test('exact /stop replies with failure and leaves active run running when durable cancel fails', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const activeRuns = new ActiveRuns();
+    let stopCount = 0;
+    const run: AgentRun = {
+      events: (async function* (): AsyncGenerator<AgentEvent> {})(),
+      async stop() {
+        stopCount++;
+      },
+      async waitForExit() {
+        return true;
+      },
+    };
+    activeRuns.register('chat-1', run);
+    const persistentQueue = {
+      cancelScope: vi.fn(async () => {
+        throw new Error('durable stop cleanup failed');
+      }),
+    } as unknown as PersistentQueue;
+    const fakeChannel = createFakeChannel(messages);
+    const send = vi.spyOn(fakeChannel, 'send');
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent(() => {}),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+      activeRuns,
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('stop-fails', '/stop'));
+
+    expect(persistentQueue.cancelScope).toHaveBeenCalledWith('chat-1');
+    expect(stopCount).toBe(0);
+    expect(activeRuns.interrupt('chat-1')).toBe(true);
+    expect(send).toHaveBeenCalledWith(
+      'chat-1',
+      { markdown: expect.stringContaining('终止任务失败') },
+      { replyTo: 'stop-fails' },
+    );
+  });
+
   test('runs cloud-doc comments with the backend selected for the doc scope', async () => {
     const calls: string[] = [];
     const claude = fakeNamedAgent('claude', calls);
@@ -1977,7 +2103,8 @@ describe('persistent queue restore ordering', () => {
 });
 
 describe('flush durable setup failures', () => {
-  test('requeues a durable batch in memory when markRunning fails before agent start', async () => {
+  test('delays retry when markRunning fails before agent start instead of spinning synchronously', async () => {
+    vi.useFakeTimers();
     const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
     const prompts: string[] = [];
     const persistentQueue = tempPersistentQueue();
@@ -1998,7 +2125,16 @@ describe('flush durable setup failures', () => {
     const onMessage = messages.message;
     if (!onMessage) throw new Error('message handler was not registered');
     await onMessage(fakeMessage('setup-fails-once', 'retry after setup failure'));
+    await Promise.resolve();
+    await Promise.resolve();
 
+    expect(prompts).toEqual([]);
+    expect(markRunning).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(markRunning).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
     await vi.waitFor(() => expect(prompts).toHaveLength(1));
     expect(prompts[0]).toContain('retry after setup failure');
     expect(markRunning).toHaveBeenCalledTimes(2);
@@ -2026,7 +2162,7 @@ describe('flush durable setup failures', () => {
     if (!onMessage) throw new Error('message handler was not registered');
     await onMessage(fakeMessage('cancelled-durable', 'cancelled prompt'));
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await vi.waitFor(() => expect(prompts).toEqual([]));
     expect(prompts).toEqual([]);
     expect(persistentQueue.markRunning).toHaveBeenCalledTimes(1);
     expect(await persistentQueue.recoverable()).toEqual([
@@ -2068,7 +2204,7 @@ describe('flush durable setup failures', () => {
     await persistentQueue.cancelScope('chat-1');
     releasePrepare();
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await vi.waitFor(() => expect(runSpy).not.toHaveBeenCalled());
     expect(runSpy).not.toHaveBeenCalled();
     expect(await persistentQueue.recoverable()).toEqual([]);
   });
@@ -2103,7 +2239,7 @@ describe('flush durable setup failures', () => {
     if (!onMessage) throw new Error('message handler was not registered');
     await onMessage(fakeMessage('sync-throw', 'recover after sync throw'));
 
-    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    await vi.waitFor(() => expect(prompts).toHaveLength(1), { timeout: 1500 });
     expect(attempts).toBe(2);
     expect(prompts[0]).toContain('recover after sync throw');
     await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
@@ -2174,7 +2310,7 @@ describe('opaque Cursor SDK auto retry', () => {
     expect(flushed).toEqual([]);
   });
 
-  test('queues memory-only auto retry when durable enqueue fails', async () => {
+  test('skips auto retry when durable enqueue fails instead of falling back to memory-only', async () => {
     const flushed: NormalizedMessage[][] = [];
     const pending = new PendingQueue(1000, (_scope, batch) => {
       flushed.push(batch);
@@ -2202,10 +2338,10 @@ describe('opaque Cursor SDK auto retry', () => {
         persistentQueue,
         autoRetryKeys: new Set<string>(),
       }),
-    ).resolves.toBe(true);
+    ).resolves.toBe(false);
 
     expect(persistentQueue.enqueue).toHaveBeenCalledWith('chat-1', [expect.objectContaining({ messageId: 'msg-1' })]);
-    expect(pending.queuedSize('chat-1')).toBe(1);
+    expect(pending.queuedSize('chat-1')).toBe(0);
     expect(flushed).toEqual([]);
   });
 

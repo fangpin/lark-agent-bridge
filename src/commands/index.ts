@@ -981,6 +981,7 @@ async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
   }
 
   if (trimmed === 'default') {
+    if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
     const cleared = ctx.sessions.clearIdleTimeoutOverride(ctx.scope);
     log.info('command', 'timeout-clear', { scope: ctx.scope, cleared });
     await replyCard(
@@ -995,6 +996,7 @@ async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
   }
 
   if (trimmed === 'off' || trimmed === '0') {
+    if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
     ctx.sessions.setIdleTimeoutMinutes(ctx.scope, 0);
     log.info('command', 'timeout-off', { scope: ctx.scope });
     await replyCard(
@@ -1013,6 +1015,7 @@ async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, '❌ 用法:`/timeout <1-120>` / `/timeout off` / `/timeout default`');
     return;
   }
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
   ctx.sessions.setIdleTimeoutMinutes(ctx.scope, n);
   log.info('command', 'timeout-set', { scope: ctx.scope, minutes: n });
   await replyCard(
