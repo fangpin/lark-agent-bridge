@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { paths } from '../config/paths';
@@ -259,12 +259,23 @@ export class PersistentQueue {
     }
 
     if (!isObject(parsed) || parsed.version !== 1 || !Array.isArray(parsed.records)) {
+      const err = new Error('persistent queue file is malformed');
+      log.fail('queue', err, { step: 'persistent-read' });
       if (strict) throw new Error(`persistent queue file is malformed: ${this.file}`);
       return [];
     }
 
+    const seenIds = new Set<string>();
     return parsed.records.flatMap((record): PersistentQueueRecord[] => {
       if (!isRecord(record)) return [];
+      if (seenIds.has(record.id)) {
+        log.fail('queue', new Error('persistent queue duplicate record id skipped'), {
+          recordId: record.id,
+          step: 'persistent-read-record',
+        });
+        return [];
+      }
+      seenIds.add(record.id);
       try {
         return [cloneRecord(record)];
       } catch (err) {
@@ -279,9 +290,37 @@ export class PersistentQueue {
       version: 1,
       records: records.map((record) => cloneRecord(record)),
     };
-    await mkdir(dirname(this.file), { recursive: true });
-    const tmpFile = `${this.file}.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString('hex')}`;
-    await writeFile(tmpFile, `${JSON.stringify(data, null, 2)}\n`);
-    await rename(tmpFile, this.file);
+    const dir = dirname(this.file);
+    await mkdir(dir, { recursive: true });
+    const tmpFile = `${this.file}.tmp-${process.pid}-${Date.now()}-${randomBytes(8).toString('hex')}`;
+    let renamed = false;
+    try {
+      const handle = await open(tmpFile, 'w');
+      try {
+        await handle.writeFile(`${JSON.stringify(data, null, 2)}\n`);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rename(tmpFile, this.file);
+      renamed = true;
+      await this.fsyncDirectory(dir);
+    } finally {
+      if (!renamed) {
+        await rm(tmpFile, { force: true });
+      }
+    }
+  }
+
+  private async fsyncDirectory(dir: string): Promise<void> {
+    let handle;
+    try {
+      handle = await open(dir, 'r');
+      await handle.sync();
+    } catch (err) {
+      log.warn('queue', 'persistent-dir-fsync-failed', { dir, err: err instanceof Error ? err.message : String(err) });
+    } finally {
+      await handle?.close();
+    }
   }
 }
