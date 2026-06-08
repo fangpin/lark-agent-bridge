@@ -1,5 +1,5 @@
 import { mkdtempSync } from 'node:fs';
-import { open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { open, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
@@ -178,6 +178,22 @@ describe('PersistentQueue', () => {
     } finally {
       await releaseLock();
     }
+  });
+
+  test('does not remove or steal an old lock when acquisition times out', async () => {
+    const file = queueFile();
+    const lockPath = `${file}.lock`;
+    const oldLock = JSON.stringify({ pid: 123, token: 'other-owner', createdAt: 1 });
+    await writeFile(lockPath, oldLock);
+    const oldTime = new Date(Date.now() - 60_000);
+    await utimes(lockPath, oldTime, oldTime);
+    const queue = new PersistentQueue(file, () => 2_000, { lockPollMs: 5, lockTimeoutMs: 10, staleLockMs: 1 });
+
+    await expect(queue.enqueue('scope-a', [msg('m1')], { id: 'blocked', now: 2_000 })).rejects.toThrow(
+      `persistent queue lock timeout: ${file}`,
+    );
+
+    expect(await readFile(lockPath, 'utf8')).toBe(oldLock);
   });
 
   test('rejects duplicate caller-provided ids', async () => {

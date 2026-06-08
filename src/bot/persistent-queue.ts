@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
@@ -230,7 +230,7 @@ export class PersistentQueue {
   private readonly lockFile: string;
   private readonly lockTimeoutMs: number;
   private readonly lockPollMs: number;
-  private readonly staleLockMs: number;
+  private lockToken: string | undefined;
 
   constructor(
     private readonly file: string = paths.persistentQueueFile,
@@ -241,7 +241,7 @@ export class PersistentQueue {
     this.lockFile = `${this.lockKey}.lock`;
     this.lockTimeoutMs = options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
     this.lockPollMs = options.lockPollMs ?? DEFAULT_LOCK_POLL_MS;
-    this.staleLockMs = options.staleLockMs ?? DEFAULT_STALE_LOCK_MS;
+    void (options.staleLockMs ?? DEFAULT_STALE_LOCK_MS);
   }
 
   async enqueue(
@@ -344,11 +344,34 @@ export class PersistentQueue {
     while (true) {
       try {
         const handle = await open(this.lockFile, 'wx');
+        const token = randomBytes(16).toString('hex');
+        let lockReady = false;
         try {
-          await handle.writeFile(JSON.stringify({ pid: process.pid, createdAt: Date.now() }));
+          await handle.writeFile(JSON.stringify({ pid: process.pid, token, createdAt: Date.now() }));
           await handle.sync();
-        } finally {
           await handle.close();
+          lockReady = true;
+          this.lockToken = token;
+        } catch (err) {
+          if (!lockReady) {
+            try {
+              await handle.close();
+            } catch (closeErr) {
+              log.warn('queue', 'persistent-lock-close-after-acquire-failure-failed', {
+                lockFile: this.lockFile,
+                err: closeErr instanceof Error ? closeErr.message : String(closeErr),
+              });
+            }
+            try {
+              await rm(this.lockFile, { force: true });
+            } catch (cleanupErr) {
+              log.warn('queue', 'persistent-lock-acquire-cleanup-failed', {
+                lockFile: this.lockFile,
+                err: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+              });
+            }
+          }
+          throw err;
         }
         return;
       } catch (err) {
@@ -356,7 +379,6 @@ export class PersistentQueue {
         if (code !== 'EEXIST') throw err;
       }
 
-      await this.removeStaleLock();
       if (Date.now() - startedAt >= this.lockTimeoutMs) {
         throw new Error(`persistent queue lock timeout: ${this.file}`);
       }
@@ -364,28 +386,31 @@ export class PersistentQueue {
     }
   }
 
-  private async removeStaleLock(): Promise<void> {
-    try {
-      const info = await stat(this.lockFile);
-      if (Date.now() - info.mtimeMs < this.staleLockMs) return;
-      await rm(this.lockFile, { force: true });
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      log.warn('queue', 'persistent-lock-stale-check-failed', {
-        lockFile: this.lockFile,
-        err: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
   private async releaseFileLock(): Promise<void> {
+    const token = this.lockToken;
+    if (!token) return;
+
     try {
+      const raw = await readFile(this.lockFile, 'utf8');
+      let lock: unknown;
+      try {
+        lock = JSON.parse(raw) as unknown;
+      } catch {
+        lock = raw;
+      }
+      const lockToken = isObject(lock) && typeof lock.token === 'string' ? lock.token : raw;
+      if (lockToken !== token) {
+        log.warn('queue', 'persistent-lock-owner-mismatch', { lockFile: this.lockFile });
+        return;
+      }
       await rm(this.lockFile, { force: true });
     } catch (err) {
       log.warn('queue', 'persistent-lock-release-failed', {
         lockFile: this.lockFile,
         err: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      this.lockToken = undefined;
     }
   }
 

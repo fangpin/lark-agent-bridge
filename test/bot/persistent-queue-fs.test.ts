@@ -77,7 +77,15 @@ describe('PersistentQueue filesystem writes', () => {
     vi.resetModules();
     vi.clearAllMocks();
     fs.mkdir.mockResolvedValue(undefined);
-    fs.readFile.mockRejectedValue(Object.assign(new Error('missing'), { code: 'ENOENT' }));
+    fs.readFile.mockImplementation(async (path: string) => {
+      if (String(path).endsWith('.lock')) {
+        const matchingLocks = fs.handles.filter((entry) => entry.path === path);
+        const lock = matchingLocks[matchingLocks.length - 1];
+        const raw = lock?.writeFile.mock.calls.at(-1)?.[0];
+        return typeof raw === 'string' ? raw : '';
+      }
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
     fs.open.mockImplementation(async (path: string) => makeHandle(path));
     fs.rename.mockResolvedValue(undefined);
     fs.rm.mockResolvedValue(undefined);
@@ -264,6 +272,54 @@ describe('PersistentQueue filesystem writes', () => {
       'queue',
       'persistent-temp-cleanup-failed',
       expect.objectContaining({ err: 'cleanup failed' }),
+    );
+  });
+
+  test('removes the lock file when acquisition writes fail after creating it', async () => {
+    const file = '/tmp/persistent-queue-fs/queue.json';
+    const lockError = new Error('lock write failed');
+    fs.open.mockImplementation(async (path: string) => {
+      const handle = makeHandle(path);
+      if (path === `${file}.lock`) {
+        handle.writeFile.mockRejectedValue(lockError);
+      }
+      return handle;
+    });
+    const { PersistentQueue } = await import('../../src/bot/persistent-queue');
+
+    await expect(new PersistentQueue(file).enqueue('scope-a', [msg('m1')], { id: 'record-1', now: 1_000 })).rejects.toThrow(
+      'lock write failed',
+    );
+
+    const lock = fs.handles.find((entry) => entry.path === `${file}.lock`);
+    expect(lock?.close).toHaveBeenCalledTimes(1);
+    expect(fs.rm).toHaveBeenCalledWith(`${file}.lock`, { force: true });
+    expect(fs.rename).not.toHaveBeenCalled();
+  });
+
+  test('does not remove a lock file with a different owner token on release', async () => {
+    const file = '/tmp/persistent-queue-fs/queue.json';
+    fs.readFile.mockImplementation(async (path: string) => {
+      if (path === `${file}.lock`) {
+        return JSON.stringify({ pid: 999, token: 'different-owner', createdAt: 1 });
+      }
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+    const [{ PersistentQueue }, { log }] = await Promise.all([
+      import('../../src/bot/persistent-queue'),
+      import('../../src/core/logger'),
+    ]);
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
+
+    await expect(new PersistentQueue(file).enqueue('scope-a', [msg('m1')], { id: 'record-1', now: 1_000 })).resolves.toMatchObject({
+      id: 'record-1',
+    });
+
+    expect(fs.rm).not.toHaveBeenCalledWith(`${file}.lock`, { force: true });
+    expect(warn).toHaveBeenCalledWith(
+      'queue',
+      'persistent-lock-owner-mismatch',
+      expect.objectContaining({ lockFile: `${file}.lock` }),
     );
   });
 });
