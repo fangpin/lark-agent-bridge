@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
@@ -31,6 +32,20 @@ export interface PersistentQueueOptions {
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_LOCK_POLL_MS = 50;
 const DEFAULT_STALE_LOCK_MS = 60_000;
+
+type LockIdentity = Pick<Stats, 'dev' | 'ino' | 'size' | 'mtimeMs'>;
+
+interface ParsedLockFile {
+  pid?: number;
+  token?: string;
+  createdAt?: number;
+}
+
+interface LockCandidate {
+  raw: string;
+  lock: ParsedLockFile | undefined;
+  identity: LockIdentity;
+}
 
 function clonePlainData<T>(value: T): T {
   if (typeof structuredClone === 'function') {
@@ -98,6 +113,49 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function isState(value: unknown): value is PersistentQueueState {
   return value === 'queued' || value === 'running';
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return false;
+    return true;
+  }
+}
+
+function parseLockFile(raw: string): ParsedLockFile | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (!isObject(parsed)) return undefined;
+  return {
+    pid: typeof parsed.pid === 'number' && Number.isFinite(parsed.pid) ? parsed.pid : undefined,
+    token: typeof parsed.token === 'string' ? parsed.token : undefined,
+    createdAt: typeof parsed.createdAt === 'number' && Number.isFinite(parsed.createdAt) ? parsed.createdAt : undefined,
+  };
+}
+
+function lockIdentity(stats: Stats): LockIdentity {
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    mtimeMs: stats.mtimeMs,
+  };
+}
+
+function sameLockIdentity(left: LockIdentity, right: LockIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeMs === right.mtimeMs;
+}
+
+function sameLockCandidate(left: LockCandidate, right: LockCandidate): boolean {
+  return sameLockIdentity(left.identity, right.identity) && left.raw === right.raw;
 }
 
 type ResourceDescriptor = NormalizedMessage['resources'][number];
@@ -230,6 +288,7 @@ export class PersistentQueue {
   private readonly lockFile: string;
   private readonly lockTimeoutMs: number;
   private readonly lockPollMs: number;
+  private readonly staleLockMs: number;
   private lockToken: string | undefined;
 
   constructor(
@@ -241,7 +300,7 @@ export class PersistentQueue {
     this.lockFile = `${this.lockKey}.lock`;
     this.lockTimeoutMs = options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
     this.lockPollMs = options.lockPollMs ?? DEFAULT_LOCK_POLL_MS;
-    void (options.staleLockMs ?? DEFAULT_STALE_LOCK_MS);
+    this.staleLockMs = options.staleLockMs ?? DEFAULT_STALE_LOCK_MS;
   }
 
   async enqueue(
@@ -377,12 +436,59 @@ export class PersistentQueue {
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         if (code !== 'EEXIST') throw err;
+        if (await this.tryRemoveStaleLock()) continue;
       }
 
       if (Date.now() - startedAt >= this.lockTimeoutMs) {
         throw new Error(`persistent queue lock timeout: ${this.file}`);
       }
       await delay(Math.max(1, this.lockPollMs));
+    }
+  }
+
+  private async readLockCandidate(): Promise<LockCandidate | undefined> {
+    try {
+      const [raw, stats] = await Promise.all([
+        readFile(this.lockFile, 'utf8'),
+        stat(this.lockFile),
+      ]);
+      return {
+        raw,
+        lock: parseLockFile(raw),
+        identity: lockIdentity(stats),
+      };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      return undefined;
+    }
+  }
+
+  private isStaleLockCandidate(candidate: LockCandidate, now: number): boolean {
+    const ageMs = now - candidate.identity.mtimeMs;
+    if (ageMs < this.staleLockMs) return false;
+
+    const pid = candidate.lock?.pid;
+    if (pid === undefined) return true;
+    return !isPidAlive(pid);
+  }
+
+  private async tryRemoveStaleLock(): Promise<boolean> {
+    const candidate = await this.readLockCandidate();
+    if (!candidate || !this.isStaleLockCandidate(candidate, Date.now())) return false;
+
+    const current = await this.readLockCandidate();
+    if (!current || !sameLockCandidate(candidate, current)) return false;
+
+    try {
+      await rm(this.lockFile);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return true;
+      log.warn('queue', 'persistent-stale-lock-remove-failed', {
+        lockFile: this.lockFile,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return false;
     }
   }
 

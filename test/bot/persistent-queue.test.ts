@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { open, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -180,10 +180,26 @@ describe('PersistentQueue', () => {
     }
   });
 
-  test('does not remove or steal an old lock when acquisition times out', async () => {
+  test('recovers a stale lock owned by a dead process before mutating', async () => {
     const file = queueFile();
     const lockPath = `${file}.lock`;
-    const oldLock = JSON.stringify({ pid: 123, token: 'other-owner', createdAt: 1 });
+    await writeFile(lockPath, JSON.stringify({ pid: 99_999_999, token: 'dead', createdAt: 1 }));
+    const oldTime = new Date(Date.now() - 60_000);
+    await utimes(lockPath, oldTime, oldTime);
+    const queue = new PersistentQueue(file, Date.now, { lockPollMs: 5, lockTimeoutMs: 500, staleLockMs: 1 });
+
+    await expect(queue.enqueue('scope-a', [msg('m1')], { id: 'record-1', now: 2_000 })).resolves.toMatchObject({
+      id: 'record-1',
+    });
+
+    expect(existsSync(lockPath)).toBe(false);
+    expect((await queue.recoverable()).map((record) => record.id)).toEqual(['record-1']);
+  });
+
+  test('does not remove or steal an old lock owned by a live process', async () => {
+    const file = queueFile();
+    const lockPath = `${file}.lock`;
+    const oldLock = JSON.stringify({ pid: process.pid, token: 'live-owner', createdAt: 1 });
     await writeFile(lockPath, oldLock);
     const oldTime = new Date(Date.now() - 60_000);
     await utimes(lockPath, oldTime, oldTime);
@@ -194,6 +210,50 @@ describe('PersistentQueue', () => {
     );
 
     expect(await readFile(lockPath, 'utf8')).toBe(oldLock);
+  });
+
+  test('does not remove a stale lock if the lock changes before deletion', async () => {
+    const file = queueFile();
+    const lockPath = `${file}.lock`;
+    const staleLock = JSON.stringify({ pid: 99_999_999, token: 'dead', createdAt: 1 });
+    const replacementLock = JSON.stringify({ pid: process.pid, token: 'replacement', createdAt: 1 });
+    await writeFile(lockPath, staleLock);
+    const oldTime = new Date(Date.now() - 60_000);
+    await utimes(lockPath, oldTime, oldTime);
+    const originalKill = process.kill;
+    let replacedLock = false;
+    vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: string | number) => {
+      if (!replacedLock) {
+        replacedLock = true;
+        writeFileSync(lockPath, replacementLock);
+        utimesSync(lockPath, oldTime, oldTime);
+        const missingProcessError = Object.assign(new Error('missing process'), { code: 'ESRCH' });
+        throw missingProcessError;
+      }
+      return originalKill(pid, signal as NodeJS.Signals | number | undefined);
+    }) as typeof process.kill);
+    const queue = new PersistentQueue(file, () => 2_000, { lockPollMs: 5, lockTimeoutMs: 25, staleLockMs: 1 });
+
+    await expect(queue.enqueue('scope-a', [msg('m1')], { id: 'blocked', now: 2_000 })).rejects.toThrow(
+      `persistent queue lock timeout: ${file}`,
+    );
+
+    expect(await readFile(lockPath, 'utf8')).toBe(replacementLock);
+  });
+
+  test('removes malformed stale lock content only after stable identity checks', async () => {
+    const file = queueFile();
+    const lockPath = `${file}.lock`;
+    await writeFile(lockPath, '{not valid json');
+    const oldTime = new Date(Date.now() - 60_000);
+    await utimes(lockPath, oldTime, oldTime);
+    const queue = new PersistentQueue(file, () => 2_000, { lockPollMs: 5, lockTimeoutMs: 500, staleLockMs: 1 });
+
+    await expect(queue.enqueue('scope-a', [msg('m1')], { id: 'record-1', now: 2_000 })).resolves.toMatchObject({
+      id: 'record-1',
+    });
+
+    expect(existsSync(lockPath)).toBe(false);
   });
 
   test('rejects duplicate caller-provided ids', async () => {
