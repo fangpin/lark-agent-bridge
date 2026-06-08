@@ -1405,6 +1405,38 @@ describe('channel streamMessageId persistence', () => {
 });
 
 describe('persistent queue recovery', () => {
+  test('restore keeps running records in memory when markQueued fails and continues later records', async () => {
+    const persistentQueue = tempPersistentQueue();
+    await persistentQueue.enqueue('chat-1', [fakeMessage('restore-running-markqueued-fails', 'older running prompt')], {
+      id: 'restore-running-markqueued-fails',
+      now: 1000,
+    });
+    await persistentQueue.markRunning('restore-running-markqueued-fails', { now: 2000 });
+    await persistentQueue.enqueue('chat-1', [fakeMessage('restore-queued-after-failure', 'newer queued prompt')], {
+      id: 'restore-queued-after-failure',
+      now: 3000,
+    });
+    vi.spyOn(persistentQueue, 'markQueued').mockRejectedValueOnce(new Error('mark queued unavailable during restore'));
+    const prompts: string[] = [];
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent((opts) => prompts.push(opts.prompt)),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+    expect(prompts[0]).toContain('older running prompt');
+    expect(prompts[1]).toContain('newer queued prompt');
+    await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
+  });
+
   test('restores queued and running records on startup', async () => {
     const persistentQueue = tempPersistentQueue();
     await persistentQueue.enqueue('chat-1', [fakeMessage('pq-queued', 'queued prompt')], { id: 'pq-queued', now: 1000 });
@@ -1803,6 +1835,40 @@ describe('processAgentStream', () => {
     expect(setCalls).toEqual([
       { scope: 'chat-1', sessionKey: 'agent:test', sessionId: 'agent-new', cwd: '/tmp/project' },
     ]);
+  });
+
+  test('processes terminal done event that arrives after lifecycle interrupt flag', async () => {
+    const flushed: string[] = [];
+    const run: AgentRun = {
+      events: (async function* (): AsyncGenerator<AgentEvent> {
+        yield { type: 'text', delta: 'almost done' };
+        yield { type: 'done' };
+      })(),
+      async stop() {},
+      async waitForExit() {
+        return true;
+      },
+    };
+    const handle: RunHandle = { run, interrupted: false };
+
+    await processAgentStream(
+      handle,
+      {} as SessionStore,
+      'chat-1',
+      '/tmp/project',
+      'agent:test',
+      undefined,
+      async (state) => {
+        flushed.push(state.terminal);
+        if (state.terminal === 'running') {
+          handle.interrupted = true;
+          handle.interruptReason = 'lifecycle';
+        }
+      },
+      5000,
+    );
+
+    expect(flushed.at(-1)).toBe('done');
   });
 
   test('renders an agent stream exception as an error state', async () => {
@@ -2321,6 +2387,54 @@ describe('flush durable setup failures', () => {
     ]));
     expect(markRunning).toHaveBeenCalledTimes(1);
     await vi.waitFor(() => expect(unblockAfter).toHaveBeenCalledWith('chat-1', 1_000));
+  });
+
+  test('retries setup failure in memory when markQueued also fails once', async () => {
+    vi.useFakeTimers();
+    try {
+      const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+      const prompts: string[] = [];
+      const persistentQueue = tempPersistentQueue();
+      const markRunning = vi.spyOn(persistentQueue, 'markRunning');
+      const markQueued = vi.spyOn(persistentQueue, 'markQueued');
+      const unblockAfter = vi.spyOn(PendingQueue.prototype, 'unblockAfter');
+      markRunning.mockRejectedValueOnce(new Error('mark running unavailable'));
+      markQueued.mockRejectedValueOnce(new Error('mark queued unavailable'));
+      const fakeChannel = createFakeChannel(messages);
+      vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+      await startChannel({
+        cfg: textReplyConfig(),
+        agent: fakeAgent((opts) => prompts.push(opts.prompt)),
+        sessions: fakeSessions(),
+        workspaces: fakeWorkspaces('/tmp/project'),
+        controls: fakeControls(textReplyConfig()),
+        persistentQueue,
+      });
+
+      const onMessage = messages.message;
+      if (!onMessage) throw new Error('message handler was not registered');
+      await onMessage(fakeMessage('setup-markqueued-fails', 'retry despite mark queued failure'));
+      await vi.waitFor(() => expect(markRunning).toHaveBeenCalledTimes(1));
+      const durableId = markRunning.mock.calls[0]?.[0];
+      if (!durableId) throw new Error('durable id missing');
+
+      await vi.waitFor(() => expect(markQueued).toHaveBeenCalledWith(durableId));
+      expect(prompts).toEqual([]);
+      await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([
+        expect.objectContaining({ id: durableId, state: 'queued' }),
+      ]));
+      await vi.waitFor(() => expect(unblockAfter).toHaveBeenCalledWith('chat-1', 1_000));
+      await vi.advanceTimersByTimeAsync(2_001);
+
+      await vi.waitFor(() => expect(markRunning).toHaveBeenCalledTimes(2));
+      await vi.advanceTimersByTimeAsync(2_001);
+      await vi.waitFor(() => expect(prompts).toHaveLength(1));
+      expect(prompts[0]).toContain('retry despite mark queued failure');
+      await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test('queued-only cleanup removes setup-failure delayed retry without orphaning durable record', async () => {

@@ -306,10 +306,26 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
             log.fail('queue', markErr, { step: 'persistent-mark-queued-after-setup-failure', scope, durableId });
             queuedRecord = undefined;
           }
-          if (queuedRecord) {
+          const durableStillExists = queuedRecord
+            ? true
+            : await persistentQueue.has(durableId).catch((hasErr) => {
+              log.fail('queue', hasErr, { step: 'persistent-has-after-setup-failure', scope, durableId });
+              return true;
+            });
+          if (durableStillExists && !queuedRecord) {
+            await persistentQueue.markQueued(durableId).then(
+              () => {
+                log.info('queue', 'persistent-mark-queued-recovered-after-setup-failure', { scope, durableId });
+              },
+              (markErr) => {
+                log.fail('queue', markErr, { step: 'persistent-mark-queued-retry-after-setup-failure', scope, durableId });
+              },
+            );
+          }
+          if (durableStillExists) {
             pending.pushBatch(scope, batch, { durableId, front: true });
             unblockDelayMs = SETUP_RETRY_DELAY_MS;
-            log.warn('queue', 'persistent-requeued-after-setup-failure', {
+            log.warn('queue', queuedRecord ? 'persistent-requeued-after-setup-failure' : 'persistent-requeued-after-mark-queued-failure', {
               scope,
               durableId,
               batchSize: batch.length,
@@ -483,19 +499,23 @@ export async function restorePersistentQueue(persistentQueue: PersistentQueue, p
     if (record.messages.length === 0) continue;
     let restoredRecord = record;
     if (record.state === 'running') {
-      const queuedRecord = await persistentQueue.markQueued(record.id);
-      if (!queuedRecord) {
-        log.warn('queue', 'persistent-restore-skip-missing-running', {
-          scope: record.scope,
-          durableId: record.id,
+      try {
+        const queuedRecord = await persistentQueue.markQueued(record.id);
+        if (!queuedRecord) {
+          log.warn('queue', 'persistent-restore-skip-missing-running', {
+            scope: record.scope,
+            durableId: record.id,
+          });
+          continue;
+        }
+        restoredRecord = queuedRecord;
+        log.info('queue', 'persistent-restore-mark-queued', {
+          scope: restoredRecord.scope,
+          durableId: restoredRecord.id,
         });
-        continue;
+      } catch (err) {
+        log.fail('queue', err, { step: 'persistent-restore-mark-queued', scope: record.scope, durableId: record.id });
       }
-      restoredRecord = queuedRecord;
-      log.info('queue', 'persistent-restore-mark-queued', {
-        scope: restoredRecord.scope,
-        durableId: restoredRecord.id,
-      });
     }
     const size = pending.pushBatch(restoredRecord.scope, restoredRecord.messages, { durableId: restoredRecord.id });
     restored++;
@@ -1616,7 +1636,8 @@ export async function processAgentStream(
 
   try {
     for await (const evt of handle.run.events) {
-      if (handle.interrupted) break;
+      const terminalEvent = evt.type === 'done' || evt.type === 'error';
+      if (handle.interrupted && !terminalEvent) break;
 
       // Track tool flight before re-arming the idle timer so the arm step
       // sees the correct set size. tool_use opens a window; tool_result
