@@ -104,11 +104,16 @@ export class PendingQueue {
   cancel(scope: string, opts: PendingCancelOptions = {}): NormalizedMessage[] {
     const entry = this.map.get(scope);
     const delayed = this.delayedUnblocks.get(scope);
-    if (delayed) clearTimeout(delayed.timer);
-    this.delayedUnblocks.delete(scope);
-    if (!opts.keepBlocked) this.blocked.delete(scope);
+    if (!opts.keepBlocked) {
+      if (delayed) clearTimeout(delayed.timer);
+      this.delayedUnblocks.delete(scope);
+      this.blocked.delete(scope);
+    }
     if (!entry) return [];
-    if (entry.timer) clearTimeout(entry.timer);
+    if (entry.timer && (!opts.keepBlocked || entry.timer !== delayed?.timer)) {
+      clearTimeout(entry.timer);
+      entry.timer = undefined;
+    }
 
     if (!opts.durableIds) {
       this.map.delete(scope);
@@ -129,7 +134,7 @@ export class PendingQueue {
       this.map.delete(scope);
     } else {
       entry.batches = kept;
-      entry.timer = this.blocked.has(scope) ? undefined : this.scheduleFlush(scope);
+      entry.timer = this.blocked.has(scope) ? delayed?.timer : this.scheduleFlush(scope);
     }
     return dropped;
   }

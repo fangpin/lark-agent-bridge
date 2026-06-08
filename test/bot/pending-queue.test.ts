@@ -228,4 +228,35 @@ describe('PendingQueue', () => {
 
     expect(flushed).toEqual([{ durableId: 'running-durable', ids: ['running'] }]);
   });
+
+  test('queued-only cancel preserves delayed unblock for remaining durable batches', async () => {
+    vi.useFakeTimers();
+    try {
+      const flushed: Array<{ durableId: string | undefined; ids: string[] }> = [];
+      const queue = new PendingQueue(0, (_scope, batch, durableId) => {
+        flushed.push({ durableId, ids: batch.map((m) => m.messageId) });
+      });
+
+      queue.block('chat-1');
+      queue.push('chat-1', msg('running'), { durableId: 'running-durable' });
+      queue.push('chat-1', msg('queued'), { durableId: 'queued-durable' });
+      queue.unblockAfter('chat-1', 1000);
+
+      const dropped = queue.cancel('chat-1', {
+        keepBlocked: true,
+        durableIds: new Set(['queued-durable']),
+      });
+
+      expect(dropped.map((m) => m.messageId)).toEqual(['queued']);
+      expect(flushed).toEqual([]);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(flushed).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(flushed).toEqual([{ durableId: 'running-durable', ids: ['running'] }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

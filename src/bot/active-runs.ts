@@ -39,6 +39,10 @@ export class ActiveRuns {
     if (existing === handle) handle.run = run;
   }
 
+  has(chatId: string): boolean {
+    return this.handles.has(chatId);
+  }
+
   unregister(chatId: string, runOrHandle: AgentRun | RunHandle): void {
     const existing = this.handles.get(chatId);
     if (existing?.run === runOrHandle || existing === runOrHandle) this.handles.delete(chatId);

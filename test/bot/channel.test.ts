@@ -281,6 +281,23 @@ describe('channel streamMessageId persistence', () => {
     ]);
   });
 
+  test('active run registry reports whether a scope is active', async () => {
+    const activeRuns = new ActiveRuns();
+    const run: AgentRun = {
+      events: (async function* (): AsyncGenerator<AgentEvent> {})(),
+      async stop() {},
+      async waitForExit() {
+        return true;
+      },
+    };
+
+    expect(activeRuns.has('chat-1')).toBe(false);
+    const handle = activeRuns.register('chat-1', run);
+    expect(activeRuns.has('chat-1')).toBe(true);
+    activeRuns.unregister('chat-1', handle);
+    expect(activeRuns.has('chat-1')).toBe(false);
+  });
+
   test('/timeout off during an active run does not unblock the scope for concurrent work', async () => {
     const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
     let releaseFirst!: () => void;

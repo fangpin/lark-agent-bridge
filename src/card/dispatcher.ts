@@ -124,7 +124,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     cancelQueuedOnlyWork: async (targetScope = scope) => {
       const droppedIds = await deps.persistentQueue.cancelQueuedScopeIds(targetScope);
       const dropped = deps.pending.cancel(targetScope, {
-        keepBlocked: true,
+        keepBlocked: deps.activeRuns.has(targetScope),
         durableIds: new Set(droppedIds),
       });
       log.info('cardAction', 'command-drop-pending-queued-only', {

@@ -668,7 +668,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     cancelQueuedOnlyWork: async (targetScope = scope) => {
       const droppedIds = await persistentQueue.cancelQueuedScopeIds(targetScope);
       const dropped = pending.cancel(targetScope, {
-        keepBlocked: true,
+        keepBlocked: activeRuns.has(targetScope),
         durableIds: new Set(droppedIds),
       });
       log.info('intake', 'command-drop-pending-queued-only', {
@@ -681,7 +681,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     cancelPendingQueuedWork: async (targetScope = scope) => {
       const droppedIds = await persistentQueue.cancelQueuedScopeIds(targetScope);
       const dropped = pending.cancel(targetScope, {
-        keepBlocked: true,
+        keepBlocked: activeRuns.has(targetScope),
         durableIds: new Set(droppedIds),
       });
       log.info('intake', 'command-drop-pending', {

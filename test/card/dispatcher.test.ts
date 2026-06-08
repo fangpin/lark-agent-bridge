@@ -50,6 +50,7 @@ function deps(overrides: Partial<CardDispatchDeps> = {}): CardDispatchDeps {
     },
     activeRuns: {
       interrupt: vi.fn(() => false),
+      has: vi.fn(() => false),
     },
     agent: {
       id: 'fake',
