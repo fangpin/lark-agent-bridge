@@ -36,13 +36,42 @@ function clonePlainData<T>(value: T): T {
   return value;
 }
 
+function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'undefined' || typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') {
+    return undefined;
+  }
+  if (typeof value !== 'object') return undefined;
+  if (seen.has(value)) return undefined;
+
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.flatMap((item) => {
+        const safe = toJsonSafe(item, seen);
+        return safe === undefined ? [] : [safe];
+      });
+    }
+
+    return Object.fromEntries(
+      Object.entries(value).flatMap(([key, item]) => {
+        const safe = toJsonSafe(item, seen);
+        return safe === undefined ? [] : [[key, safe]];
+      }),
+    );
+  } finally {
+    seen.delete(value);
+  }
+}
+
 function cloneMessage(msg: NormalizedMessage): NormalizedMessage {
   return {
     ...msg,
     resources: clonePlainData(msg.resources),
     mentions: clonePlainData(msg.mentions),
-    raw: clonePlainData(msg.raw),
-  };
+    raw: toJsonSafe(msg.raw),
+  } as NormalizedMessage;
 }
 
 function cloneRecord(record: PersistentQueueRecord): PersistentQueueRecord {
@@ -66,6 +95,10 @@ function isStringField(value: unknown): boolean {
 
 function isNumberField(value: unknown): boolean {
   return value === undefined || (typeof value === 'number' && Number.isFinite(value));
+}
+
+function isOptionalStringField(value: unknown): boolean {
+  return value === undefined || typeof value === 'string';
 }
 
 function isBooleanField(value: unknown): boolean {
@@ -107,6 +140,10 @@ function isMessage(value: unknown): value is NormalizedMessage {
     typeof value.senderId === 'string' &&
     typeof value.content === 'string' &&
     typeof value.rawContentType === 'string' &&
+    isOptionalStringField(value.senderName) &&
+    isOptionalStringField(value.rootId) &&
+    isOptionalStringField(value.threadId) &&
+    isOptionalStringField(value.replyToMessageId) &&
     Array.isArray(value.resources) &&
     value.resources.every(isResource) &&
     Array.isArray(value.mentions) &&
@@ -307,7 +344,14 @@ export class PersistentQueue {
       await this.fsyncDirectory(dir);
     } finally {
       if (!renamed) {
-        await rm(tmpFile, { force: true });
+        try {
+          await rm(tmpFile, { force: true });
+        } catch (err) {
+          log.warn('queue', 'persistent-temp-cleanup-failed', {
+            tmpFile,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     }
   }

@@ -397,4 +397,58 @@ describe('PersistentQueue', () => {
 
     expect(records.map((record) => record.id)).toEqual(['valid']);
   });
+
+  test('skips messages with malformed optional normalized fields', async () => {
+    const file = queueFile();
+    const withField = (id: string, field: string, value: unknown): unknown => ({
+      ...msg(id),
+      [field]: value,
+    });
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        records: [
+          { id: 'valid', scope: 'scope-a', messages: [msg('m1')], state: 'queued', createdAt: 1_000, updatedAt: 1_000 },
+          { id: 'bad-thread', scope: 'scope-a', messages: [withField('m2', 'threadId', 123)], state: 'queued', createdAt: 2_000, updatedAt: 2_000 },
+          { id: 'bad-reply', scope: 'scope-a', messages: [withField('m3', 'replyToMessageId', {})], state: 'queued', createdAt: 3_000, updatedAt: 3_000 },
+          { id: 'bad-root', scope: 'scope-a', messages: [withField('m4', 'rootId', false)], state: 'queued', createdAt: 4_000, updatedAt: 4_000 },
+          { id: 'bad-sender-name', scope: 'scope-a', messages: [withField('m5', 'senderName', [])], state: 'queued', createdAt: 5_000, updatedAt: 5_000 },
+        ],
+      }),
+    );
+
+    const records = await new PersistentQueue(file).recoverable();
+
+    expect(records.map((record) => record.id)).toEqual(['valid']);
+    expect(records[0]!.messages[0]!.messageId).toBe('m1');
+  });
+
+  test('persists messages with non-json raw data without throwing', async () => {
+    const file = queueFile();
+    const queue = new PersistentQueue(file);
+    const message = msg('m1');
+    const raw: Record<string, unknown> = {
+      safe: { nested: 'value' },
+      list: ['kept', 1, undefined, () => 'drop', BigInt(1)],
+      bigint: BigInt(2),
+      fn: () => 'drop',
+    };
+    raw.self = raw;
+    message.raw = raw;
+
+    await expect(queue.enqueue('scope-a', [message], { id: 'record-1', now: 1_000 })).resolves.toMatchObject({
+      id: 'record-1',
+    });
+
+    const recovered = await new PersistentQueue(file).recoverable();
+    const recoveredRaw = recovered[0]!.messages[0]!.raw as Record<string, unknown>;
+    expect(recovered).toHaveLength(1);
+    expect(recoveredRaw.safe).toEqual({ nested: 'value' });
+    expect(recoveredRaw).not.toHaveProperty('self');
+    expect(recoveredRaw).not.toHaveProperty('bigint');
+    expect(recoveredRaw).not.toHaveProperty('fn');
+    expect(recoveredRaw.list).toEqual(['kept', 1]);
+    expect(() => JSON.stringify(recovered)).not.toThrow();
+  });
 });

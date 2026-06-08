@@ -152,4 +152,26 @@ describe('PersistentQueue filesystem writes', () => {
     expect(temp.close).toHaveBeenCalledTimes(1);
     expect(fs.rm).toHaveBeenCalledWith(temp.path, { force: true });
   });
+
+  test('temp cleanup errors do not mask write failures', async () => {
+    const file = '/tmp/persistent-queue-fs/queue.json';
+    fs.rename.mockRejectedValue(new Error('rename failed'));
+    fs.rm.mockRejectedValue(new Error('cleanup failed'));
+    const [{ PersistentQueue }, { log }] = await Promise.all([
+      import('../../src/bot/persistent-queue'),
+      import('../../src/core/logger'),
+    ]);
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
+
+    await expect(new PersistentQueue(file).enqueue('scope-a', [msg('m1')], { id: 'record-1', now: 1_000 })).rejects.toThrow(
+      'rename failed',
+    );
+
+    expect(fs.rm).toHaveBeenCalledWith(tmpHandle().path, { force: true });
+    expect(warn).toHaveBeenCalledWith(
+      'queue',
+      'persistent-temp-cleanup-failed',
+      expect.objectContaining({ err: 'cleanup failed' }),
+    );
+  });
 });
