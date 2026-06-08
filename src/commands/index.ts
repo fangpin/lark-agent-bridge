@@ -81,6 +81,7 @@ export interface CommandContext {
   channel: LarkChannel;
   msg: NormalizedMessage;
   cancelQueuedWork?: (scope?: string) => Promise<void>;
+  cancelPendingQueuedWork?: (scope?: string) => Promise<void>;
   /**
    * Session scope string. For p2p / regular group it equals `msg.chatId`;
    * for topic groups it's `${chatId}:${threadId}` (so each topic gets its
@@ -277,12 +278,27 @@ async function cancelQueuedWork(ctx: CommandContext, scope = ctx.scope): Promise
   await ctx.cancelQueuedWork?.(scope);
 }
 
+async function cancelPendingQueuedWork(ctx: CommandContext, scope = ctx.scope): Promise<void> {
+  await (ctx.cancelPendingQueuedWork ?? ctx.cancelQueuedWork)?.(scope);
+}
+
 async function cancelQueuedWorkBeforeMutation(ctx: CommandContext, scope = ctx.scope): Promise<boolean> {
   try {
     await cancelQueuedWork(ctx, scope);
     return true;
   } catch (err) {
     log.fail('command', err, { step: 'cancel-queued-work', scope });
+    await reply(ctx, `❌ 清理已排队任务失败：${err instanceof Error ? err.message : String(err)}\n状态未变更，请处理后重试。`);
+    return false;
+  }
+}
+
+async function cancelPendingQueuedWorkBeforeMutation(ctx: CommandContext, scope = ctx.scope): Promise<boolean> {
+  try {
+    await cancelPendingQueuedWork(ctx, scope);
+    return true;
+  } catch (err) {
+    log.fail('command', err, { step: 'cancel-pending-queued-work', scope });
     await reply(ctx, `❌ 清理已排队任务失败：${err instanceof Error ? err.message : String(err)}\n状态未变更，请处理后重试。`);
     return false;
   }
@@ -981,7 +997,7 @@ async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
   }
 
   if (trimmed === 'default') {
-    if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
+    if (!await cancelPendingQueuedWorkBeforeMutation(ctx)) return;
     const cleared = ctx.sessions.clearIdleTimeoutOverride(ctx.scope);
     log.info('command', 'timeout-clear', { scope: ctx.scope, cleared });
     await replyCard(
@@ -996,7 +1012,7 @@ async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
   }
 
   if (trimmed === 'off' || trimmed === '0') {
-    if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
+    if (!await cancelPendingQueuedWorkBeforeMutation(ctx)) return;
     ctx.sessions.setIdleTimeoutMinutes(ctx.scope, 0);
     log.info('command', 'timeout-off', { scope: ctx.scope });
     await replyCard(
@@ -1015,7 +1031,7 @@ async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, '❌ 用法:`/timeout <1-120>` / `/timeout off` / `/timeout default`');
     return;
   }
-  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
+  if (!await cancelPendingQueuedWorkBeforeMutation(ctx)) return;
   ctx.sessions.setIdleTimeoutMinutes(ctx.scope, n);
   log.info('command', 'timeout-set', { scope: ctx.scope, minutes: n });
   await replyCard(

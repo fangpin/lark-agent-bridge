@@ -434,6 +434,23 @@ describe('PersistentQueue', () => {
     ]);
   });
 
+  test('cancels only queued records for non-interrupting scope mutations', async () => {
+    const file = queueFile();
+    const queue = new PersistentQueue(file);
+    await queue.enqueue('scope-a', [msg('queued-a')], { id: 'queued-a', now: 1_000 });
+    await queue.enqueue('scope-a', [msg('running-a')], { id: 'running-a', now: 2_000 });
+    await queue.markRunning('running-a', { now: 3_000 });
+    await queue.enqueue('scope-b', [msg('queued-b')], { id: 'queued-b', now: 4_000 });
+
+    await expect(queue.cancelQueuedScope('scope-a')).resolves.toBe(1);
+
+    const reloaded = await new PersistentQueue(file).recoverable();
+    expect(reloaded.map((record) => `${record.id}:${record.scope}:${record.state}`)).toEqual([
+      'running-a:scope-a:running',
+      'queued-b:scope-b:queued',
+    ]);
+  });
+
   test('skips malformed records while keeping valid records', async () => {
     const file = queueFile();
     await writeFile(

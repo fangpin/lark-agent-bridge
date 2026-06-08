@@ -161,7 +161,7 @@ describe('channel streamMessageId persistence', () => {
       id: 'durable-timeout',
       now: 1000,
     });
-    const cancelScope = vi.spyOn(persistentQueue, 'cancelScope').mockRejectedValueOnce(new Error('disk cleanup failed'));
+    const cancelQueuedScope = vi.spyOn(persistentQueue, 'cancelQueuedScope').mockRejectedValueOnce(new Error('disk cleanup failed'));
     const setIdleTimeoutMinutes = vi.fn();
     const sessions = {
       ...fakeSessions(),
@@ -185,7 +185,7 @@ describe('channel streamMessageId persistence', () => {
     if (!onMessage) throw new Error('message handler was not registered');
     await onMessage(fakeMessage('timeout-off', '/timeout off'));
 
-    expect(cancelScope).toHaveBeenCalledWith('chat-1');
+    expect(cancelQueuedScope).toHaveBeenCalledWith('chat-1');
     expect(setIdleTimeoutMinutes).not.toHaveBeenCalled();
     expect(send).toHaveBeenCalledWith(
       'chat-1',
@@ -204,7 +204,7 @@ describe('channel streamMessageId persistence', () => {
       id: 'durable-timeout-success',
       now: 1000,
     });
-    const cancelScope = vi.spyOn(persistentQueue, 'cancelScope');
+    const cancelQueuedScope = vi.spyOn(persistentQueue, 'cancelQueuedScope');
     const clearIdleTimeoutOverride = vi.fn(() => true);
     const sessions = {
       ...fakeSessions(),
@@ -227,9 +227,58 @@ describe('channel streamMessageId persistence', () => {
     if (!onMessage) throw new Error('message handler was not registered');
     await onMessage(fakeMessage('timeout-default', '/timeout default'));
 
-    expect(cancelScope).toHaveBeenCalledWith('chat-1');
+    expect(cancelQueuedScope).toHaveBeenCalledWith('chat-1');
     expect(clearIdleTimeoutOverride).toHaveBeenCalledWith('chat-1');
-    expect(await persistentQueue.recoverable()).toEqual([]);
+    await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
+  });
+
+  test('/timeout off preserves active running durable work', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const persistentQueue = tempPersistentQueue();
+    await persistentQueue.enqueue('chat-1', [fakeMessage('running-timeout', 'active durable work')], {
+      id: 'running-timeout',
+      now: 2000,
+    });
+    await persistentQueue.markRunning('running-timeout', { now: 3000 });
+    const cancelQueuedScope = vi.spyOn(persistentQueue, 'cancelQueuedScope');
+    const activeRuns = new ActiveRuns();
+    const stop = vi.fn(async () => undefined);
+    activeRuns.register('chat-1', {
+      events: (async function* (): AsyncGenerator<AgentEvent> {})(),
+      stop,
+      async waitForExit() {
+        return true;
+      },
+    });
+    const setIdleTimeoutMinutes = vi.fn();
+    const sessions = {
+      ...fakeSessions(),
+      setIdleTimeoutMinutes,
+      getIdleTimeoutMinutes: vi.fn(() => 15),
+    } as unknown as SessionStore;
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent(() => {}),
+      sessions,
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+      activeRuns,
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('timeout-off-active', '/timeout off'));
+
+    expect(cancelQueuedScope).toHaveBeenCalledWith('chat-1');
+    expect(setIdleTimeoutMinutes).toHaveBeenCalledWith('chat-1', 0);
+    expect(stop).not.toHaveBeenCalled();
+    expect(await persistentQueue.recoverable()).toEqual([
+      expect.objectContaining({ id: 'running-timeout', scope: 'chat-1', state: 'running' }),
+    ]);
   });
 
   test('exact /stop replies with failure and leaves active run running when durable cancel fails', async () => {
@@ -1456,6 +1505,67 @@ describe('persistent queue recovery', () => {
     expect(stop).toHaveBeenCalled();
     expect(await persistentQueue.recoverable()).toEqual([
       expect.objectContaining({ scope: 'chat-1', state: 'running', messages: [expect.objectContaining({ messageId: 'durable-disconnect' })] }),
+    ]);
+  });
+
+  test('disconnect preserves active durable record when final stream cleanup fails after lifecycle stop', async () => {
+    const persistentQueue = tempPersistentQueue();
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    let rejectStreamAfterLifecycle!: () => void;
+    const streamCanReject = new Promise<void>((resolve) => {
+      rejectStreamAfterLifecycle = resolve;
+    });
+    const send = vi.fn(async () => ({ messageId: 'om_fallback_or_check' }));
+    const fakeChannel = {
+      ...createFakeChannel(messages),
+      async stream() {
+        await streamCanReject;
+        throw new Error('final stream cleanup failed after lifecycle stop');
+      },
+      send,
+    } as unknown as LarkChannel;
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+    const stop = vi.fn(async () => undefined);
+    const bridge = await startChannel({
+      cfg: markdownReplyConfig(),
+      agent: {
+        ...fakeAgent(() => {}),
+        run(): AgentRun {
+          return {
+            events: (async function* (): AsyncGenerator<AgentEvent> {
+              yield { type: 'text', delta: 'working' };
+              await new Promise(() => {});
+            })(),
+            stop,
+            async waitForExit() {
+              return true;
+            },
+          };
+        },
+      },
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(markdownReplyConfig()),
+      persistentQueue,
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('durable-lifecycle-flush-fails', 'preserve despite failed lifecycle final flush'));
+    await vi.waitFor(async () => expect((await persistentQueue.recoverable())[0]).toMatchObject({ state: 'running' }));
+
+    const disconnecting = bridge.disconnect();
+    await vi.waitFor(() => expect(stop).toHaveBeenCalled());
+    rejectStreamAfterLifecycle();
+    await disconnecting;
+    await vi.waitFor(() => expect(send).toHaveBeenCalledWith('chat-1', { markdown: '请检查' }));
+
+    expect(await persistentQueue.recoverable()).toEqual([
+      expect.objectContaining({
+        scope: 'chat-1',
+        state: 'running',
+        messages: [expect.objectContaining({ messageId: 'durable-lifecycle-flush-fails' })],
+      }),
     ]);
   });
 

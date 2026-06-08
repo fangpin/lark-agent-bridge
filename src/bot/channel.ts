@@ -617,6 +617,16 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
         droppedPersistent,
       });
     },
+    cancelPendingQueuedWork: async (targetScope = scope) => {
+      const droppedPersistent = await persistentQueue.cancelQueuedScope(targetScope);
+      const dropped = pending.cancel(targetScope);
+      log.info('intake', 'command-drop-pending', {
+        scope: targetScope,
+        cmd: parsedCommand?.cmd,
+        droppedPending: dropped.length,
+        droppedPersistent,
+      });
+    },
   });
   if (handled) {
     log.info('intake', 'command', { scope });
@@ -1113,7 +1123,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       terminal: finalState.terminal,
       errorMsg: finalState.errorMsg,
     });
-    const preserveDurable = handle.interruptReason === 'lifecycle' && finalState.terminal === 'interrupted';
+    const preserveDurable = handle.interruptReason === 'lifecycle' && finalState.terminal !== 'done';
     let durableCompleted = !durableId || finalState.terminal === 'running' || preserveDurable;
     if (durableId && finalState.terminal !== 'running' && !preserveDurable) {
       await persistentQueue.complete(durableId).then(
