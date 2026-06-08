@@ -238,7 +238,7 @@ describe('/retry command', () => {
     );
   });
 
-  test('does not push retry into memory when durable enqueue fails', async () => {
+  test('replies with failure and does not push retry into memory when durable enqueue fails', async () => {
     const history = new RunHistory();
     const entry = history.create('chat-1', [msg('fix the bug')], {
       cwd: '/repo/project',
@@ -258,9 +258,9 @@ describe('/retry command', () => {
     expect(commandCtx.activeRuns.interrupt).not.toHaveBeenCalled();
     expect(commandCtx.pending?.push).not.toHaveBeenCalled();
     expect(commandCtx.pending?.pushBatch).not.toHaveBeenCalled();
-    expect(commandCtx.channel.send).not.toHaveBeenCalledWith(
+    expect(commandCtx.channel.send).toHaveBeenCalledWith(
       'chat-1',
-      { markdown: '已重新排队上次任务（1 条消息，当前队列 1）。' },
+      { markdown: expect.stringContaining('重试排队失败') },
       { replyTo: 'msg-1' },
     );
   });

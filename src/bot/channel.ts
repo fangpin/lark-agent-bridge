@@ -248,12 +248,14 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       try {
         if (durableId) {
           const runningRecord = await persistentQueue.markRunning(durableId);
-          if (!runningRecord) throw new Error(`persistent queue record missing before run: ${durableId}`);
+          if (!runningRecord) {
+            log.warn('queue', 'persistent-missing-before-run', { scope, durableId });
+            return;
+          }
           log.info('queue', 'persistent-running', { scope, durableId });
         }
         const mode = await chatModeCache.resolve(channel, firstMsg.chatId);
         const resolved = await resolveAgentForScope(scope, agentDeps);
-        startedRun = true;
         await runAgentBatch({
           channel,
           agent: resolved.agent,
@@ -270,6 +272,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           persistentQueue,
           durableId,
           autoRetryKeys,
+          onRunRegistered: () => {
+            startedRun = true;
+          },
         });
       } catch (err) {
         log.fail('flush', err);
@@ -549,9 +554,6 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 
   const parsedCommand = parseCommandText(msg.content);
-  const shouldCancelQueuedWork = parsedCommand
-    ? commandDropsPending(parsedCommand.cmd, parsedCommand.args)
-    : false;
   const handled = await tryHandleCommand({
     channel,
     msg,
@@ -568,18 +570,18 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     persistentQueue,
     runHistory,
     controls,
-  });
-  if (handled) {
-    if (shouldCancelQueuedWork) {
-      const droppedPersistent = await persistentQueue.cancelScope(scope);
-      const dropped = pending.cancel(scope);
+    cancelQueuedWork: async (targetScope = scope) => {
+      const droppedPersistent = await persistentQueue.cancelScope(targetScope);
+      const dropped = pending.cancel(targetScope);
       log.info('intake', 'command-drop-pending', {
-        scope,
+        scope: targetScope,
         cmd: parsedCommand?.cmd,
         droppedPending: dropped.length,
         droppedPersistent,
       });
-    }
+    },
+  });
+  if (handled) {
     log.info('intake', 'command', { scope });
     return;
   }
@@ -587,32 +589,6 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const record = await persistentQueue.enqueue(scope, [msg]);
   const size = pending.push(scope, msg, { durableId: record.id });
   log.info('intake', 'queued', { scope, queueSize: size, flushDelayMs: PENDING_FLUSH_DELAY_MS, durableId: record.id });
-}
-
-function commandDropsPending(cmd: string, args: string): boolean {
-  switch (cmd) {
-    case '/new':
-    case '/reset':
-    case '/clear':
-    case '/cd':
-      return true;
-    case '/ws': {
-      const sub = args.trim().split(/\s+/)[0] ?? '';
-      return sub === 'use';
-    }
-    case '/resume': {
-      const parts = args.trim().split(/\s+/).filter(Boolean);
-      return parts[0] === 'use' && Boolean(parts[1]);
-    }
-    case '/backend':
-      return args.trim().length > 0;
-    case '/doc': {
-      const sub = args.trim().split(/\s+/)[0] ?? '';
-      return sub === 'bind' || sub === 'clear';
-    }
-    default:
-      return false;
-  }
 }
 
 export async function interruptScopeNow(
@@ -653,6 +629,7 @@ interface RunBatchDeps {
   persistentQueue: PersistentQueue;
   durableId?: string;
   autoRetryKeys: AutoRetryKeys;
+  onRunRegistered?: () => void;
 }
 
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
@@ -672,6 +649,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     persistentQueue,
     durableId,
     autoRetryKeys,
+    onRunRegistered,
   } = deps;
   if (batch.length === 0) return;
   const firstMsg = batch[0];
@@ -798,6 +776,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     stopGraceMs: agentStopGraceMs,
   });
   const handle = activeRuns.register(scope, run);
+  onRunRegistered?.();
   log.info('run', 'timeline', {
     runId: historyEntry.runId,
     step: 'agent',
@@ -1241,7 +1220,14 @@ export async function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
 
   rememberAutoRetryKey(autoRetryKeys, key);
   const retryBatch = batch.map((msg) => ({ ...msg }));
-  const record = persistentQueue ? await persistentQueue.enqueue(scope, retryBatch) : undefined;
+  let record;
+  if (persistentQueue) {
+    try {
+      record = await persistentQueue.enqueue(scope, retryBatch);
+    } catch (err) {
+      log.fail('run', err, { step: 'auto-retry-persistent-enqueue', scope, runId: finalState.runId });
+    }
+  }
   pending.pushBatch(scope, retryBatch, record ? { durableId: record.id } : undefined);
   log.warn('run', 'auto-retry-opaque-sdk-error', {
     scope,
