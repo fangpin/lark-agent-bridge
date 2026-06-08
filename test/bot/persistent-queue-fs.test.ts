@@ -286,6 +286,39 @@ describe('PersistentQueue filesystem writes', () => {
     );
   });
 
+  test('temp close errors do not mask original write failures', async () => {
+    const file = '/tmp/persistent-queue-fs/queue.json';
+    const writeError = new Error('temp write failed');
+    const closeError = new Error('temp close failed');
+    fs.open.mockImplementation(async (path: string) => {
+      const handle = makeHandle(path);
+      if (String(path).includes('.tmp-')) {
+        handle.writeFile.mockRejectedValue(writeError);
+        handle.close.mockRejectedValue(closeError);
+      }
+      return handle;
+    });
+    const [{ PersistentQueue }, { log }] = await Promise.all([
+      import('../../src/bot/persistent-queue'),
+      import('../../src/core/logger'),
+    ]);
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
+
+    await expect(new PersistentQueue(file).enqueue('scope-a', [msg('m1')], { id: 'record-1', now: 1_000 })).rejects.toThrow(
+      'temp write failed',
+    );
+
+    const temp = tmpHandle();
+    expect(temp.writeFile).toHaveBeenCalledTimes(1);
+    expect(temp.close).toHaveBeenCalledTimes(1);
+    expect(fs.rm).toHaveBeenCalledWith(temp.path, { force: true });
+    expect(warn).toHaveBeenCalledWith(
+      'queue',
+      'persistent-temp-close-failed',
+      expect.objectContaining({ tmpFile: temp.path, err: 'temp close failed' }),
+    );
+  });
+
   test('removes the lock file when acquisition writes fail after creating it', async () => {
     const file = '/tmp/persistent-queue-fs/queue.json';
     const lockError = new Error('lock write failed');
@@ -334,6 +367,66 @@ describe('PersistentQueue filesystem writes', () => {
       'queue',
       'persistent-lock-owner-mismatch',
       expect.objectContaining({ lockFile: `${file}.lock` }),
+    );
+  });
+
+  test('removes the reaper lock when acquisition writes fail after creating it', async () => {
+    const file = '/tmp/persistent-queue-fs/queue.json';
+    const lockPath = `${file}.lock`;
+    const reapPath = `${lockPath}.reap`;
+    const staleLock = JSON.stringify({ pid: 99_999_999, token: 'dead', createdAt: 1 });
+    const files = new Map<string, string>([[lockPath, staleLock]]);
+    const reaperWriteError = new Error('reaper write failed');
+    fs.readFile.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/proc/')) {
+        throw Object.assign(new Error('missing proc stat'), { code: 'ENOENT' });
+      }
+      const value = files.get(path);
+      if (value !== undefined) return value;
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+    fs.open.mockImplementation(async (path: string, flags?: string) => {
+      if (flags === 'wx' && files.has(path)) {
+        throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+      }
+      const handle = makeHandle(path);
+      handle.writeFile.mockImplementation(async (data: string) => {
+        files.set(path, data);
+      });
+      if (path === reapPath) {
+        handle.writeFile.mockRejectedValue(reaperWriteError);
+      }
+      return handle;
+    });
+    fs.rm.mockImplementation(async (path: string) => {
+      files.delete(path);
+    });
+    const originalKill = process.kill;
+    vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: string | number) => {
+      if (pid === 99_999_999) {
+        throw Object.assign(new Error('missing process'), { code: 'ESRCH' });
+      }
+      return originalKill(pid, signal as NodeJS.Signals | number | undefined);
+    }) as typeof process.kill);
+    const [{ PersistentQueue }, { log }] = await Promise.all([
+      import('../../src/bot/persistent-queue'),
+      import('../../src/core/logger'),
+    ]);
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
+
+    await expect(new PersistentQueue(file, () => 1_000, { staleLockMs: 1, lockTimeoutMs: 1, lockPollMs: 1 }).enqueue('scope-a', [msg('m1')], { id: 'record-1', now: 1_000 })).rejects.toThrow(
+      `persistent queue lock timeout: ${file}`,
+    );
+
+    const reap = fs.handles.find((entry) => entry.path === reapPath);
+    expect(reap?.writeFile).toHaveBeenCalledTimes(1);
+    expect(reap?.close).toHaveBeenCalledTimes(1);
+    expect(fs.rm).toHaveBeenCalledWith(reapPath, { force: true });
+    expect(files.has(reapPath)).toBe(false);
+    expect(warn).toHaveBeenCalledWith(
+      'queue',
+      'persistent-reaper-lock-acquire-failed',
+      expect.objectContaining({ reapFile: reapPath, err: 'reaper write failed' }),
     );
   });
 

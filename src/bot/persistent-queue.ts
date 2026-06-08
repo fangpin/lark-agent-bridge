@@ -439,37 +439,43 @@ export class PersistentQueue {
     }
   }
 
-  private async createMainLock(): Promise<void> {
-    const handle = await open(this.lockFile, 'wx');
-    const token = randomBytes(16).toString('hex');
-    let lockReady = false;
+  private async createLockFile(lockFile: string, token: string): Promise<void> {
+    const handle = await open(lockFile, 'wx');
+    let opErr: unknown;
     try {
       await handle.writeFile(JSON.stringify({ pid: process.pid, token, createdAt: Date.now(), procStartTime: await readProcStartTime(process.pid) }));
       await handle.sync();
-      await handle.close();
-      lockReady = true;
-      this.lockToken = token;
     } catch (err) {
-      if (!lockReady) {
-        try {
-          await handle.close();
-        } catch (closeErr) {
-          log.warn('queue', 'persistent-lock-close-after-acquire-failure-failed', {
-            lockFile: this.lockFile,
-            err: closeErr instanceof Error ? closeErr.message : String(closeErr),
-          });
-        }
-        try {
-          await rm(this.lockFile, { force: true });
-        } catch (cleanupErr) {
-          log.warn('queue', 'persistent-lock-acquire-cleanup-failed', {
-            lockFile: this.lockFile,
-            err: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
-          });
-        }
-      }
-      throw err;
+      opErr = err;
     }
+
+    try {
+      await handle.close();
+    } catch (closeErr) {
+      log.warn('queue', 'persistent-lock-close-failed', {
+        lockFile,
+        err: closeErr instanceof Error ? closeErr.message : String(closeErr),
+      });
+      opErr ??= closeErr;
+    }
+
+    if (opErr) {
+      try {
+        await rm(lockFile, { force: true });
+      } catch (cleanupErr) {
+        log.warn('queue', 'persistent-lock-acquire-cleanup-failed', {
+          lockFile,
+          err: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+        });
+      }
+      throw opErr;
+    }
+  }
+
+  private async createMainLock(): Promise<void> {
+    const token = randomBytes(16).toString('hex');
+    await this.createLockFile(this.lockFile, token);
+    this.lockToken = token;
   }
 
   private async reapLockExists(): Promise<boolean> {
@@ -516,14 +522,7 @@ export class PersistentQueue {
   private async tryRecoverStaleLockAndAcquire(): Promise<boolean> {
     let reapAcquired = false;
     try {
-      const reapHandle = await open(this.reapFile, 'wx');
-      const reapToken = randomBytes(16).toString('hex');
-      try {
-        await reapHandle.writeFile(JSON.stringify({ pid: process.pid, token: reapToken, createdAt: Date.now(), procStartTime: await readProcStartTime(process.pid) }));
-        await reapHandle.sync();
-      } finally {
-        await reapHandle.close();
-      }
+      await this.createLockFile(this.reapFile, randomBytes(16).toString('hex'));
       reapAcquired = true;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
@@ -669,11 +668,23 @@ export class PersistentQueue {
     let renamed = false;
     try {
       const handle = await open(tmpFile, 'w');
+      let opErr: unknown;
       try {
         await handle.writeFile(`${JSON.stringify(data, null, 2)}\n`);
         await handle.sync();
+      } catch (err) {
+        opErr = err;
+        throw err;
       } finally {
-        await handle.close();
+        try {
+          await handle.close();
+        } catch (closeErr) {
+          log.warn('queue', 'persistent-temp-close-failed', {
+            tmpFile,
+            err: closeErr instanceof Error ? closeErr.message : String(closeErr),
+          });
+          if (!opErr) throw closeErr;
+        }
       }
       await rename(tmpFile, this.file);
       renamed = true;
