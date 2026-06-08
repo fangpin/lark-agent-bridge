@@ -1791,17 +1791,23 @@ describe('interruptScopeNow', () => {
 });
 
 describe('persistent queue restore ordering', () => {
-  test('restores older durable records before live messages can run', async () => {
+  test('connects before restore and gates live messages until older durable records can run', async () => {
     const handlers: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
     const prompts: string[] = [];
+    const order: string[] = [];
     const persistentQueue = tempPersistentQueue();
     await persistentQueue.enqueue('chat-1', [fakeMessage('old-1', 'old prompt')], { id: 'old-1', now: 1000 });
     const fakeChannel = {
       ...createFakeChannel(handlers),
       async connect() {
-        await handlers.message?.(fakeMessage('live-1', 'live prompt'));
+        order.push('connect');
+        void handlers.message?.(fakeMessage('live-1', 'live prompt'));
       },
     } as unknown as LarkChannel;
+    const recoverable = vi.spyOn(persistentQueue, 'recoverable').mockImplementation(async () => {
+      order.push('restore');
+      return PersistentQueue.prototype.recoverable.call(persistentQueue);
+    });
     vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
 
     await startChannel({
@@ -1814,6 +1820,8 @@ describe('persistent queue restore ordering', () => {
     });
 
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
+    expect(recoverable).toHaveBeenCalled();
+    expect(order).toEqual(['connect', 'restore']);
     expect(prompts[0]).toContain('old prompt');
     expect(prompts[1]).toContain('live prompt');
   });
@@ -1881,6 +1889,51 @@ describe('opaque Cursor SDK auto retry', () => {
     expect(pending.queuedSize('chat-1')).toBe(0);
     expect(await persistentQueue.recoverable()).toEqual([]);
     expect(flushed).toEqual([]);
+  });
+
+  test('benign handled commands keep durable and memory pending work queued', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const persistentQueue = tempPersistentQueue();
+    await persistentQueue.enqueue('chat-1', [fakeMessage('msg-durable', 'queued durable work')], {
+      id: 'durable-keep',
+      now: 1000,
+    });
+    const pendingPushes: Array<{ scope: string; messages: NormalizedMessage[]; durableId?: string }> = [];
+    const originalPushBatch = PendingQueue.prototype.pushBatch;
+    const pushBatch = vi.spyOn(PendingQueue.prototype, 'pushBatch').mockImplementation(function (
+      this: PendingQueue,
+      scope,
+      batch,
+      opts = {},
+    ) {
+      pendingPushes.push({ scope, messages: batch, durableId: opts.durableId });
+      return originalPushBatch.call(this, scope, batch, opts);
+    });
+    const cancel = vi.spyOn(PendingQueue.prototype, 'cancel');
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent(() => {}),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    await vi.waitFor(() => expect(pendingPushes).toHaveLength(1));
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('msg-status', '/status'));
+
+    expect(pushBatch).toHaveBeenCalledWith('chat-1', [expect.objectContaining({ messageId: 'msg-durable' })], {
+      durableId: 'durable-keep',
+    });
+    expect(cancel).not.toHaveBeenCalledWith('chat-1');
+    expect(await persistentQueue.recoverable()).toEqual([
+      expect.objectContaining({ id: 'durable-keep', scope: 'chat-1' }),
+    ]);
   });
 
   test('run cleanup completes original durable record when auto retry persistence fails', async () => {

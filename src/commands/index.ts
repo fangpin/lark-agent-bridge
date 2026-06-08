@@ -889,14 +889,31 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
 }
 
 async function handleStop(_args: string, ctx: CommandContext): Promise<void> {
+  let droppedPersistent = 0;
+  try {
+    droppedPersistent = await ctx.persistentQueue?.cancelScope(ctx.scope) ?? 0;
+  } catch (err) {
+    log.fail('command', err, { step: 'stop-persistent-cancel', scope: ctx.scope });
+    await replyCard(
+      ctx,
+      commandStatusCard({
+        title: '终止任务失败',
+        status: 'error',
+        lines: ['持久化队列清理失败，已保留运行中任务和内存队列以避免状态不一致。请检查日志后重试 `/stop`。'],
+      }),
+    );
+    return;
+  }
+
   const ok = ctx.activeRuns.interrupt(ctx.scope);
-  log.info('command', 'stop', { interrupted: ok });
+  const droppedPending = ctx.pending?.cancel(ctx.scope).length ?? 0;
+  log.info('command', 'stop', { interrupted: ok, droppedPending, droppedPersistent });
   await replyCard(
     ctx,
     commandStatusCard({
-      title: ok ? '已请求终止当前任务' : '当前没有运行中的任务',
-      status: ok ? 'warning' : 'info',
-      lines: ok
+      title: ok || droppedPending > 0 || droppedPersistent > 0 ? '已请求终止当前任务' : '当前没有运行中的任务',
+      status: ok || droppedPending > 0 || droppedPersistent > 0 ? 'warning' : 'info',
+      lines: ok || droppedPending > 0 || droppedPersistent > 0
         ? ['运行卡片会更新为“已被中断”。如果卡片没有及时变化，可用 `/status` 或 `/workers` 复查。']
         : ['没有找到当前会话正在执行的 agent run。'],
     }),

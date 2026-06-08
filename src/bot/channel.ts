@@ -224,6 +224,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const channel = createLarkChannel(opts);
   const media = new MediaCache(channel);
   const persistentQueue = deps.persistentQueue ?? new PersistentQueue();
+  let restoreGate: Promise<number> = Promise.resolve(0);
 
   // Pending → run handoff: while a run is active on a chat, block its pending
   // queue so messages keep accumulating without flushing. When the run ends,
@@ -279,8 +280,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
 
   channel.on({
     message: async (msg) => {
-      await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, () =>
-        intakeMessage({
+      await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
+        await restoreGate;
+        await intakeMessage({
           channel,
           agent: startupAgent,
           agentRegistry,
@@ -294,14 +296,15 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           controls,
           runHistory,
           chatModeCache,
-        }),
-      ).catch((err) => log.fail('intake', err));
+        });
+      }).catch((err) => log.fail('intake', err));
     },
     reject: (evt) => {
       log.info('intake', 'reject', { chatId: evt.chatId, reason: evt.reason });
     },
     cardAction: async (evt) => {
       await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
+        await restoreGate;
         await handleCardAction({
           channel,
           evt,
@@ -369,8 +372,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     },
   });
 
-  await restorePersistentQueue(persistentQueue, pending);
   await channel.connect();
+  restoreGate = restorePersistentQueue(persistentQueue, pending);
+  await restoreGate;
 
   const identity = channel.botIdentity;
   log.info('ws', 'connected', {
@@ -543,9 +547,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     controls,
   });
   if (handled) {
-    const droppedPersistent = await persistentQueue.cancelScope(scope);
-    const dropped = pending.cancel(scope);
-    log.info('intake', 'command', { scope, droppedPending: dropped.length, droppedPersistent });
+    log.info('intake', 'command', { scope });
     return;
   }
 
@@ -560,8 +562,8 @@ export async function interruptScopeNow(
   persistentQueue: PersistentQueue,
   scope: string,
 ): Promise<{ interrupted: boolean; droppedPending: number; droppedPersistent: number }> {
-  const interrupted = activeRuns.interrupt(scope);
   const droppedPersistent = await persistentQueue.cancelScope(scope);
+  const interrupted = activeRuns.interrupt(scope);
   const dropped = pending.cancel(scope);
   return { interrupted, droppedPending: dropped.length, droppedPersistent };
 }

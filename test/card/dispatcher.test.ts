@@ -4,12 +4,12 @@ import { PendingQueue } from '../../src/bot/pending-queue';
 import { PersistentQueue } from '../../src/bot/persistent-queue';
 import { handleCardAction, type CardDispatchDeps } from '../../src/card/dispatcher';
 
-function callbackEvent(): CardActionEvent {
+function callbackEvent(value: Record<string, unknown> = { __claude_cb: true, action: 'approve' }): CardActionEvent {
   return {
     chatId: 'chat-1',
     messageId: 'om-card',
     operator: { openId: 'ou_user', name: 'User' },
-    action: { value: { __claude_cb: true, action: 'approve' } },
+    action: { value },
   } as unknown as CardActionEvent;
 }
 
@@ -22,11 +22,16 @@ function deps(overrides: Partial<CardDispatchDeps> = {}): CardDispatchDeps {
       async getChatMode() {
         return 'p2p';
       },
+      async send() {
+        return { messageId: 'om-command-reply' };
+      },
     },
     evt: callbackEvent(),
     sessions: {},
     workspaces: {},
-    activeRuns: {},
+    activeRuns: {
+      interrupt: vi.fn(() => false),
+    },
     agent: {
       id: 'fake',
       displayName: 'Fake Agent',
@@ -53,6 +58,7 @@ function deps(overrides: Partial<CardDispatchDeps> = {}): CardDispatchDeps {
         createdAt: 1000,
         updatedAt: 1000,
       })),
+      cancelScope: vi.fn(async () => 0),
     } as unknown as PersistentQueue,
     runHistory: {},
     chatModeCache: {
@@ -86,6 +92,7 @@ describe('handleCardAction callback forwarding', () => {
         enqueue: vi.fn(async () => {
           throw new Error('durable enqueue failed');
         }),
+        cancelScope: vi.fn(async () => 0),
       } as unknown as PersistentQueue,
     });
     const pushBatch = vi.spyOn(d.pending, 'pushBatch');
@@ -96,3 +103,67 @@ describe('handleCardAction callback forwarding', () => {
     expect(d.pending.queuedSize('chat-1')).toBe(0);
   });
 });
+
+describe('handleCardAction stop command cleanup', () => {
+  test('card stop cancels durable records and queued memory work through the command handler', async () => {
+    const d = deps({
+      evt: callbackEvent({ cmd: 'stop' }),
+      activeRuns: {
+        interrupt: vi.fn(() => true),
+      } as never,
+      persistentQueue: {
+        enqueue: vi.fn(),
+        cancelScope: vi.fn(async () => 1),
+      } as unknown as PersistentQueue,
+    });
+    d.pending.push('chat-1', fakeMessage('msg-pending'));
+    const cancel = vi.spyOn(d.pending, 'cancel');
+
+    await handleCardAction(d);
+
+    expect(d.persistentQueue.cancelScope).toHaveBeenCalledWith('chat-1');
+    expect(d.activeRuns.interrupt).toHaveBeenCalledWith('chat-1');
+    expect(cancel).toHaveBeenCalledWith('chat-1');
+    expect(d.pending.queuedSize('chat-1')).toBe(0);
+  });
+
+  test('card stop leaves memory pending queued when durable cancellation fails', async () => {
+    const d = deps({
+      evt: callbackEvent({ cmd: 'stop' }),
+      activeRuns: {
+        interrupt: vi.fn(() => true),
+      } as never,
+      persistentQueue: {
+        enqueue: vi.fn(),
+        cancelScope: vi.fn(async () => {
+          throw new Error('durable cancel failed');
+        }),
+      } as unknown as PersistentQueue,
+    });
+    d.pending.push('chat-1', fakeMessage('msg-pending'));
+    const cancel = vi.spyOn(d.pending, 'cancel');
+
+    await handleCardAction(d);
+
+    expect(d.persistentQueue.cancelScope).toHaveBeenCalledWith('chat-1');
+    expect(d.activeRuns.interrupt).not.toHaveBeenCalled();
+    expect(cancel).not.toHaveBeenCalledWith('chat-1');
+    expect(d.pending.queuedSize('chat-1')).toBe(1);
+  });
+});
+
+function fakeMessage(messageId: string): NormalizedMessage {
+  return {
+    messageId,
+    chatId: 'chat-1',
+    chatType: 'p2p',
+    senderId: 'ou_user',
+    content: 'queued work',
+    rawContentType: 'text',
+    resources: [],
+    mentions: [],
+    mentionAll: false,
+    mentionedBot: false,
+    createTime: Date.now(),
+  };
+}
