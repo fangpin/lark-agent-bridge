@@ -57,6 +57,9 @@ export class PendingQueue {
     const lastBatch = entry.batches.at(-1);
     if (lastBatch && lastBatch.durableId === opts.durableId) {
       lastBatch.messages.push(...messages);
+      if (this.blocked.has(scope) && entry.timer) {
+        return this.queuedSize(scope);
+      }
     } else {
       if (entry.batches.length > 0 && !this.blocked.has(scope)) {
         this.flush(scope);
@@ -108,13 +111,38 @@ export class PendingQueue {
 
   /** Resume the debounce timer; arms a fresh quiet window if anything queued. */
   unblock(scope: string): void {
+    this.unblockAfter(scope, 0);
+  }
+
+  /** Resume after a delay while keeping the scope blocked so newer messages stay behind queued batches. */
+  unblockAfter(scope: string, delayMs: number): void {
     if (!this.blocked.has(scope)) return;
-    this.blocked.delete(scope);
-    const entry = this.map.get(scope);
-    log.info('queue', 'unblocked', { scope, queued: this.queuedSize(scope) });
-    if (!entry || entry.batches.length === 0) return;
-    if (entry.timer) clearTimeout(entry.timer);
-    entry.timer = this.scheduleFlush(scope);
+    if (delayMs > 0) {
+      const entry = this.map.get(scope);
+      if (entry?.timer) clearTimeout(entry.timer);
+      const timer = setTimeout(() => {
+        const current = this.map.get(scope);
+        if (current?.timer === timer) current.timer = undefined;
+        this.unblockAfter(scope, 0);
+      }, delayMs);
+      if (entry) entry.timer = timer;
+      log.info('queue', 'unblock-delayed', { scope, queued: this.queuedSize(scope), delayMs });
+      return;
+    }
+    if (delayMs <= 0) {
+      const existing = this.map.get(scope);
+      if (existing?.timer) {
+        clearTimeout(existing.timer);
+        existing.timer = undefined;
+      }
+      this.blocked.delete(scope);
+      const entry = this.map.get(scope);
+      log.info('queue', 'unblocked', { scope, queued: this.queuedSize(scope) });
+      if (!entry || entry.batches.length === 0) return;
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.timer = this.scheduleFlush(scope);
+      return;
+    }
   }
 
   private scheduleFlush(scope: string): NodeJS.Timeout | undefined {

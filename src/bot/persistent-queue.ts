@@ -381,9 +381,13 @@ export class PersistentQueue {
   }
 
   async cancelScope(scope: string): Promise<number> {
+    return this.cancelScopeExcept(scope, new Set());
+  }
+
+  async cancelScopeExcept(scope: string, keepIds: ReadonlySet<string>): Promise<number> {
     return this.mutate(async () => {
       const records = await this.readRecordsForMutation();
-      const next = records.filter((record) => record.scope !== scope);
+      const next = records.filter((record) => record.scope !== scope || keepIds.has(record.id));
       const removed = records.length - next.length;
       if (removed === 0) return 0;
       await this.writeRecords(next);

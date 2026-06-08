@@ -54,6 +54,8 @@ function ctx(content: string, history = new RunHistory()): CommandContext {
         updatedAt: 1000,
       })),
       cancelScope: vi.fn(async () => 0),
+      cancelScopeExcept: vi.fn(async () => 0),
+      complete: vi.fn(async () => true),
     },
     runHistory: history,
     controls: {
@@ -214,7 +216,7 @@ describe('/retry command', () => {
     );
   });
 
-  test('cleans active durable work before interrupting and enqueueing retry', async () => {
+  test('enqueues retry before cancelling active durable work while preserving the retry record', async () => {
     const history = new RunHistory();
     const entry = history.create('chat-1', [msg('fix the bug')], {
       cwd: '/repo/project',
@@ -225,10 +227,6 @@ describe('/retry command', () => {
     const commandCtx = ctx(`/retry ${entry.runId}`, history);
     const callOrder: string[] = [];
     commandCtx.persistentQueue = {
-      cancelScope: vi.fn(async () => {
-        callOrder.push('durable.cancel');
-        return 1;
-      }),
       enqueue: vi.fn(async (_scope: string, messages: NormalizedMessage[]) => {
         callOrder.push('durable.enqueue');
         return {
@@ -240,11 +238,12 @@ describe('/retry command', () => {
           updatedAt: 1000,
         };
       }),
+      cancelScopeExcept: vi.fn(async () => {
+        callOrder.push('durable.cancelExcept');
+        return 1;
+      }),
+      complete: vi.fn(async () => true),
     } as unknown as PersistentQueue;
-    commandCtx.cancelQueuedWork = vi.fn(async (scope = commandCtx.scope) => {
-      await commandCtx.persistentQueue!.cancelScope(scope);
-      commandCtx.pending!.cancel(scope);
-    });
     commandCtx.activeRuns.interrupt = vi.fn(() => {
       callOrder.push('active.interrupt');
       return true;
@@ -260,13 +259,14 @@ describe('/retry command', () => {
 
     await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
 
-    expect(commandCtx.persistentQueue.cancelScope).toHaveBeenCalledWith('chat-1');
-    expect(commandCtx.activeRuns.interrupt).toHaveBeenCalledWith('chat-1');
     expect(commandCtx.persistentQueue.enqueue).toHaveBeenCalledWith('chat-1', [expect.objectContaining({ content: 'fix the bug' })]);
-    expect(callOrder).toEqual(['durable.cancel', 'memory.cancel', 'active.interrupt', 'durable.enqueue', 'memory.pushBatch']);
+    expect(commandCtx.persistentQueue.cancelScopeExcept).toHaveBeenCalledWith('chat-1', new Set(['durable-retry-1']));
+    expect(commandCtx.activeRuns.interrupt).toHaveBeenCalledWith('chat-1');
+    expect(commandCtx.persistentQueue.complete).not.toHaveBeenCalled();
+    expect(callOrder).toEqual(['durable.enqueue', 'durable.cancelExcept', 'active.interrupt', 'memory.cancel', 'memory.pushBatch']);
   });
 
-  test('does not interrupt or enqueue retry when active durable cleanup fails', async () => {
+  test('removes failed retry record and preserves active work when durable cleanup fails after enqueue', async () => {
     const history = new RunHistory();
     const entry = history.create('chat-1', [msg('fix the bug')], {
       cwd: '/repo/project',
@@ -276,23 +276,27 @@ describe('/retry command', () => {
     history.finish(entry.runId, 'error');
     const commandCtx = ctx(`/retry ${entry.runId}`, history);
     commandCtx.persistentQueue = {
-      cancelScope: vi.fn(async () => {
+      enqueue: vi.fn(async (_scope: string, messages: NormalizedMessage[]) => ({
+        id: 'durable-retry-1',
+        scope: 'chat-1',
+        messages,
+        state: 'queued' as const,
+        createdAt: 1000,
+        updatedAt: 1000,
+      })),
+      cancelScopeExcept: vi.fn(async () => {
         throw new Error('durable cancel failed');
       }),
-      enqueue: vi.fn(async () => {
-        throw new Error('must not enqueue');
-      }),
+      complete: vi.fn(async () => true),
     } as unknown as PersistentQueue;
-    commandCtx.cancelQueuedWork = vi.fn(async (scope = commandCtx.scope) => {
-      await commandCtx.persistentQueue!.cancelScope(scope);
-      commandCtx.pending!.cancel(scope);
-    });
 
     await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
 
-    expect(commandCtx.persistentQueue.cancelScope).toHaveBeenCalledWith('chat-1');
+    expect(commandCtx.persistentQueue.enqueue).toHaveBeenCalledWith('chat-1', [expect.objectContaining({ content: 'fix the bug' })]);
+    expect(commandCtx.persistentQueue.cancelScopeExcept).toHaveBeenCalledWith('chat-1', new Set(['durable-retry-1']));
+    expect(commandCtx.persistentQueue.complete).toHaveBeenCalledWith('durable-retry-1');
     expect(commandCtx.activeRuns.interrupt).not.toHaveBeenCalled();
-    expect(commandCtx.persistentQueue.enqueue).not.toHaveBeenCalled();
+    expect(commandCtx.pending?.cancel).not.toHaveBeenCalled();
     expect(commandCtx.pending?.pushBatch).not.toHaveBeenCalled();
     expect(commandCtx.channel.send).toHaveBeenCalledWith(
       'chat-1',
@@ -326,7 +330,7 @@ describe('/retry command', () => {
     );
   });
 
-  test('replies with failure and does not push retry into memory when durable enqueue fails', async () => {
+  test('preserves active durable work and does not interrupt when durable retry enqueue fails', async () => {
     const history = new RunHistory();
     const entry = history.create('chat-1', [msg('fix the bug')], {
       cwd: '/repo/project',
@@ -336,19 +340,20 @@ describe('/retry command', () => {
     history.finish(entry.runId, 'error');
     const commandCtx = ctx(`/retry ${entry.runId}`, history);
     commandCtx.persistentQueue = {
-      cancelScope: vi.fn(async () => 0),
       enqueue: vi.fn(async () => {
         throw new Error('durable retry enqueue failed');
       }),
+      cancelScopeExcept: vi.fn(async () => 0),
+      complete: vi.fn(async () => true),
     } as unknown as PersistentQueue;
-    commandCtx.cancelQueuedWork = vi.fn(async (scope = commandCtx.scope) => {
-      await commandCtx.persistentQueue!.cancelScope(scope);
-      commandCtx.pending!.cancel(scope);
-    });
 
     await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
 
-    expect(commandCtx.activeRuns.interrupt).toHaveBeenCalledWith('chat-1');
+    expect(commandCtx.persistentQueue.enqueue).toHaveBeenCalledWith('chat-1', [expect.objectContaining({ content: 'fix the bug' })]);
+    expect(commandCtx.persistentQueue.cancelScopeExcept).not.toHaveBeenCalled();
+    expect(commandCtx.persistentQueue.complete).not.toHaveBeenCalled();
+    expect(commandCtx.activeRuns.interrupt).not.toHaveBeenCalled();
+    expect(commandCtx.pending?.cancel).not.toHaveBeenCalled();
     expect(commandCtx.pending?.push).not.toHaveBeenCalled();
     expect(commandCtx.pending?.pushBatch).not.toHaveBeenCalled();
     expect(commandCtx.channel.send).toHaveBeenCalledWith(

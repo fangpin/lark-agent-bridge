@@ -1115,8 +1115,6 @@ async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
   const retryBatch = entry.batch.map((msg) => ({ ...msg }));
-  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
-  ctx.activeRuns.interrupt(ctx.scope);
   let record;
   try {
     record = await ctx.persistentQueue.enqueue(ctx.scope, retryBatch);
@@ -1125,6 +1123,18 @@ async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, `重试排队失败：${err instanceof Error ? err.message : String(err)}`);
     return;
   }
+  try {
+    await ctx.persistentQueue.cancelScopeExcept(ctx.scope, new Set([record.id]));
+  } catch (err) {
+    log.fail('command', err, { cmd: '/retry', step: 'persistent-cancel-active', scope: ctx.scope, runId, durableId: record.id });
+    await ctx.persistentQueue.complete(record.id).catch((completeErr) => {
+      log.fail('command', completeErr, { cmd: '/retry', step: 'persistent-remove-failed-retry', scope: ctx.scope, runId, durableId: record.id });
+    });
+    await reply(ctx, `清理已排队任务失败：${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  ctx.activeRuns.interrupt(ctx.scope);
+  ctx.pending.cancel(ctx.scope);
   const size = ctx.pending.pushBatch(ctx.scope, retryBatch, { durableId: record.id });
   await reply(ctx, `已重新排队上次任务（${entry.batch.length} 条消息，当前队列 ${size}）。`);
 }

@@ -418,6 +418,22 @@ describe('PersistentQueue', () => {
     expect(reloaded.map((record) => record.id)).toEqual(['b1']);
   });
 
+  test('cancels scope records except caller-provided ids', async () => {
+    const file = queueFile();
+    const queue = new PersistentQueue(file);
+    await queue.enqueue('scope-a', [msg('old-1')], { id: 'old-1', now: 1_000 });
+    await queue.enqueue('scope-a', [msg('retry')], { id: 'retry-keep', now: 2_000 });
+    await queue.enqueue('scope-b', [msg('other')], { id: 'other-scope', now: 3_000 });
+
+    await expect(queue.cancelScopeExcept('scope-a', new Set(['retry-keep']))).resolves.toBe(1);
+
+    const reloaded = await new PersistentQueue(file).recoverable();
+    expect(reloaded.map((record) => `${record.id}:${record.scope}`)).toEqual([
+      'retry-keep:scope-a',
+      'other-scope:scope-b',
+    ]);
+  });
+
   test('skips malformed records while keeping valid records', async () => {
     const file = queueFile();
     await writeFile(

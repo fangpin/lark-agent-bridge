@@ -1405,6 +1405,54 @@ describe('persistent queue recovery', () => {
     await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
   });
 
+  test('disconnect stops active runs without deleting running durable records', async () => {
+    const persistentQueue = tempPersistentQueue();
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+    let releaseRun!: () => void;
+    const runReleased = new Promise<void>((resolve) => {
+      releaseRun = resolve;
+    });
+    const stop = vi.fn(async () => {
+      releaseRun();
+    });
+    const bridge = await startChannel({
+      cfg: textReplyConfig(),
+      agent: {
+        ...fakeAgent(() => {}),
+        run(): AgentRun {
+          return {
+            events: (async function* (): AsyncGenerator<AgentEvent> {
+              yield { type: 'text', delta: 'working' };
+              await runReleased;
+            })(),
+            stop,
+            async waitForExit() {
+              return true;
+            },
+          };
+        },
+      },
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('durable-disconnect', 'preserve across disconnect'));
+    await vi.waitFor(async () => expect((await persistentQueue.recoverable())[0]).toMatchObject({ state: 'running' }));
+
+    await bridge.disconnect();
+
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(await persistentQueue.recoverable()).toEqual([
+      expect.objectContaining({ scope: 'chat-1', state: 'running', messages: [expect.objectContaining({ messageId: 'durable-disconnect' })] }),
+    ]);
+  });
+
   test('/stop removes persistent records for the current scope', async () => {
     const persistentQueue = tempPersistentQueue();
     const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
@@ -2130,14 +2178,17 @@ describe('flush durable setup failures', () => {
 
     expect(prompts).toEqual([]);
     expect(markRunning).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(persistentQueue.has((markRunning.mock.calls[0] ?? [''])[0] as string)).resolves.toBe(true));
 
     await vi.advanceTimersByTimeAsync(999);
     expect(markRunning).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(1);
+    await Promise.resolve();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(markRunning).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(prompts).toHaveLength(1));
     expect(prompts[0]).toContain('retry after setup failure');
-    expect(markRunning).toHaveBeenCalledTimes(2);
     await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
   });
 
@@ -2170,39 +2221,28 @@ describe('flush durable setup failures', () => {
     ]);
   });
 
-  test('stops registered agent when durable setup is cancelled between pre-run check and registration', async () => {
+  test('does not call agent.run when /stop lands after the final durable existence check', async () => {
     const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
     const persistentQueue = tempPersistentQueue();
-    const has = vi.spyOn(persistentQueue, 'has');
-    let hasCalls = 0;
-    has.mockImplementation(async (id: string) => {
-      hasCalls++;
-      return hasCalls === 1 ? true : false;
+    vi.spyOn(persistentQueue, 'enqueue').mockImplementation(async (scope, batch) =>
+      PersistentQueue.prototype.enqueue.call(persistentQueue, scope, batch, { id: 'race-durable', now: 1000 }),
+    );
+    let stopSent = false;
+    const has = vi.spyOn(persistentQueue, 'has').mockImplementation(async (id: string) => {
+      const exists = await PersistentQueue.prototype.has.call(persistentQueue, id);
+      if (id === 'race-durable' && exists && !stopSent) {
+        stopSent = true;
+        await messages.message?.(fakeMessage('stop-race', '/stop'));
+      }
+      return exists;
     });
-    const stop = vi.fn(async () => undefined);
-    const prompts: string[] = [];
-    const agent: AgentAdapter = {
-      ...fakeAgent((opts) => prompts.push(opts.prompt)),
-      run(opts: AgentRunOptions): AgentRun {
-        prompts.push(opts.prompt);
-        return {
-          events: (async function* (): AsyncGenerator<AgentEvent> {
-            yield { type: 'text', delta: 'should not process' };
-            yield { type: 'done' };
-          })(),
-          stop,
-          async waitForExit() {
-            return true;
-          },
-        };
-      },
-    };
+    const runSpy = vi.fn();
     const fakeChannel = createFakeChannel(messages);
     vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
 
     await startChannel({
       cfg: textReplyConfig(),
-      agent,
+      agent: fakeAgent(runSpy),
       sessions: fakeSessions(),
       workspaces: fakeWorkspaces('/tmp/project'),
       controls: fakeControls(textReplyConfig()),
@@ -2211,12 +2251,13 @@ describe('flush durable setup failures', () => {
 
     const onMessage = messages.message;
     if (!onMessage) throw new Error('message handler was not registered');
-    await onMessage(fakeMessage('cancel-between-has-register', 'cancel after pre-run check'));
+    await onMessage(fakeMessage('race-durable', 'cancel between has and run'));
 
-    await vi.waitFor(() => expect(stop).toHaveBeenCalledTimes(1));
-    expect(has).toHaveBeenCalledTimes(2);
-    expect(prompts).toHaveLength(1);
-    await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
+    await vi.waitFor(() => expect(has).toHaveBeenCalledWith('race-durable'));
+    await vi.waitFor(() => expect(runSpy).not.toHaveBeenCalled());
+    expect(stopSent).toBe(true);
+    expect(runSpy).not.toHaveBeenCalled();
+    expect(await persistentQueue.recoverable()).toEqual([]);
   });
 
   test('does not start agent when durable setup is cancelled before run', async () => {
@@ -2256,6 +2297,39 @@ describe('flush durable setup failures', () => {
     await vi.waitFor(() => expect(runSpy).not.toHaveBeenCalled());
     expect(runSpy).not.toHaveBeenCalled();
     expect(await persistentQueue.recoverable()).toEqual([]);
+  });
+
+  test('keeps older setup-failure retry ahead of newer messages for the same scope', async () => {
+    vi.useFakeTimers();
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const prompts: string[] = [];
+    const persistentQueue = tempPersistentQueue();
+    vi.spyOn(persistentQueue, 'markRunning').mockRejectedValueOnce(new Error('mark running failed'));
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg: textReplyConfig(),
+      agent: fakeAgent((opts) => prompts.push(opts.prompt)),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('older-setup-fails', 'older prompt'));
+    await Promise.resolve();
+    await onMessage(fakeMessage('newer-during-backoff', 'newer prompt'));
+
+    expect(prompts).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1001);
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+    expect(prompts[0]).toContain('older prompt');
+    expect(prompts[1]).toContain('newer prompt');
+    vi.useRealTimers();
   });
 
   test('requeues durable batch after synchronous agent.run failure before active registration', async () => {

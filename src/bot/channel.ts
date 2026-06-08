@@ -280,29 +280,26 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       } catch (err) {
         log.fail('flush', err);
         if (durableId && !startedRun) {
-          setTimeout(() => {
-            void withTrace({ chatId: firstMsg.chatId }, async () => {
-              const exists = await persistentQueue.has(durableId).catch((retryErr) => {
-                log.fail('queue', retryErr, { step: 'persistent-setup-retry-check', scope, durableId });
-                return false;
-              });
-              if (!exists) {
-                log.warn('queue', 'persistent-setup-retry-skipped', { scope, durableId });
-                return;
-              }
-              pending.pushBatch(scope, batch, { durableId });
-              log.warn('queue', 'persistent-requeued-after-setup-failure', {
-                scope,
-                durableId,
-                batchSize: batch.length,
-                delayMs: SETUP_RETRY_DELAY_MS,
-              });
+          const exists = await persistentQueue.has(durableId).catch((retryErr) => {
+            log.fail('queue', retryErr, { step: 'persistent-setup-retry-check', scope, durableId });
+            return false;
+          });
+          if (exists) {
+            pending.unblockAfter(scope, SETUP_RETRY_DELAY_MS);
+            pending.pushBatch(scope, batch, { durableId });
+            log.warn('queue', 'persistent-requeued-after-setup-failure', {
+              scope,
+              durableId,
+              batchSize: batch.length,
+              delayMs: SETUP_RETRY_DELAY_MS,
             });
-          }, SETUP_RETRY_DELAY_MS);
+          } else {
+            log.warn('queue', 'persistent-setup-retry-skipped', { scope, durableId });
+          }
         }
       } finally {
         release();
-        pending.unblock(scope);
+        if (startedRun) pending.unblock(scope);
         log.info('flush', 'end');
       }
     });
@@ -444,7 +441,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       commentQueue.cancelAll();
       pending.cancelAll();
       await channel.disconnect();
-      await activeRuns.stopAll();
+      await activeRuns.stopAll('lifecycle');
       await Promise.allSettled([sessions.flush(), workspaces.flush()]);
     },
   };
@@ -803,9 +800,17 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     cwd,
   });
 
+  const handle = activeRuns.registerPreRun(scope);
   if (durableId && !(await persistentQueue.has(durableId))) {
     log.warn('queue', 'persistent-cancelled-before-agent-run', { scope, durableId });
     runHistory.finish(historyEntry.runId, 'interrupted', '任务已取消');
+    activeRuns.unregister(scope, handle);
+    return;
+  }
+  if (handle.interrupted) {
+    log.warn('queue', 'persistent-interrupted-before-agent-run', { scope, durableId });
+    runHistory.finish(historyEntry.runId, 'interrupted', '任务已取消');
+    activeRuns.unregister(scope, handle);
     return;
   }
 
@@ -817,7 +822,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     poolKey: scope,
     stopGraceMs: agentStopGraceMs,
   });
-  const handle = activeRuns.register(scope, run);
+  activeRuns.attachRun(scope, handle, run);
   onRunRegistered?.();
   if (durableId && !(await persistentQueue.has(durableId))) {
     log.warn('queue', 'persistent-cancelled-after-agent-register', { scope, durableId });
@@ -829,7 +834,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       log.fail('queue', err, { step: 'complete-after-persistent-cancel', scope, durableId });
     });
     runHistory.finish(historyEntry.runId, 'interrupted', '任务已取消');
-    activeRuns.unregister(scope, run);
+    activeRuns.unregister(scope, handle);
     return;
   }
   log.info('run', 'timeline', {
@@ -1077,8 +1082,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       terminal: finalState.terminal,
       errorMsg: finalState.errorMsg,
     });
-    let durableCompleted = !durableId || finalState.terminal === 'running';
-    if (durableId && finalState.terminal !== 'running') {
+    const preserveDurable = handle.interruptReason === 'lifecycle';
+    let durableCompleted = !durableId || finalState.terminal === 'running' || preserveDurable;
+    if (durableId && finalState.terminal !== 'running' && !preserveDurable) {
       await persistentQueue.complete(durableId).then(
         () => {
           durableCompleted = true;
@@ -1101,7 +1107,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         log.fail('run', err, { step: 'auto-retry-opaque-sdk-error', scope });
       });
     }
-    activeRuns.unregister(scope, run);
+    activeRuns.unregister(scope, handle);
     if (reactionId) {
       await removeReaction(channel, lastMsg.messageId, reactionId);
     }
