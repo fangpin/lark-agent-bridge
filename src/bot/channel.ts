@@ -481,13 +481,30 @@ export async function restorePersistentQueue(persistentQueue: PersistentQueue, p
   let restored = 0;
   for (const record of records) {
     if (record.messages.length === 0) continue;
-    const size = pending.pushBatch(record.scope, record.messages, { durableId: record.id });
+    let restoredRecord = record;
+    if (record.state === 'running') {
+      const queuedRecord = await persistentQueue.markQueued(record.id);
+      if (!queuedRecord) {
+        log.warn('queue', 'persistent-restore-skip-missing-running', {
+          scope: record.scope,
+          durableId: record.id,
+        });
+        continue;
+      }
+      restoredRecord = queuedRecord;
+      log.info('queue', 'persistent-restore-mark-queued', {
+        scope: restoredRecord.scope,
+        durableId: restoredRecord.id,
+      });
+    }
+    const size = pending.pushBatch(restoredRecord.scope, restoredRecord.messages, { durableId: restoredRecord.id });
     restored++;
     log.info('queue', 'persistent-restored', {
-      scope: record.scope,
-      durableId: record.id,
-      state: record.state,
-      batchSize: record.messages.length,
+      scope: restoredRecord.scope,
+      durableId: restoredRecord.id,
+      state: restoredRecord.state,
+      previousState: record.state,
+      batchSize: restoredRecord.messages.length,
       queueSize: size,
     });
   }
@@ -1113,10 +1130,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       });
     } else if (finalState.terminal === 'running') {
       handle.interrupted = true;
-      finalState = reduce(finalState, {
-        type: 'error',
-        message: `卡片更新失败，已降级为普通消息：${message}`,
-      });
+      finalState = handle.interruptReason === 'lifecycle'
+        ? markInterrupted(finalState)
+        : reduce(finalState, {
+          type: 'error',
+          message: `卡片更新失败，已降级为普通消息：${message}`,
+        });
       await run.stop().catch((stopErr) => {
         log.fail('stream', stopErr, { step: 'stop-after-update-failure' });
       });
@@ -1144,7 +1163,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       terminal: finalState.terminal,
       errorMsg: finalState.errorMsg,
     });
-    const preserveDurable = handle.interruptReason === 'lifecycle' && finalState.terminal !== 'done';
+    const preserveDurable = handle.interruptReason === 'lifecycle'
+      && (finalState.terminal === 'interrupted' || finalState.terminal === 'running');
     let durableCompleted = !durableId || finalState.terminal === 'running' || preserveDurable;
     if (durableId && finalState.terminal !== 'running' && !preserveDurable) {
       await persistentQueue.complete(durableId).then(

@@ -23,7 +23,7 @@ import {
 import { PendingQueue } from '../../src/bot/pending-queue';
 import { PersistentQueue } from '../../src/bot/persistent-queue';
 import { RunHistory } from '../../src/bot/run-history';
-import { createInitialState } from '../../src/card/run-state';
+import { createInitialState, markIdleTimeout } from '../../src/card/run-state';
 import { renderText } from '../../src/card/text-renderer';
 import type { AppConfig } from '../../src/config/schema';
 import type { Controls } from '../../src/commands';
@@ -1643,6 +1643,25 @@ describe('persistent queue recovery', () => {
     ]);
   });
 
+  test('restore marks running durable records queued so queued-only cleanup can cancel them', async () => {
+    const persistentQueue = tempPersistentQueue();
+    await persistentQueue.enqueue('chat-1', [fakeMessage('restored-running', 'restored prompt')], {
+      id: 'restored-running',
+      now: 1000,
+    });
+    await persistentQueue.markRunning('restored-running', { now: 2000 });
+    const pending = new PendingQueue(1000, () => {});
+    pending.block('chat-1');
+
+    await restorePersistentQueue(persistentQueue, pending);
+    const droppedPersistent = await persistentQueue.cancelQueuedScope('chat-1');
+    const droppedPending = pending.cancel('chat-1');
+
+    expect(droppedPersistent).toBe(1);
+    expect(droppedPending.map((message) => message.messageId)).toEqual(['restored-running']);
+    expect(await persistentQueue.recoverable()).toEqual([]);
+  });
+
   test('/new cancels durable and memory queued work for the reset scope', async () => {
     const persistentQueue = tempPersistentQueue();
     const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
@@ -2978,6 +2997,87 @@ describe('opaque Cursor SDK auto retry', () => {
     expect(await persistentQueue.recoverable()).toEqual([
       expect.objectContaining({ id: 'durable-media-setup', scope: 'chat-1', state: 'running' }),
     ]);
+  });
+
+  test('lifecycle disconnect after terminal error completes durable record', async () => {
+    let terminalReached!: () => void;
+    const terminalReachedPromise = new Promise<void>((resolve) => {
+      terminalReached = resolve;
+    });
+    let releaseExit!: () => void;
+    const exitReleased = new Promise<void>((resolve) => {
+      releaseExit = resolve;
+    });
+    const persistentQueue = tempPersistentQueue();
+    await persistentQueue.enqueue('chat-1', [fakeMessage('durable-terminal-error', 'terminal prompt')], {
+      id: 'durable-terminal-error',
+      now: 1000,
+    });
+    const complete = vi.spyOn(persistentQueue, 'complete');
+    const stop = vi.fn(async () => {});
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const fakeChannel = createFakeChannel(messages);
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    const bridge = await startChannel({
+      cfg: textReplyConfig(),
+      agent: {
+        ...fakeAgent(() => {}),
+        run(): AgentRun {
+          return {
+            events: (async function* (): AsyncGenerator<AgentEvent> {
+              yield { type: 'error', message: 'agent failed before lifecycle disconnect' };
+            })(),
+            stop,
+            async waitForExit() {
+              terminalReached();
+              await exitReleased;
+              return true;
+            },
+          };
+        },
+      },
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(textReplyConfig()),
+      persistentQueue,
+    });
+    await terminalReachedPromise;
+    await bridge.disconnect();
+    releaseExit();
+
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledWith('durable-terminal-error'));
+    await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
+  });
+
+  test('lifecycle disconnect after terminal idle_timeout completes durable record', async () => {
+    const stop = vi.fn(async () => {});
+    const run: AgentRun = {
+      events: (async function* (): AsyncGenerator<AgentEvent> {})(),
+      stop,
+      async waitForExit() {
+        return true;
+      },
+    };
+    const handle: RunHandle = { run, interrupted: true, interruptReason: 'lifecycle' };
+    const flushed: string[] = [];
+
+    const finalState = await processAgentStream(
+      handle,
+      {} as SessionStore,
+      'chat-1',
+      '/tmp/project',
+      'agent:test',
+      undefined,
+      async (state) => {
+        flushed.push(state.terminal);
+      },
+      5000,
+      markIdleTimeout(createInitialState('pre-terminal-idle-timeout'), 1),
+    );
+
+    expect(finalState.terminal).toBe('idle_timeout');
+    expect(flushed.at(-1)).toBe('idle_timeout');
   });
 
   test('lifecycle disconnect after terminal done completes durable record', async () => {
