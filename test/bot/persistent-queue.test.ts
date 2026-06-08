@@ -50,6 +50,19 @@ describe('PersistentQueue', () => {
     expect(reloaded[0]!.messages.map((message) => message.messageId)).toEqual(['m1']);
   });
 
+  test('orders records with matching creation times by id', async () => {
+    const file = queueFile();
+    const queue = new PersistentQueue(file);
+
+    await queue.enqueue('scope-a', [msg('m3')], { id: 'record-c', now: 1_000 });
+    await queue.enqueue('scope-a', [msg('m1')], { id: 'record-a', now: 1_000 });
+    await queue.enqueue('scope-a', [msg('m2')], { id: 'record-b', now: 1_000 });
+
+    const reloaded = await new PersistentQueue(file).recoverable();
+
+    expect(reloaded.map((record) => record.id)).toEqual(['record-a', 'record-b', 'record-c']);
+  });
+
   test('marks a record running and recovers it after reload', async () => {
     const file = queueFile();
     const queue = new PersistentQueue(file);

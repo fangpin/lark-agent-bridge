@@ -83,6 +83,62 @@ describe('PersistentQueue filesystem writes', () => {
     vi.restoreAllMocks();
   });
 
+  test('returns an empty recoverable list and logs when reading an existing file fails', async () => {
+    const file = '/tmp/persistent-queue-fs/queue.json';
+    const readError = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    fs.readFile.mockRejectedValue(readError);
+    const [{ PersistentQueue }, { log }] = await Promise.all([
+      import('../../src/bot/persistent-queue'),
+      import('../../src/core/logger'),
+    ]);
+    const fail = vi.spyOn(log, 'fail').mockImplementation(() => undefined);
+
+    await expect(new PersistentQueue(file).recoverable()).resolves.toEqual([]);
+
+    expect(fail).toHaveBeenCalledWith(
+      'queue',
+      readError,
+      expect.objectContaining({ step: 'persistent-read' }),
+    );
+    expect(fs.mkdir).not.toHaveBeenCalled();
+    expect(fs.open).not.toHaveBeenCalled();
+    expect(fs.rename).not.toHaveBeenCalled();
+    expect(fs.rm).not.toHaveBeenCalled();
+  });
+
+  test('rejects mutation read failures without writing or replacing the queue file', async () => {
+    const file = '/tmp/persistent-queue-fs/queue.json';
+    fs.readFile.mockRejectedValue(Object.assign(new Error('permission denied'), { code: 'EACCES' }));
+    const { PersistentQueue } = await import('../../src/bot/persistent-queue');
+
+    await expect(new PersistentQueue(file).enqueue('scope-a', [msg('m1')], { id: 'record-1', now: 1_000 })).rejects.toThrow(
+      `persistent queue read failed: ${file}`,
+    );
+
+    expect(fs.mkdir).not.toHaveBeenCalled();
+    expect(fs.open).not.toHaveBeenCalled();
+    expect(fs.rename).not.toHaveBeenCalled();
+    expect(fs.rm).not.toHaveBeenCalled();
+  });
+
+  test('uses a unique temporary path for each write', async () => {
+    const file = '/tmp/persistent-queue-fs/queue.json';
+    const { PersistentQueue } = await import('../../src/bot/persistent-queue');
+    const queue = new PersistentQueue(file, () => 1_000);
+
+    await queue.enqueue('scope-a', [msg('m1')], { id: 'record-1', now: 1_000 });
+    await queue.enqueue('scope-a', [msg('m2')], { id: 'record-2', now: 1_000 });
+    await queue.enqueue('scope-a', [msg('m3')], { id: 'record-3', now: 1_000 });
+
+    const tmpPaths = fs.open.mock.calls
+      .map(([path]) => path as string)
+      .filter((path) => path.includes('.tmp-'));
+    expect(tmpPaths).toHaveLength(3);
+    expect(new Set(tmpPaths).size).toBe(3);
+    expect(fs.rename.mock.calls.map(([tmpPath]) => tmpPath)).toEqual(tmpPaths);
+    expect(fs.rm).not.toHaveBeenCalled();
+  });
+
   test('syncs the file before rename and syncs the directory after rename', async () => {
     const file = '/tmp/persistent-queue-fs/queue.json';
     const dir = dirname(file);
