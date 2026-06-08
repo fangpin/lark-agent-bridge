@@ -1,8 +1,8 @@
 import { mkdtempSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { PersistentQueue } from '../../src/bot/persistent-queue';
 
@@ -28,6 +28,10 @@ function msg(id: string, content = id): NormalizedMessage {
 }
 
 describe('PersistentQueue', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   test('creates and reloads queued records in creation order', async () => {
     const file = queueFile();
     const queue = new PersistentQueue(file);
@@ -97,17 +101,55 @@ describe('PersistentQueue', () => {
     expect((await new PersistentQueue(file).recoverable()).map((record) => record.id).sort()).toEqual(['pq-1', 'pq-2']);
   });
 
-  test('complete removes only one record when duplicate ids exist', async () => {
+  test('rejects duplicate caller-provided ids', async () => {
     const file = queueFile();
     const queue = new PersistentQueue(file, () => 1_000);
     await queue.enqueue('scope-a', [msg('m1')], { id: 'same', now: 1_000 });
-    await queue.enqueue('scope-b', [msg('m2', 'scope-b message')], { id: 'same', now: 2_000 });
+
+    await expect(queue.enqueue('scope-b', [msg('m2')], { id: 'same', now: 2_000 })).rejects.toThrow(
+      'persistent queue id already exists: same',
+    );
+
+    expect(await queue.recoverable()).toEqual([
+      expect.objectContaining({ id: 'same', scope: 'scope-a' }),
+    ]);
+  });
+
+  test('complete removes only one record when duplicate ids exist in an old file', async () => {
+    const file = queueFile();
+    const queue = new PersistentQueue(file, () => 1_000);
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        records: [
+          { id: 'same', scope: 'scope-a', messages: [msg('m1')], state: 'queued', createdAt: 1_000, updatedAt: 1_000 },
+          { id: 'same', scope: 'scope-b', messages: [msg('m2')], state: 'queued', createdAt: 2_000, updatedAt: 2_000 },
+        ],
+      }),
+    );
 
     await expect(queue.complete('same')).resolves.toBe(true);
 
     expect(await queue.recoverable()).toEqual([
       expect.objectContaining({ id: 'same', scope: 'scope-b' }),
     ]);
+  });
+
+  test('retries generated ids when a collision occurs', async () => {
+    const file = queueFile();
+    const queue = new PersistentQueue(file, () => 1_000);
+    vi.spyOn(Math, 'random')
+      .mockReturnValueOnce(0.5)
+      .mockReturnValueOnce(0.5)
+      .mockReturnValueOnce(0.75);
+
+    const first = await queue.enqueue('scope-a', [msg('m1')]);
+    const second = await queue.enqueue('scope-a', [msg('m2')]);
+
+    expect(first.id).toBe('queue-rs-i');
+    expect(second.id).not.toBe(first.id);
+    expect((await queue.recoverable()).map((record) => record.id)).toEqual([first.id, second.id]);
   });
 
   test('cancels all records for a scope only', async () => {
@@ -145,6 +187,16 @@ describe('PersistentQueue', () => {
     expect(records[0]!.messages[0]!.messageId).toBe('m1');
   });
 
+  test('does not overwrite an unreadable or corrupt queue file during mutation', async () => {
+    const file = queueFile();
+    await writeFile(file, '{not valid json');
+    const queue = new PersistentQueue(file);
+
+    await expect(queue.enqueue('chat-1', [msg('m1')])).rejects.toThrow(/persistent queue/i);
+
+    expect(await readFile(file, 'utf8')).toBe('{not valid json');
+  });
+
   test('skips records with malformed messages without dropping valid records', async () => {
     const file = queueFile();
     await writeFile(
@@ -154,6 +206,35 @@ describe('PersistentQueue', () => {
         records: [
           { id: 'valid', scope: 'scope-a', messages: [msg('m1')], state: 'queued', createdAt: 1_000, updatedAt: 1_000 },
           { id: 'bad-message', scope: 'scope-a', messages: [null], state: 'queued', createdAt: 2_000, updatedAt: 2_000 },
+        ],
+      }),
+    );
+
+    expect(await new PersistentQueue(file).recoverable()).toEqual([
+      expect.objectContaining({ id: 'valid' }),
+    ]);
+  });
+
+  test('skips records with malformed resources or mentions', async () => {
+    const file = queueFile();
+    const withResources = (id: string, resources: unknown[]): unknown => ({
+      ...msg(id),
+      resources,
+    });
+    const withMentions = (id: string, mentions: unknown[]): unknown => ({
+      ...msg(id),
+      mentions,
+    });
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        records: [
+          { id: 'valid', scope: 'scope-a', messages: [msg('m1')], state: 'queued', createdAt: 1_000, updatedAt: 1_000 },
+          { id: 'null-resource', scope: 'scope-a', messages: [withResources('m2', [null])], state: 'queued', createdAt: 2_000, updatedAt: 2_000 },
+          { id: 'missing-file-key', scope: 'scope-a', messages: [withResources('m3', [{ type: 'image' }])], state: 'queued', createdAt: 3_000, updatedAt: 3_000 },
+          { id: 'null-mention', scope: 'scope-a', messages: [withMentions('m4', [null])], state: 'queued', createdAt: 4_000, updatedAt: 4_000 },
+          { id: 'missing-mention-key', scope: 'scope-a', messages: [withMentions('m5', [{}])], state: 'queued', createdAt: 5_000, updatedAt: 5_000 },
         ],
       }),
     );

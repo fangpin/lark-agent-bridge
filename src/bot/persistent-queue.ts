@@ -60,6 +60,44 @@ function isState(value: unknown): value is PersistentQueueState {
   return value === 'queued' || value === 'running';
 }
 
+function isStringField(value: unknown): boolean {
+  return value === undefined || typeof value === 'string';
+}
+
+function isNumberField(value: unknown): boolean {
+  return value === undefined || (typeof value === 'number' && Number.isFinite(value));
+}
+
+function isBooleanField(value: unknown): boolean {
+  return value === undefined || typeof value === 'boolean';
+}
+
+function isResource(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  return (
+    (value.type === 'image' ||
+      value.type === 'file' ||
+      value.type === 'audio' ||
+      value.type === 'video' ||
+      value.type === 'sticker') &&
+    typeof value.fileKey === 'string' &&
+    isStringField(value.fileName) &&
+    isNumberField(value.durationMs) &&
+    isStringField(value.coverImageKey)
+  );
+}
+
+function isMention(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  return (
+    typeof value.key === 'string' &&
+    isStringField(value.openId) &&
+    isStringField(value.userId) &&
+    isStringField(value.name) &&
+    isBooleanField(value.isBot)
+  );
+}
+
 function isMessage(value: unknown): value is NormalizedMessage {
   if (!isObject(value)) return false;
   return (
@@ -70,7 +108,9 @@ function isMessage(value: unknown): value is NormalizedMessage {
     typeof value.content === 'string' &&
     typeof value.rawContentType === 'string' &&
     Array.isArray(value.resources) &&
+    value.resources.every(isResource) &&
     Array.isArray(value.mentions) &&
+    value.mentions.every(isMention) &&
     typeof value.mentionAll === 'boolean' &&
     typeof value.mentionedBot === 'boolean' &&
     typeof value.createTime === 'number' &&
@@ -97,6 +137,14 @@ function makeId(now: number): string {
   return `queue-${now.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function makeUniqueId(now: number, records: PersistentQueueRecord[]): string {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const id = makeId(now);
+    if (!records.some((record) => record.id === id)) return id;
+  }
+  throw new Error('persistent queue could not generate unique id');
+}
+
 const mutationTails = new Map<string, Promise<unknown>>();
 
 export class PersistentQueue {
@@ -111,10 +159,14 @@ export class PersistentQueue {
     opts: { id?: string; now?: number } = {},
   ): Promise<PersistentQueueRecord> {
     return this.mutate(async () => {
-      const records = await this.readRecords();
+      const records = await this.readRecordsForMutation();
       const timestamp = opts.now ?? this.now();
+      const id = opts.id ?? makeUniqueId(timestamp, records);
+      if (records.some((record) => record.id === id)) {
+        throw new Error(`persistent queue id already exists: ${id}`);
+      }
       const record: PersistentQueueRecord = {
-        id: opts.id ?? makeId(timestamp),
+        id,
         scope,
         messages: messages.map((msg) => cloneMessage(msg)),
         state: 'queued',
@@ -132,7 +184,7 @@ export class PersistentQueue {
     opts: { now?: number } = {},
   ): Promise<PersistentQueueRecord | undefined> {
     return this.mutate(async () => {
-      const records = await this.readRecords();
+      const records = await this.readRecordsForMutation();
       const record = records.find((entry) => entry.id === id);
       if (!record) return undefined;
       record.state = 'running';
@@ -144,7 +196,7 @@ export class PersistentQueue {
 
   async complete(id: string): Promise<boolean> {
     return this.mutate(async () => {
-      const records = await this.readRecords();
+      const records = await this.readRecordsForMutation();
       const index = records.findIndex((record) => record.id === id);
       if (index === -1) return false;
       records.splice(index, 1);
@@ -155,7 +207,7 @@ export class PersistentQueue {
 
   async cancelScope(scope: string): Promise<number> {
     return this.mutate(async () => {
-      const records = await this.readRecords();
+      const records = await this.readRecordsForMutation();
       const next = records.filter((record) => record.scope !== scope);
       const removed = records.length - next.length;
       if (removed === 0) return 0;
@@ -179,31 +231,47 @@ export class PersistentQueue {
   }
 
   private async readRecords(): Promise<PersistentQueueRecord[]> {
+    return this.readRecordsFromFile(false);
+  }
+
+  private async readRecordsForMutation(): Promise<PersistentQueueRecord[]> {
+    return this.readRecordsFromFile(true);
+  }
+
+  private async readRecordsFromFile(strict: boolean): Promise<PersistentQueueRecord[]> {
     let raw: string;
     try {
       raw = await readFile(this.file, 'utf8');
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
       log.fail('queue', err, { step: 'persistent-read' });
+      if (strict) throw new Error(`persistent queue read failed: ${this.file}`);
       return [];
     }
 
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(raw) as unknown;
-      if (!isObject(parsed) || parsed.version !== 1 || !Array.isArray(parsed.records)) return [];
-      return parsed.records.flatMap((record): PersistentQueueRecord[] => {
-        if (!isRecord(record)) return [];
-        try {
-          return [cloneRecord(record)];
-        } catch (err) {
-          log.fail('queue', err, { step: 'persistent-read-record' });
-          return [];
-        }
-      });
+      parsed = JSON.parse(raw) as unknown;
     } catch (err) {
       log.fail('queue', err, { step: 'persistent-read' });
+      if (strict) throw new Error(`persistent queue parse failed: ${this.file}`);
       return [];
     }
+
+    if (!isObject(parsed) || parsed.version !== 1 || !Array.isArray(parsed.records)) {
+      if (strict) throw new Error(`persistent queue file is malformed: ${this.file}`);
+      return [];
+    }
+
+    return parsed.records.flatMap((record): PersistentQueueRecord[] => {
+      if (!isRecord(record)) return [];
+      try {
+        return [cloneRecord(record)];
+      } catch (err) {
+        log.fail('queue', err, { step: 'persistent-read-record' });
+        return [];
+      }
+    });
   }
 
   private async writeRecords(records: PersistentQueueRecord[]): Promise<void> {
