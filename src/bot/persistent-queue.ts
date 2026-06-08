@@ -39,6 +39,7 @@ interface ParsedLockFile {
   pid?: number;
   token?: string;
   createdAt?: number;
+  procStartTime?: string;
 }
 
 interface LockCandidate {
@@ -126,6 +127,22 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+function parseProcStartTime(statContent: string): string | undefined {
+  const endOfCommand = statContent.lastIndexOf(')');
+  if (endOfCommand === -1) return undefined;
+  const fieldsAfterCommand = statContent.slice(endOfCommand + 2).trim().split(/\s+/);
+  return fieldsAfterCommand[19];
+}
+
+async function readProcStartTime(pid: number): Promise<string | undefined> {
+  try {
+    return parseProcStartTime(await readFile(`/proc/${pid}/stat`, 'utf8'));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    return undefined;
+  }
+}
+
 function parseLockFile(raw: string): ParsedLockFile | undefined {
   let parsed: unknown;
   try {
@@ -138,6 +155,7 @@ function parseLockFile(raw: string): ParsedLockFile | undefined {
     pid: typeof parsed.pid === 'number' && Number.isFinite(parsed.pid) ? parsed.pid : undefined,
     token: typeof parsed.token === 'string' ? parsed.token : undefined,
     createdAt: typeof parsed.createdAt === 'number' && Number.isFinite(parsed.createdAt) ? parsed.createdAt : undefined,
+    procStartTime: typeof parsed.procStartTime === 'string' ? parsed.procStartTime : undefined,
   };
 }
 
@@ -286,6 +304,7 @@ const mutationTails = new Map<string, Promise<unknown>>();
 export class PersistentQueue {
   private readonly lockKey: string;
   private readonly lockFile: string;
+  private readonly reapFile: string;
   private readonly lockTimeoutMs: number;
   private readonly lockPollMs: number;
   private readonly staleLockMs: number;
@@ -298,6 +317,7 @@ export class PersistentQueue {
   ) {
     this.lockKey = resolve(file);
     this.lockFile = `${this.lockKey}.lock`;
+    this.reapFile = `${this.lockFile}.reap`;
     this.lockTimeoutMs = options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
     this.lockPollMs = options.lockPollMs ?? DEFAULT_LOCK_POLL_MS;
     this.staleLockMs = options.staleLockMs ?? DEFAULT_STALE_LOCK_MS;
@@ -401,48 +421,64 @@ export class PersistentQueue {
     await mkdir(lockDir, { recursive: true });
 
     while (true) {
-      try {
-        const handle = await open(this.lockFile, 'wx');
-        const token = randomBytes(16).toString('hex');
-        let lockReady = false;
+      if (!(await this.reapLockExists())) {
         try {
-          await handle.writeFile(JSON.stringify({ pid: process.pid, token, createdAt: Date.now() }));
-          await handle.sync();
-          await handle.close();
-          lockReady = true;
-          this.lockToken = token;
+          await this.createMainLock();
+          return;
         } catch (err) {
-          if (!lockReady) {
-            try {
-              await handle.close();
-            } catch (closeErr) {
-              log.warn('queue', 'persistent-lock-close-after-acquire-failure-failed', {
-                lockFile: this.lockFile,
-                err: closeErr instanceof Error ? closeErr.message : String(closeErr),
-              });
-            }
-            try {
-              await rm(this.lockFile, { force: true });
-            } catch (cleanupErr) {
-              log.warn('queue', 'persistent-lock-acquire-cleanup-failed', {
-                lockFile: this.lockFile,
-                err: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
-              });
-            }
-          }
-          throw err;
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code !== 'EEXIST') throw err;
+          if (await this.tryRecoverStaleLockAndAcquire()) return;
         }
-        return;
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException).code;
-        if (code !== 'EEXIST') throw err;
-        if (await this.tryRemoveStaleLock()) continue;
       }
 
       if (Date.now() - startedAt >= this.lockTimeoutMs) {
         throw new Error(`persistent queue lock timeout: ${this.file}`);
       }
       await delay(Math.max(1, this.lockPollMs));
+    }
+  }
+
+  private async createMainLock(): Promise<void> {
+    const handle = await open(this.lockFile, 'wx');
+    const token = randomBytes(16).toString('hex');
+    let lockReady = false;
+    try {
+      await handle.writeFile(JSON.stringify({ pid: process.pid, token, createdAt: Date.now(), procStartTime: await readProcStartTime(process.pid) }));
+      await handle.sync();
+      await handle.close();
+      lockReady = true;
+      this.lockToken = token;
+    } catch (err) {
+      if (!lockReady) {
+        try {
+          await handle.close();
+        } catch (closeErr) {
+          log.warn('queue', 'persistent-lock-close-after-acquire-failure-failed', {
+            lockFile: this.lockFile,
+            err: closeErr instanceof Error ? closeErr.message : String(closeErr),
+          });
+        }
+        try {
+          await rm(this.lockFile, { force: true });
+        } catch (cleanupErr) {
+          log.warn('queue', 'persistent-lock-acquire-cleanup-failed', {
+            lockFile: this.lockFile,
+            err: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+          });
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async reapLockExists(): Promise<boolean> {
+    try {
+      await stat(this.reapFile);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      return true;
     }
   }
 
@@ -463,32 +499,78 @@ export class PersistentQueue {
     }
   }
 
-  private isStaleLockCandidate(candidate: LockCandidate, now: number): boolean {
+  private async isProvablyDeadStaleLockCandidate(candidate: LockCandidate, now: number): Promise<boolean> {
     const ageMs = now - candidate.identity.mtimeMs;
     if (ageMs < this.staleLockMs) return false;
 
     const pid = candidate.lock?.pid;
-    if (pid === undefined) return true;
-    return !isPidAlive(pid);
+    if (pid === undefined) return false;
+    if (!isPidAlive(pid)) return true;
+
+    const lockedProcStartTime = candidate.lock?.procStartTime;
+    if (!lockedProcStartTime) return false;
+    const currentProcStartTime = await readProcStartTime(pid);
+    return currentProcStartTime !== undefined && currentProcStartTime !== lockedProcStartTime;
   }
 
-  private async tryRemoveStaleLock(): Promise<boolean> {
-    const candidate = await this.readLockCandidate();
-    if (!candidate || !this.isStaleLockCandidate(candidate, Date.now())) return false;
-
-    const current = await this.readLockCandidate();
-    if (!current || !sameLockCandidate(candidate, current)) return false;
-
+  private async tryRecoverStaleLockAndAcquire(): Promise<boolean> {
+    let reapAcquired = false;
     try {
-      await rm(this.lockFile);
-      return true;
+      const reapHandle = await open(this.reapFile, 'wx');
+      const reapToken = randomBytes(16).toString('hex');
+      try {
+        await reapHandle.writeFile(JSON.stringify({ pid: process.pid, token: reapToken, createdAt: Date.now(), procStartTime: await readProcStartTime(process.pid) }));
+        await reapHandle.sync();
+      } finally {
+        await reapHandle.close();
+      }
+      reapAcquired = true;
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return true;
-      log.warn('queue', 'persistent-stale-lock-remove-failed', {
-        lockFile: this.lockFile,
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+      log.warn('queue', 'persistent-reaper-lock-acquire-failed', {
+        reapFile: this.reapFile,
         err: err instanceof Error ? err.message : String(err),
       });
       return false;
+    }
+
+    try {
+      const candidate = await this.readLockCandidate();
+      if (!candidate || !(await this.isProvablyDeadStaleLockCandidate(candidate, Date.now()))) return false;
+
+      const current = await this.readLockCandidate();
+      if (!current || !sameLockCandidate(candidate, current)) return false;
+
+      try {
+        await rm(this.lockFile);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          log.warn('queue', 'persistent-stale-lock-remove-failed', {
+            lockFile: this.lockFile,
+            err: err instanceof Error ? err.message : String(err),
+          });
+          return false;
+        }
+      }
+
+      try {
+        await this.createMainLock();
+        return true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+        return false;
+      }
+    } finally {
+      if (reapAcquired) {
+        try {
+          await rm(this.reapFile, { force: true });
+        } catch (err) {
+          log.warn('queue', 'persistent-reaper-lock-release-failed', {
+            reapFile: this.reapFile,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
     }
   }
 

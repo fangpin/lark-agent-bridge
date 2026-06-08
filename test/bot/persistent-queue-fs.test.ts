@@ -16,6 +16,7 @@ const fs = vi.hoisted(() => ({
   readFile: vi.fn(),
   rename: vi.fn(),
   rm: vi.fn(),
+  stat: vi.fn(),
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => ({
@@ -25,6 +26,7 @@ vi.mock('node:fs/promises', async (importOriginal) => ({
   readFile: fs.readFile,
   rename: fs.rename,
   rm: fs.rm,
+  stat: fs.stat,
 }));
 
 function msg(id: string): NormalizedMessage {
@@ -68,7 +70,7 @@ function dirHandle(dir: string): FakeHandle {
 }
 
 function nonLockRmCalls(): unknown[][] {
-  return fs.rm.mock.calls.filter(([path]) => !String(path).endsWith('.lock'));
+  return fs.rm.mock.calls.filter(([path]) => !String(path).endsWith('.lock') && !String(path).endsWith('.lock.reap'));
 }
 
 describe('PersistentQueue filesystem writes', () => {
@@ -78,7 +80,10 @@ describe('PersistentQueue filesystem writes', () => {
     vi.clearAllMocks();
     fs.mkdir.mockResolvedValue(undefined);
     fs.readFile.mockImplementation(async (path: string) => {
-      if (String(path).endsWith('.lock')) {
+      if (String(path).startsWith('/proc/')) {
+        throw Object.assign(new Error('missing proc stat'), { code: 'ENOENT' });
+      }
+      if (String(path).endsWith('.lock') || String(path).endsWith('.lock.reap')) {
         const matchingLocks = fs.handles.filter((entry) => entry.path === path);
         const lock = matchingLocks[matchingLocks.length - 1];
         const raw = lock?.writeFile.mock.calls.at(-1)?.[0];
@@ -89,6 +94,12 @@ describe('PersistentQueue filesystem writes', () => {
     fs.open.mockImplementation(async (path: string) => makeHandle(path));
     fs.rename.mockResolvedValue(undefined);
     fs.rm.mockResolvedValue(undefined);
+    fs.stat.mockImplementation(async (path: string) => {
+      if (String(path).endsWith('.lock.reap')) {
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      }
+      return { dev: 1, ino: 1, size: 1, mtimeMs: Date.now() - 60_000 };
+    });
   });
 
   afterEach(() => {
@@ -300,6 +311,9 @@ describe('PersistentQueue filesystem writes', () => {
   test('does not remove a lock file with a different owner token on release', async () => {
     const file = '/tmp/persistent-queue-fs/queue.json';
     fs.readFile.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/proc/')) {
+        throw Object.assign(new Error('missing proc stat'), { code: 'ENOENT' });
+      }
       if (path === `${file}.lock`) {
         return JSON.stringify({ pid: 999, token: 'different-owner', createdAt: 1 });
       }
@@ -321,5 +335,63 @@ describe('PersistentQueue filesystem writes', () => {
       'persistent-lock-owner-mismatch',
       expect.objectContaining({ lockFile: `${file}.lock` }),
     );
+  });
+
+  test('acquires the reaper lock before removing and replacing a dead stale lock', async () => {
+    const file = '/tmp/persistent-queue-fs/queue.json';
+    const lockPath = `${file}.lock`;
+    const reapPath = `${lockPath}.reap`;
+    const staleLock = JSON.stringify({ pid: 99_999_999, token: 'dead', createdAt: 1 });
+    const files = new Map<string, string>([[lockPath, staleLock]]);
+    fs.readFile.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/proc/')) {
+        throw Object.assign(new Error('missing proc stat'), { code: 'ENOENT' });
+      }
+      const value = files.get(path);
+      if (value !== undefined) return value;
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+    fs.open.mockImplementation(async (path: string, flags?: string) => {
+      if (flags === 'wx' && files.has(path)) {
+        throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+      }
+      const handle = makeHandle(path);
+      handle.writeFile.mockImplementation(async (data: string) => {
+        files.set(path, data);
+      });
+      return handle;
+    });
+    fs.rm.mockImplementation(async (path: string) => {
+      if (path !== lockPath || files.get(path) === staleLock) {
+        files.delete(path);
+      }
+    });
+    const originalKill = process.kill;
+    vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: string | number) => {
+      if (pid === 99_999_999) {
+        throw Object.assign(new Error('missing process'), { code: 'ESRCH' });
+      }
+      return originalKill(pid, signal as NodeJS.Signals | number | undefined);
+    }) as typeof process.kill);
+    const { PersistentQueue } = await import('../../src/bot/persistent-queue');
+
+    await expect(new PersistentQueue(file, () => 1_000, { staleLockMs: 1 }).enqueue('scope-a', [msg('m1')], { id: 'record-1', now: 1_000 })).resolves.toMatchObject({
+      id: 'record-1',
+    });
+
+    const reapOpenOrder = fs.open.mock.invocationCallOrder[fs.open.mock.calls.findIndex(([path]) => path === reapPath)];
+    const lockRemoveCallIndex = fs.rm.mock.calls.findIndex(([path]) => path === lockPath);
+    const lockRemoveOrder = fs.rm.mock.invocationCallOrder[lockRemoveCallIndex];
+    const mainLockReacquireIndex = fs.open.mock.calls.findIndex(([path], index) => (
+      path === lockPath && fs.open.mock.invocationCallOrder[index]! > lockRemoveOrder!
+    ));
+    const mainLockReacquireOrder = fs.open.mock.invocationCallOrder[mainLockReacquireIndex];
+    const reapRemoveIndex = fs.rm.mock.calls.findIndex(([path], index) => (
+      path === reapPath && fs.rm.mock.invocationCallOrder[index]! > mainLockReacquireOrder!
+    ));
+    const reapRemoveOrder = fs.rm.mock.invocationCallOrder[reapRemoveIndex];
+    expect(reapOpenOrder).toBeLessThan(lockRemoveOrder!);
+    expect(lockRemoveOrder).toBeLessThan(mainLockReacquireOrder!);
+    expect(mainLockReacquireOrder).toBeLessThan(reapRemoveOrder!);
   });
 });

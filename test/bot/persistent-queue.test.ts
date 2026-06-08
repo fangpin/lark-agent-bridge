@@ -48,6 +48,19 @@ async function waitForQueuedMicrotasks(count = 5): Promise<void> {
   }
 }
 
+function parseProcStartTime(statContent: string): string | undefined {
+  const endOfCommand = statContent.lastIndexOf(')');
+  if (endOfCommand === -1) return undefined;
+  const fieldsAfterCommand = statContent.slice(endOfCommand + 2).trim().split(/\s+/);
+  return fieldsAfterCommand[19];
+}
+
+async function currentProcStartTime(): Promise<string> {
+  const startTime = parseProcStartTime(await readFile(`/proc/${process.pid}/stat`, 'utf8'));
+  if (!startTime) throw new Error('current process start time missing');
+  return startTime;
+}
+
 describe('PersistentQueue', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -241,19 +254,68 @@ describe('PersistentQueue', () => {
     expect(await readFile(lockPath, 'utf8')).toBe(replacementLock);
   });
 
-  test('removes malformed stale lock content only after stable identity checks', async () => {
+  test('does not remove or steal a malformed stale lock', async () => {
     const file = queueFile();
     const lockPath = `${file}.lock`;
-    await writeFile(lockPath, '{not valid json');
+    const malformedLock = '{not valid json';
+    await writeFile(lockPath, malformedLock);
     const oldTime = new Date(Date.now() - 60_000);
     await utimes(lockPath, oldTime, oldTime);
-    const queue = new PersistentQueue(file, () => 2_000, { lockPollMs: 5, lockTimeoutMs: 500, staleLockMs: 1 });
+    const queue = new PersistentQueue(file, () => 2_000, { lockPollMs: 5, lockTimeoutMs: 10, staleLockMs: 1 });
+
+    await expect(queue.enqueue('scope-a', [msg('m1')], { id: 'blocked', now: 2_000 })).rejects.toThrow(
+      `persistent queue lock timeout: ${file}`,
+    );
+
+    expect(await readFile(lockPath, 'utf8')).toBe(malformedLock);
+  });
+
+  test('recovers a stale lock when a live pid has a different process start time', async () => {
+    const file = queueFile();
+    const lockPath = `${file}.lock`;
+    await writeFile(lockPath, JSON.stringify({ pid: process.pid, token: 'reused-pid', createdAt: 1, procStartTime: 'definitely-different' }));
+    const oldTime = new Date(Date.now() - 60_000);
+    await utimes(lockPath, oldTime, oldTime);
+    const queue = new PersistentQueue(file, Date.now, { lockPollMs: 5, lockTimeoutMs: 500, staleLockMs: 1 });
 
     await expect(queue.enqueue('scope-a', [msg('m1')], { id: 'record-1', now: 2_000 })).resolves.toMatchObject({
       id: 'record-1',
     });
 
     expect(existsSync(lockPath)).toBe(false);
+    expect((await queue.recoverable()).map((record) => record.id)).toEqual(['record-1']);
+  });
+
+  test('does not remove or steal an old lock when the live pid has the same process start time', async () => {
+    const file = queueFile();
+    const lockPath = `${file}.lock`;
+    const oldLock = JSON.stringify({ pid: process.pid, token: 'same-proc', createdAt: 1, procStartTime: await currentProcStartTime() });
+    await writeFile(lockPath, oldLock);
+    const oldTime = new Date(Date.now() - 60_000);
+    await utimes(lockPath, oldTime, oldTime);
+    const queue = new PersistentQueue(file, () => 2_000, { lockPollMs: 5, lockTimeoutMs: 10, staleLockMs: 1 });
+
+    await expect(queue.enqueue('scope-a', [msg('m1')], { id: 'blocked', now: 2_000 })).rejects.toThrow(
+      `persistent queue lock timeout: ${file}`,
+    );
+
+    expect(await readFile(lockPath, 'utf8')).toBe(oldLock);
+  });
+
+  test('waits for a reaper lock instead of acquiring the main lock', async () => {
+    const file = queueFile();
+    const lockPath = `${file}.lock`;
+    const reapPath = `${lockPath}.reap`;
+    const reapLock = JSON.stringify({ pid: process.pid, token: 'reaping', createdAt: Date.now() });
+    await writeFile(reapPath, reapLock);
+    const queue = new PersistentQueue(file, () => 2_000, { lockPollMs: 5, lockTimeoutMs: 10, staleLockMs: 1 });
+
+    await expect(queue.enqueue('scope-a', [msg('m1')], { id: 'blocked', now: 2_000 })).rejects.toThrow(
+      `persistent queue lock timeout: ${file}`,
+    );
+
+    expect(existsSync(lockPath)).toBe(false);
+    expect(await readFile(reapPath, 'utf8')).toBe(reapLock);
   });
 
   test('rejects duplicate caller-provided ids', async () => {
