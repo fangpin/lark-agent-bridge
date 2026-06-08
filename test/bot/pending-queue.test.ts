@@ -46,4 +46,28 @@ describe('PendingQueue', () => {
 
     expect(flushed).toEqual([['m1', 'm2']]);
   });
+
+  test('flushes durable batch ids with queued messages', () => {
+    const flushed: Array<{ durableId: string | undefined; ids: string[] }> = [];
+    const queue = new PendingQueue(0, (_scope, batch, durableId) => {
+      flushed.push({ durableId, ids: batch.map((m) => m.messageId) });
+    });
+
+    queue.push('chat-1', msg('m1'), { durableId: 'pq-1' });
+    queue.push('chat-1', msg('m2'), { durableId: 'pq-1' });
+
+    expect(flushed).toEqual([{ durableId: 'pq-1', ids: ['m1', 'm2'] }]);
+  });
+
+  test('pushes recovered batches as one durable unit', () => {
+    const flushed: Array<{ durableId: string | undefined; ids: string[] }> = [];
+    const queue = new PendingQueue(0, (_scope, batch, durableId) => {
+      flushed.push({ durableId, ids: batch.map((m) => m.messageId) });
+    });
+
+    const size = queue.pushBatch('chat-1', [msg('m1'), msg('m2')], { durableId: 'pq-restored' });
+
+    expect(size).toBe(2);
+    expect(flushed).toEqual([{ durableId: 'pq-restored', ids: ['m1', 'm2'] }]);
+  });
 });

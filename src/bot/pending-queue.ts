@@ -4,9 +4,14 @@ import { log } from '../core/logger';
 interface PendingEntry {
   messages: NormalizedMessage[];
   timer?: NodeJS.Timeout;
+  durableId?: string;
 }
 
-export type FlushHandler = (scope: string, batch: NormalizedMessage[]) => void;
+export type FlushHandler = (scope: string, batch: NormalizedMessage[], durableId?: string) => void;
+
+export interface PendingPushOptions {
+  durableId?: string;
+}
 
 /**
  * Per-scope pending queue. `scope` is the session scope string (typically
@@ -31,17 +36,28 @@ export class PendingQueue {
     this.onFlush = onFlush;
   }
 
-  push(scope: string, msg: NormalizedMessage): number {
+  push(scope: string, msg: NormalizedMessage, opts: PendingPushOptions = {}): number {
+    return this.pushBatch(scope, [msg], opts);
+  }
+
+  pushBatch(scope: string, messages: NormalizedMessage[], opts: PendingPushOptions = {}): number {
     const existing = this.map.get(scope);
     if (existing) {
       if (existing.timer) clearTimeout(existing.timer);
-      existing.messages.push(msg);
+      existing.messages.push(...messages);
+      existing.durableId ??= opts.durableId;
       existing.timer = this.blocked.has(scope) ? undefined : this.scheduleFlush(scope);
       return existing.messages.length;
     }
-    const entry: PendingEntry = { messages: [msg] };
+    const entry: PendingEntry = { messages: [...messages], durableId: opts.durableId };
     this.map.set(scope, entry);
-    entry.timer = this.blocked.has(scope) ? undefined : this.scheduleFlush(scope);
+    if (this.blocked.has(scope)) {
+      entry.timer = undefined;
+    } else if (this.delayMs <= 0 && opts.durableId && messages.length === 1) {
+      entry.timer = setTimeout(() => this.flush(scope), 0);
+    } else {
+      entry.timer = this.scheduleFlush(scope);
+    }
     return entry.messages.length;
   }
 
@@ -101,7 +117,7 @@ export class PendingQueue {
     if (!entry) return;
     this.map.delete(scope);
     try {
-      this.onFlush(scope, entry.messages);
+      this.onFlush(scope, entry.messages, entry.durableId);
     } catch (err) {
       log.fail('queue', err, { scope, batchSize: entry.messages.length });
     }
