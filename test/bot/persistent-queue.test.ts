@@ -242,6 +242,20 @@ describe('PersistentQueue', () => {
     );
   });
 
+  test('logs parse-corrupt queue files during recoverable reads', async () => {
+    const file = queueFile();
+    const fail = vi.spyOn(log, 'fail').mockImplementation(() => undefined);
+    await writeFile(file, '{not valid json');
+
+    await expect(new PersistentQueue(file).recoverable()).resolves.toEqual([]);
+
+    expect(fail).toHaveBeenCalledWith(
+      'queue',
+      expect.any(Error),
+      expect.objectContaining({ step: 'persistent-read' }),
+    );
+  });
+
   test('does not overwrite a top-level malformed queue file during mutation', async () => {
     const file = queueFile();
     const malformed = JSON.stringify({ version: 2, records: [] });
