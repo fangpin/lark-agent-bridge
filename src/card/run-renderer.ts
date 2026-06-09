@@ -5,6 +5,7 @@ import { isLowSignalTool, toolBodyMd, toolHeaderText } from './tool-render';
 
 const REASONING_MAX = 1500;
 const COLLAPSE_TOOL_THRESHOLD = 3;
+const COPY_CODE_MAX = 8_000;
 
 interface ToolGroup {
   kind: 'tools';
@@ -33,7 +34,7 @@ export function renderCard(state: RunState): object {
   for (const group of groupBlocks(state.blocks)) {
     if (group.kind === 'text') {
       if (group.content.trim()) {
-        elements.push(markdown(group.content));
+        elements.push(...renderTextGroup(group.content, state.terminal !== 'running'));
       }
     } else {
       elements.push(...renderToolGroup(group.tools, state.terminal !== 'running'));
@@ -194,6 +195,66 @@ function markdown(content: string): object {
 
 function noteMd(content: string): object {
   return { tag: 'markdown', content, text_size: 'notation' };
+}
+
+interface MarkdownSegment {
+  kind: 'markdown' | 'code';
+  content: string;
+  code?: string;
+}
+
+function renderTextGroup(content: string, copyableCode: boolean): object[] {
+  if (!copyableCode) return [markdown(content)];
+  const segments = splitFencedCodeBlocks(content);
+  if (segments.every((segment) => segment.kind === 'markdown')) return [markdown(content)];
+
+  let codeIndex = 0;
+  const elements: object[] = [];
+  for (const segment of segments) {
+    if (!segment.content.trim()) continue;
+    elements.push(markdown(segment.content));
+    if (segment.kind === 'code' && segment.code !== undefined) {
+      codeIndex += 1;
+      if (segment.code.length <= COPY_CODE_MAX) {
+        elements.push(copyCodeButton(codeIndex, segment.code));
+      }
+    }
+  }
+  return elements.length > 0 ? elements : [markdown(content)];
+}
+
+function splitFencedCodeBlocks(content: string): MarkdownSegment[] {
+  const segments: MarkdownSegment[] = [];
+  const fenceRe = /```[^\n`]*\n[\s\S]*?\n```/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = fenceRe.exec(content))) {
+    if (match.index > cursor) {
+      segments.push({ kind: 'markdown', content: content.slice(cursor, match.index) });
+    }
+    const fenced = match[0];
+    segments.push({ kind: 'code', content: fenced, code: extractFenceBody(fenced) });
+    cursor = match.index + fenced.length;
+  }
+  if (cursor < content.length) {
+    segments.push({ kind: 'markdown', content: content.slice(cursor) });
+  }
+  return segments.length > 0 ? segments : [{ kind: 'markdown', content }];
+}
+
+function extractFenceBody(fenced: string): string {
+  const firstNewline = fenced.indexOf('\n');
+  const lastNewline = fenced.lastIndexOf('\n```');
+  if (firstNewline < 0 || lastNewline <= firstNewline) return '';
+  return fenced.slice(firstNewline + 1, lastNewline);
+}
+
+function copyCodeButton(index: number, code: string): object {
+  return {
+    tag: 'button',
+    text: { tag: 'plain_text', content: `复制代码 ${index}` },
+    behaviors: [{ type: 'copy', value: { text: code } }],
+  };
 }
 
 function stopButton(): object {
