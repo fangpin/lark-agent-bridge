@@ -34,6 +34,30 @@ describe('run renderers', () => {
     expect(card.body.elements.some((element) => element.tag === 'button')).toBe(false);
   });
 
+  test('adds native copy buttons for completed card code blocks', () => {
+    const card = renderCard({
+      ...doneState(),
+      blocks: [
+        {
+          kind: 'text',
+          content: 'Use this:\n\n```ts\nconst answer = 42;\n```\n\nDone.',
+          streaming: false,
+        },
+      ],
+    }) as { body: { elements: Array<Record<string, unknown>> } };
+
+    expect(card.body.elements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tag: 'button',
+          text: { tag: 'plain_text', content: '复制代码 1' },
+          behaviors: [{ type: 'copy', value: { text: 'const answer = 42;' } }],
+        }),
+      ]),
+    );
+    expect(JSON.stringify(card)).not.toContain('__claude_cb');
+  });
+
   test('shows runtime progress for tracked running cards', () => {
     const state = createInitialState('run-1');
     const card = renderCard(state) as { body: { elements: Array<Record<string, unknown>> } };
