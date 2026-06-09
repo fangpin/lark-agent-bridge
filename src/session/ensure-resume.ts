@@ -2,11 +2,16 @@ import type { AgentAdapter } from '../agent/types';
 import { log } from '../core/logger';
 import type { SessionStore } from './store';
 
+export interface EnsureResumeSessionOptions {
+  precreate?: boolean;
+}
+
 export async function ensureResumeSession(
   agent: AgentAdapter,
   sessions: SessionStore,
   scope: string,
   cwd: string,
+  opts: EnsureResumeSessionOptions = {},
 ): Promise<string | undefined> {
   const sessionKey = agent.sessionKey;
   const existing = sessions.resumeFor(scope, cwd, sessionKey);
@@ -18,7 +23,7 @@ export async function ensureResumeSession(
       return existing;
     }
   }
-  if (!agent.prepareSession) return undefined;
+  if (opts.precreate === false || !agent.prepareSession) return undefined;
 
   const sessionId = await agent.prepareSession(cwd, scope);
   if (!sessionId) {
