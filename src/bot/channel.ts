@@ -669,7 +669,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     resumeFrom = await withTimeout(
       'session.precreate',
       SESSION_PRECREATE_TIMEOUT_MS,
-      ensureResumeSession(agent, sessions, scope, cwd),
+      ensureResumeSession(agent, sessions, scope, cwd, { precreate: agent.descriptor.supportsWorkers }),
     ).catch((err) => {
       log.fail('session', err, { cwd, sessionKey, fallback: 'run-without-precreated-session' });
       return undefined;
