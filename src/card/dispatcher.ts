@@ -5,6 +5,7 @@ import type { BackendStore } from '../backend/store';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { ChatModeCache } from '../bot/chat-mode-cache';
 import type { PendingQueue } from '../bot/pending-queue';
+import type { PersistentQueue } from '../bot/persistent-queue';
 import type { RunHistory } from '../bot/run-history';
 import { runCommandHandler, type CommandContext, type Controls } from '../commands';
 import { isChatAllowed, isUserAllowed } from '../config/schema';
@@ -31,6 +32,7 @@ export interface CardDispatchDeps {
   backendStore?: BackendStore;
   controls: Controls;
   pending: PendingQueue;
+  persistentQueue: PersistentQueue;
   runHistory: RunHistory;
   chatModeCache: ChatModeCache;
 }
@@ -82,7 +84,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   // into the scope's pending queue so claude resumes its session and sees
   // the click as a follow-up message, with full context of what it sent.
   if (CLAUDE_CALLBACK_MARKER in payload) {
-    forwardToClaude(deps, payload, formValue, scope, threadId);
+    await forwardToClaude(deps, payload, formValue, scope, threadId);
     return;
   }
 
@@ -107,7 +109,31 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     backendKey,
     controls: deps.controls,
     pending: deps.pending,
+    persistentQueue: deps.persistentQueue,
     runHistory: deps.runHistory,
+    cancelQueuedWork: async (targetScope = scope) => {
+      const droppedPersistent = await deps.persistentQueue.cancelScope(targetScope);
+      const dropped = deps.pending.cancel(targetScope);
+      log.info('cardAction', 'command-drop-pending', {
+        scope: targetScope,
+        cmd,
+        droppedPending: dropped.length,
+        droppedPersistent,
+      });
+    },
+    cancelQueuedOnlyWork: async (targetScope = scope) => {
+      const droppedIds = await deps.persistentQueue.cancelQueuedScopeIds(targetScope);
+      const dropped = deps.pending.cancel(targetScope, {
+        keepBlocked: deps.activeRuns.has(targetScope),
+        durableIds: new Set(droppedIds),
+      });
+      log.info('cardAction', 'command-drop-pending-queued-only', {
+        scope: targetScope,
+        cmd,
+        droppedPending: dropped.length,
+        droppedPersistent: droppedIds.length,
+      });
+    },
     formValue,
     fromCardAction: true,
   };
@@ -119,10 +145,6 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   try {
     const ok = await runCommandHandler(name ?? '', args, ctx);
     if (!ok) log.warn('cardAction', 'unknown', { cmd });
-    if (ok && name === 'stop') {
-      const dropped = deps.pending.cancel(scope);
-      log.info('cardAction', 'stop-cancel-pending', { scope, droppedPending: dropped.length });
-    }
   } catch (err) {
     log.fail('cardAction', err, { cmd });
   }
@@ -165,13 +187,13 @@ async function lookupMessageThreadId(
   }
 }
 
-function forwardToClaude(
+async function forwardToClaude(
   deps: CardDispatchDeps,
   payload: Record<string, unknown>,
   formValue: Record<string, unknown> | undefined,
   scope: string,
   threadId: string | undefined,
-): void {
+): Promise<void> {
   // Strip the marker so claude only sees the meaningful fields it set.
   const { [CLAUDE_CALLBACK_MARKER]: _marker, ...claudePayload } = payload;
   const merged = formValue ? { ...claudePayload, form_value: formValue } : claudePayload;
@@ -194,7 +216,18 @@ function forwardToClaude(
     mentionedBot: false,
     createTime: Date.now(),
   };
-  deps.pending.push(scope, synthetic);
+  try {
+    const record = await deps.persistentQueue.enqueue(scope, [synthetic]);
+    deps.pending.pushBatch(scope, [synthetic], { durableId: record.id });
+  } catch (err) {
+    log.fail('cardAction', err, { step: 'forward-claude-persist', scope });
+    const message = err instanceof Error ? err.message : String(err);
+    await deps.channel.send(deps.evt.chatId, {
+      markdown: `❌ 按钮操作提交失败：${message}`,
+    }, { replyTo: deps.evt.messageId }).catch((sendErr) => {
+      log.fail('cardAction', sendErr, { step: 'forward-claude-persist-reply', scope });
+    });
+  }
 }
 
 /** Turn a button payload like {cmd:'ws.use', name:'proj-a'} into the arg

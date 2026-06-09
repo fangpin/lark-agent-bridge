@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from 'vitest';
 import type { AgentDescriptor } from '../../src/agent/types';
 import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
+import { PersistentQueue } from '../../src/bot/persistent-queue';
 import { RunHistory } from '../../src/bot/run-history';
 import { runCommandHandler, tryHandleCommand, type CommandContext } from '../../src/commands';
 
@@ -42,7 +43,20 @@ function ctx(content: string, history = new RunHistory()): CommandContext {
     workspaces: { cwdFor: () => '/repo/project' },
     agent: { displayName: 'Claude Code', sessionKey: 'claude', descriptor },
     activeRuns: { interrupt: vi.fn(() => false) },
-    pending: { push: vi.fn(() => 1), cancel: vi.fn(() => []) },
+    pending: { push: vi.fn(() => 1), pushBatch: vi.fn(() => 1), cancel: vi.fn(() => []) },
+    persistentQueue: {
+      enqueue: vi.fn(async (_scope: string, messages: NormalizedMessage[]) => ({
+        id: 'durable-retry-1',
+        scope: 'chat-1',
+        messages,
+        state: 'queued' as const,
+        createdAt: 1000,
+        updatedAt: 1000,
+      })),
+      cancelScope: vi.fn(async () => 0),
+      cancelScopeExcept: vi.fn(async () => 0),
+      complete: vi.fn(async () => true),
+    },
     runHistory: history,
     controls: {
       restart: async () => undefined,
@@ -202,6 +216,145 @@ describe('/retry command', () => {
     );
   });
 
+  test('enqueues retry before cancelling active durable work while preserving the retry record', async () => {
+    const history = new RunHistory();
+    const entry = history.create('chat-1', [msg('fix the bug')], {
+      cwd: '/repo/project',
+      agent: descriptor,
+      summary: 'fix the bug',
+    });
+    history.finish(entry.runId, 'error');
+    const commandCtx = ctx(`/retry ${entry.runId}`, history);
+    const callOrder: string[] = [];
+    commandCtx.persistentQueue = {
+      enqueue: vi.fn(async (_scope: string, messages: NormalizedMessage[]) => {
+        callOrder.push('durable.enqueue');
+        return {
+          id: 'durable-retry-1',
+          scope: 'chat-1',
+          messages,
+          state: 'queued' as const,
+          createdAt: 1000,
+          updatedAt: 1000,
+        };
+      }),
+      cancelScopeExcept: vi.fn(async () => {
+        callOrder.push('durable.cancelExcept');
+        return 1;
+      }),
+      complete: vi.fn(async () => true),
+    } as unknown as PersistentQueue;
+    commandCtx.activeRuns.interrupt = vi.fn(() => {
+      callOrder.push('active.interrupt');
+      return true;
+    });
+    commandCtx.pending!.cancel = vi.fn(() => {
+      callOrder.push('memory.cancel');
+      return [];
+    });
+    commandCtx.pending!.pushBatch = vi.fn(() => {
+      callOrder.push('memory.pushBatch');
+      return 1;
+    });
+
+    await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
+
+    expect(commandCtx.persistentQueue.enqueue).toHaveBeenCalledWith('chat-1', [expect.objectContaining({ content: 'fix the bug' })]);
+    expect(commandCtx.persistentQueue.cancelScopeExcept).toHaveBeenCalledWith('chat-1', new Set(['durable-retry-1']));
+    expect(commandCtx.activeRuns.interrupt).toHaveBeenCalledWith('chat-1');
+    expect(commandCtx.persistentQueue.complete).not.toHaveBeenCalled();
+    expect(callOrder).toEqual(['durable.enqueue', 'durable.cancelExcept', 'memory.cancel', 'active.interrupt', 'memory.pushBatch']);
+  });
+
+  test('cleans durable queued work before interrupting active run', async () => {
+    const history = new RunHistory();
+    const entry = history.create('chat-1', [msg('fix the bug')], {
+      cwd: '/repo/project',
+      agent: descriptor,
+      summary: 'fix the bug',
+    });
+    history.finish(entry.runId, 'error');
+    const commandCtx = ctx(`/retry ${entry.runId}`, history);
+    const callOrder: string[] = [];
+    let activeInterruptedBeforeCleanup = false;
+    commandCtx.persistentQueue = {
+      enqueue: vi.fn(async (_scope: string, messages: NormalizedMessage[]) => {
+        callOrder.push('durable.enqueue');
+        return {
+          id: 'durable-retry-1',
+          scope: 'chat-1',
+          messages,
+          state: 'queued' as const,
+          createdAt: 1000,
+          updatedAt: 1000,
+        };
+      }),
+      cancelScopeExcept: vi.fn(async () => {
+        callOrder.push('durable.cancelExcept');
+        activeInterruptedBeforeCleanup = callOrder.includes('active.interrupt');
+        return 1;
+      }),
+      complete: vi.fn(async () => true),
+    } as unknown as PersistentQueue;
+    commandCtx.activeRuns.interrupt = vi.fn(() => {
+      callOrder.push('active.interrupt');
+      return true;
+    });
+    commandCtx.pending!.cancel = vi.fn(() => {
+      callOrder.push('memory.cancel');
+      return [];
+    });
+    commandCtx.pending!.pushBatch = vi.fn(() => {
+      callOrder.push('memory.pushBatch');
+      return 1;
+    });
+
+    await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
+
+    expect(activeInterruptedBeforeCleanup).toBe(false);
+    expect(commandCtx.persistentQueue.cancelScopeExcept).toHaveBeenCalledWith('chat-1', new Set(['durable-retry-1']));
+    expect(callOrder).toEqual(['durable.enqueue', 'durable.cancelExcept', 'memory.cancel', 'active.interrupt', 'memory.pushBatch']);
+  });
+
+  test('removes failed retry record and preserves active run when durable cleanup fails after enqueue', async () => {
+    const history = new RunHistory();
+    const entry = history.create('chat-1', [msg('fix the bug')], {
+      cwd: '/repo/project',
+      agent: descriptor,
+      summary: 'fix the bug',
+    });
+    history.finish(entry.runId, 'error');
+    const commandCtx = ctx(`/retry ${entry.runId}`, history);
+    commandCtx.persistentQueue = {
+      enqueue: vi.fn(async (_scope: string, messages: NormalizedMessage[]) => ({
+        id: 'durable-retry-1',
+        scope: 'chat-1',
+        messages,
+        state: 'queued' as const,
+        createdAt: 1000,
+        updatedAt: 1000,
+      })),
+      cancelScopeExcept: vi.fn(async () => {
+        throw new Error('durable cancel failed');
+      }),
+      complete: vi.fn(async () => true),
+    } as unknown as PersistentQueue;
+
+    await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
+
+    expect(commandCtx.persistentQueue.enqueue).toHaveBeenCalledWith('chat-1', [expect.objectContaining({ content: 'fix the bug' })]);
+    expect(commandCtx.persistentQueue.cancelScopeExcept).toHaveBeenCalledWith('chat-1', new Set(['durable-retry-1']));
+    expect(commandCtx.persistentQueue.complete).toHaveBeenCalledWith('durable-retry-1');
+    expect(commandCtx.activeRuns.interrupt).not.toHaveBeenCalled();
+    expect(commandCtx.pending?.cancel).not.toHaveBeenCalled();
+    expect(commandCtx.pending?.pushBatch).not.toHaveBeenCalled();
+    expect(commandCtx.channel.send).toHaveBeenCalledWith(
+      'chat-1',
+      { markdown: expect.stringContaining('清理已排队任务失败，当前运行未停止') },
+      { replyTo: 'msg-1' },
+    );
+  });
+
   test.each(['error', 'idle_timeout'] as const)('requeues %s runs', async (terminal) => {
     const history = new RunHistory();
     const entry = history.create('chat-1', [msg('fix the bug')], {
@@ -215,10 +368,47 @@ describe('/retry command', () => {
     await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
 
     expect(commandCtx.activeRuns.interrupt).toHaveBeenCalledWith('chat-1');
-    expect(commandCtx.pending?.push).toHaveBeenCalledWith('chat-1', expect.objectContaining({ content: 'fix the bug' }));
+    expect(commandCtx.persistentQueue?.enqueue).toHaveBeenCalledWith('chat-1', [expect.objectContaining({ content: 'fix the bug' })]);
+    expect(commandCtx.pending?.pushBatch).toHaveBeenCalledWith('chat-1', [expect.objectContaining({ content: 'fix the bug' })], {
+      durableId: 'durable-retry-1',
+    });
+    expect(commandCtx.pending?.push).not.toHaveBeenCalled();
     expect(commandCtx.channel.send).toHaveBeenCalledWith(
       'chat-1',
       { markdown: '已重新排队上次任务（1 条消息，当前队列 1）。' },
+      { replyTo: 'msg-1' },
+    );
+  });
+
+  test('preserves active durable work and does not interrupt when durable retry enqueue fails', async () => {
+    const history = new RunHistory();
+    const entry = history.create('chat-1', [msg('fix the bug')], {
+      cwd: '/repo/project',
+      agent: descriptor,
+      summary: 'fix the bug',
+    });
+    history.finish(entry.runId, 'error');
+    const commandCtx = ctx(`/retry ${entry.runId}`, history);
+    commandCtx.persistentQueue = {
+      enqueue: vi.fn(async () => {
+        throw new Error('durable retry enqueue failed');
+      }),
+      cancelScopeExcept: vi.fn(async () => 0),
+      complete: vi.fn(async () => true),
+    } as unknown as PersistentQueue;
+
+    await expect(tryHandleCommand(commandCtx)).resolves.toBe(true);
+
+    expect(commandCtx.persistentQueue.enqueue).toHaveBeenCalledWith('chat-1', [expect.objectContaining({ content: 'fix the bug' })]);
+    expect(commandCtx.persistentQueue.cancelScopeExcept).not.toHaveBeenCalled();
+    expect(commandCtx.persistentQueue.complete).not.toHaveBeenCalled();
+    expect(commandCtx.activeRuns.interrupt).not.toHaveBeenCalled();
+    expect(commandCtx.pending?.cancel).not.toHaveBeenCalled();
+    expect(commandCtx.pending?.push).not.toHaveBeenCalled();
+    expect(commandCtx.pending?.pushBatch).not.toHaveBeenCalled();
+    expect(commandCtx.channel.send).toHaveBeenCalledWith(
+      'chat-1',
+      { markdown: expect.stringContaining('重试排队失败') },
       { replyTo: 'msg-1' },
     );
   });

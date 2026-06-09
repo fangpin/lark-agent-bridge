@@ -134,6 +134,7 @@ Host CLI entries for `status`, `doctor`, `handover`, `workspace`, and `service` 
 | `~/.lark-channel/sessions.json` | Agent session ids + cwd per chat / topic, isolated by backend/runtime (+ optional `/timeout` override) |
 | `~/.lark-channel/workspaces.json` | Named-workspace map |
 | `~/.lark-channel/processes.json` | Process registry for live `start` instances (used by `ps`/`stop`); dead PIDs are auto-pruned |
+| `~/.lark-channel/queue.json` | Durable queue for accepted chat work; queued/running batches are recovered after process restart unless explicitly stopped |
 | `~/.lark-channel/media/<chatId>/` | Downloaded images / files, cleaned up after 24h |
 | `~/.lark-channel/logs/YYYY-MM-DD.log` | Structured run logs (JSONL), rotated daily; older than 7 days are pruned at startup (`LARK_CHANNEL_LOG_DAYS` env var overrides). `/doctor` reads these. |
 

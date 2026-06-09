@@ -1,12 +1,32 @@
 import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { log } from '../core/logger';
 
-interface PendingEntry {
+interface PendingBatch {
   messages: NormalizedMessage[];
+  durableId?: string;
+}
+
+interface PendingEntry {
+  batches: PendingBatch[];
   timer?: NodeJS.Timeout;
 }
 
-export type FlushHandler = (scope: string, batch: NormalizedMessage[]) => void;
+interface DelayedUnblock {
+  timer: NodeJS.Timeout;
+  dueAt: number;
+}
+
+export type FlushHandler = (scope: string, batch: NormalizedMessage[], durableId?: string) => void;
+
+export interface PendingPushOptions {
+  durableId?: string;
+  front?: boolean;
+}
+
+export interface PendingCancelOptions {
+  keepBlocked?: boolean;
+  durableIds?: ReadonlySet<string>;
+}
 
 /**
  * Per-scope pending queue. `scope` is the session scope string (typically
@@ -23,6 +43,7 @@ export type FlushHandler = (scope: string, batch: NormalizedMessage[]) => void;
 export class PendingQueue {
   private readonly map = new Map<string, PendingEntry>();
   private readonly blocked = new Set<string>();
+  private readonly delayedUnblocks = new Map<string, DelayedUnblock>();
   private readonly delayMs: number;
   private readonly onFlush: FlushHandler;
 
@@ -31,38 +52,107 @@ export class PendingQueue {
     this.onFlush = onFlush;
   }
 
-  push(scope: string, msg: NormalizedMessage): number {
-    const existing = this.map.get(scope);
-    if (existing) {
-      if (existing.timer) clearTimeout(existing.timer);
-      existing.messages.push(msg);
-      existing.timer = this.blocked.has(scope) ? undefined : this.scheduleFlush(scope);
-      return existing.messages.length;
-    }
-    const entry: PendingEntry = { messages: [msg] };
-    this.map.set(scope, entry);
-    entry.timer = this.blocked.has(scope) ? undefined : this.scheduleFlush(scope);
-    return entry.messages.length;
+  push(scope: string, msg: NormalizedMessage, opts: PendingPushOptions = {}): number {
+    return this.pushBatch(scope, [msg], opts);
   }
 
-  cancel(scope: string): NormalizedMessage[] {
+  pushBatch(scope: string, messages: NormalizedMessage[], opts: PendingPushOptions = {}): number {
+    let entry = this.map.get(scope);
+    if (!entry) {
+      entry = { batches: [] };
+      this.map.set(scope, entry);
+    } else if (entry.timer) {
+      const delayed = this.delayedUnblocks.get(scope);
+      if (entry.timer !== delayed?.timer) {
+        clearTimeout(entry.timer);
+        entry.timer = undefined;
+      }
+    }
+
+    if (opts.front) {
+      const firstBatch = entry.batches[0];
+      if (firstBatch && firstBatch.durableId === opts.durableId) {
+        firstBatch.messages.unshift(...messages);
+      } else {
+        entry.batches.unshift({ messages: [...messages], durableId: opts.durableId });
+      }
+    } else {
+      const lastBatch = entry.batches.at(-1);
+      if (lastBatch && lastBatch.durableId === opts.durableId) {
+        lastBatch.messages.push(...messages);
+        if (this.blocked.has(scope) && entry.timer) {
+          return this.queuedSize(scope);
+        }
+      } else {
+        if (entry.batches.length > 0 && !this.blocked.has(scope)) {
+          this.flush(scope);
+          entry = this.map.get(scope);
+          if (!entry) {
+            entry = { batches: [] };
+            this.map.set(scope, entry);
+          }
+        }
+        entry.batches.push({ messages: [...messages], durableId: opts.durableId });
+      }
+    }
+
+    const size = this.queuedSize(scope);
+    entry.timer = this.blocked.has(scope) ? undefined : this.scheduleFlush(scope);
+    return size;
+  }
+
+  cancel(scope: string, opts: PendingCancelOptions = {}): NormalizedMessage[] {
     const entry = this.map.get(scope);
+    const delayed = this.delayedUnblocks.get(scope);
+    if (!opts.keepBlocked) {
+      if (delayed) clearTimeout(delayed.timer);
+      this.delayedUnblocks.delete(scope);
+      this.blocked.delete(scope);
+    }
     if (!entry) return [];
-    if (entry.timer) clearTimeout(entry.timer);
-    this.map.delete(scope);
-    return entry.messages;
+    if (entry.timer && (!opts.keepBlocked || entry.timer !== delayed?.timer)) {
+      clearTimeout(entry.timer);
+      entry.timer = undefined;
+    }
+
+    if (!opts.durableIds) {
+      this.map.delete(scope);
+      return entry.batches.flatMap((batch) => batch.messages);
+    }
+
+    const dropped: NormalizedMessage[] = [];
+    const kept: PendingBatch[] = [];
+    for (const batch of entry.batches) {
+      if (batch.durableId && opts.durableIds.has(batch.durableId)) {
+        dropped.push(...batch.messages);
+      } else {
+        kept.push(batch);
+      }
+    }
+
+    if (kept.length === 0) {
+      this.map.delete(scope);
+    } else {
+      entry.batches = kept;
+      entry.timer = this.blocked.has(scope) ? delayed?.timer : this.scheduleFlush(scope);
+    }
+    return dropped;
   }
 
   queuedSize(scope: string): number {
-    return this.map.get(scope)?.messages.length ?? 0;
+    return this.map.get(scope)?.batches.reduce((total, batch) => total + batch.messages.length, 0) ?? 0;
   }
 
   cancelAll(): void {
     for (const entry of this.map.values()) {
       if (entry.timer) clearTimeout(entry.timer);
     }
+    for (const delayed of this.delayedUnblocks.values()) {
+      clearTimeout(delayed.timer);
+    }
     this.map.clear();
     this.blocked.clear();
+    this.delayedUnblocks.clear();
   }
 
   /** Pause the debounce timer; pushed messages keep accumulating. */
@@ -74,18 +164,54 @@ export class PendingQueue {
       clearTimeout(entry.timer);
       entry.timer = undefined;
     }
-    log.info('queue', 'blocked', { scope, queued: entry?.messages.length ?? 0 });
+    log.info('queue', 'blocked', { scope, queued: this.queuedSize(scope) });
   }
 
   /** Resume the debounce timer; arms a fresh quiet window if anything queued. */
   unblock(scope: string): void {
+    this.unblockAfter(scope, 0);
+  }
+
+  /** Resume after a delay while keeping the scope blocked so newer messages stay behind queued batches. */
+  unblockAfter(scope: string, delayMs: number): void {
     if (!this.blocked.has(scope)) return;
-    this.blocked.delete(scope);
-    const entry = this.map.get(scope);
-    log.info('queue', 'unblocked', { scope, queued: entry?.messages.length ?? 0 });
-    if (!entry || entry.messages.length === 0) return;
-    if (entry.timer) clearTimeout(entry.timer);
-    entry.timer = this.scheduleFlush(scope);
+    if (delayMs > 0) {
+      const existingDelayed = this.delayedUnblocks.get(scope);
+      if (existingDelayed) clearTimeout(existingDelayed.timer);
+      const dueAt = Date.now() + delayMs;
+      const timer = setTimeout(() => {
+        const currentDelayed = this.delayedUnblocks.get(scope);
+        if (currentDelayed?.timer === timer) this.delayedUnblocks.delete(scope);
+        const current = this.map.get(scope);
+        if (current?.timer === timer) current.timer = undefined;
+        this.unblockAfter(scope, 0);
+      }, delayMs);
+      this.delayedUnblocks.set(scope, { timer, dueAt });
+      const entry = this.map.get(scope);
+      if (entry) {
+        if (entry.timer) clearTimeout(entry.timer);
+        entry.timer = timer;
+      }
+      log.info('queue', 'unblock-delayed', { scope, queued: this.queuedSize(scope), delayMs });
+      return;
+    }
+    if (delayMs <= 0) {
+      const delayed = this.delayedUnblocks.get(scope);
+      if (delayed) clearTimeout(delayed.timer);
+      this.delayedUnblocks.delete(scope);
+      const existing = this.map.get(scope);
+      if (existing?.timer) {
+        clearTimeout(existing.timer);
+        existing.timer = undefined;
+      }
+      this.blocked.delete(scope);
+      const entry = this.map.get(scope);
+      log.info('queue', 'unblocked', { scope, queued: this.queuedSize(scope) });
+      if (!entry || entry.batches.length === 0) return;
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.timer = this.scheduleFlush(scope);
+      return;
+    }
   }
 
   private scheduleFlush(scope: string): NodeJS.Timeout | undefined {
@@ -99,11 +225,25 @@ export class PendingQueue {
   private flush(scope: string): void {
     const entry = this.map.get(scope);
     if (!entry) return;
-    this.map.delete(scope);
+
+    const batch = entry.batches.shift();
+    if (!batch) {
+      this.map.delete(scope);
+      return;
+    }
+
+    if (entry.batches.length === 0) {
+      this.map.delete(scope);
+    }
+
     try {
-      this.onFlush(scope, entry.messages);
+      this.onFlush(scope, batch.messages, batch.durableId);
     } catch (err) {
-      log.fail('queue', err, { scope, batchSize: entry.messages.length });
+      log.fail('queue', err, { scope, batchSize: batch.messages.length });
+    }
+
+    if (entry.batches.length > 0 && !this.blocked.has(scope)) {
+      entry.timer = this.scheduleFlush(scope);
     }
   }
 }

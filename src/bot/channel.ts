@@ -21,7 +21,7 @@ import {
   type RunState,
 } from '../card/run-state';
 import { renderText } from '../card/text-renderer';
-import { isStopCommandText, tryHandleCommand, type Controls } from '../commands';
+import { isStopCommandText, parseCommandText, tryHandleCommand, type Controls } from '../commands';
 import type { AppConfig } from '../config/schema';
 import {
   getAgentStopGraceMs,
@@ -48,6 +48,7 @@ import { handleCommentMention } from './comments';
 import { startKeepalive } from './keepalive';
 import { configureNetwork } from './network-config';
 import { PendingQueue } from './pending-queue';
+import { PersistentQueue } from './persistent-queue';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, renderQuotedBlock, type QuotedContext } from './quote';
 import { addWorkingReaction, removeReaction } from './reaction';
@@ -55,6 +56,7 @@ import { RunHistory } from './run-history';
 import { TimeoutError, withTimeout } from '../utils/timeout';
 
 const PENDING_FLUSH_DELAY_MS = 0;
+const SETUP_RETRY_DELAY_MS = 1_000;
 const MEDIA_RESOLVE_TIMEOUT_MS = 20_000;
 const QUOTE_FETCH_TIMEOUT_MS = 10_000;
 const SESSION_PRECREATE_TIMEOUT_MS = 20_000;
@@ -143,6 +145,8 @@ export interface StartChannelDeps {
   sessions: SessionStore;
   workspaces: WorkspaceStore;
   controls: Controls;
+  persistentQueue?: PersistentQueue;
+  activeRuns?: ActiveRuns;
 }
 
 async function resolveAgentForScope(
@@ -163,7 +167,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const startupAgent = agentRegistry ? await agentRegistry.getDefault() : agent;
   if (!startupAgent) throw new Error('no agent configured');
   const agentDeps = { agent, agentRegistry, backendStore };
-  const activeRuns = new ActiveRuns();
+  const activeRuns = deps.activeRuns ?? new ActiveRuns();
   // ChatModeCache stays per-bridge-instance — invalidated on restart along
   // with everything else. Topic-mode chats only need one chat.get() call ever.
   const chatModeCache = new ChatModeCache();
@@ -221,6 +225,12 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
 
   const channel = createLarkChannel(opts);
   const media = new MediaCache(channel);
+  const persistentQueue = deps.persistentQueue ?? new PersistentQueue();
+  let closing = false;
+  let resolveRestoreGate!: () => void;
+  const restoreGate = new Promise<void>((resolve) => {
+    resolveRestoreGate = resolve;
+  });
 
   // Pending → run handoff: while a run is active on a chat, block its pending
   // queue so messages keep accumulating without flushing. When the run ends,
@@ -228,17 +238,43 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // per chat in flight, no artificial delay before an idle scope starts work.
   const commentQueue = new CommentQueue<CommentEvent>();
 
-  const pending = new PendingQueue(PENDING_FLUSH_DELAY_MS, (scope, batch) => {
+  const pending = new PendingQueue(PENDING_FLUSH_DELAY_MS, (scope, batch, durableId) => {
     const firstMsg = batch[0];
     if (!firstMsg) return;
     pending.block(scope);
     void withTrace({ chatId: firstMsg.chatId }, async () => {
-      log.info('flush', 'start', { scope, batchSize: batch.length });
+      log.info('flush', 'start', { scope, batchSize: batch.length, durableId });
       // Pool slot acquired here, released in finally. Across-the-bridge cap.
       const release = await pool.acquire();
+      let startedRun = false;
+      let unblockDelayMs: number | undefined;
       try {
+        if (closing) {
+          log.warn('flush', 'skip-closing-before-setup', { scope, durableId });
+          return;
+        }
+        if (durableId) {
+          const runningRecord = await persistentQueue.markRunning(durableId);
+          if (!runningRecord) {
+            log.warn('queue', 'persistent-missing-before-run', { scope, durableId });
+            return;
+          }
+          log.info('queue', 'persistent-running', { scope, durableId });
+        }
+        if (closing) {
+          log.warn('flush', 'skip-closing-after-mark-running', { scope, durableId });
+          return;
+        }
         const mode = await chatModeCache.resolve(channel, firstMsg.chatId);
+        if (closing) {
+          log.warn('flush', 'skip-closing-after-chat-mode', { scope, durableId });
+          return;
+        }
         const resolved = await resolveAgentForScope(scope, agentDeps);
+        if (closing) {
+          log.warn('flush', 'skip-closing-before-run', { scope, durableId });
+          return;
+        }
         await runAgentBatch({
           channel,
           agent: resolved.agent,
@@ -252,13 +288,62 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           mode,
           runHistory,
           pending,
+          persistentQueue,
+          durableId,
           autoRetryKeys,
+          onRunRegistered: () => {
+            startedRun = true;
+          },
+          isClosing: () => closing,
         });
       } catch (err) {
         log.fail('flush', err);
+        if (durableId && !startedRun) {
+          let queuedRecord;
+          try {
+            queuedRecord = await persistentQueue.markQueued(durableId);
+          } catch (markErr) {
+            log.fail('queue', markErr, { step: 'persistent-mark-queued-after-setup-failure', scope, durableId });
+            queuedRecord = undefined;
+          }
+          const durableStillExists = queuedRecord
+            ? true
+            : await persistentQueue.has(durableId).catch((hasErr) => {
+              log.fail('queue', hasErr, { step: 'persistent-has-after-setup-failure', scope, durableId });
+              return true;
+            });
+          if (durableStillExists && !queuedRecord) {
+            await persistentQueue.markQueued(durableId).then(
+              () => {
+                log.info('queue', 'persistent-mark-queued-recovered-after-setup-failure', { scope, durableId });
+              },
+              (markErr) => {
+                log.fail('queue', markErr, { step: 'persistent-mark-queued-retry-after-setup-failure', scope, durableId });
+              },
+            );
+          }
+          if (durableStillExists) {
+            pending.pushBatch(scope, batch, { durableId, front: true });
+            unblockDelayMs = SETUP_RETRY_DELAY_MS;
+            log.warn('queue', queuedRecord ? 'persistent-requeued-after-setup-failure' : 'persistent-requeued-after-mark-queued-failure', {
+              scope,
+              durableId,
+              batchSize: batch.length,
+              delayMs: SETUP_RETRY_DELAY_MS,
+            });
+          } else {
+            log.warn('queue', 'persistent-requeue-skipped-after-setup-failure', { scope, durableId });
+          }
+        }
       } finally {
         release();
-        pending.unblock(scope);
+        if (unblockDelayMs !== undefined) {
+          pending.unblockAfter(scope, unblockDelayMs);
+        } else if (!startedRun) {
+          pending.unblock(scope);
+        } else {
+          pending.unblock(scope);
+        }
         log.info('flush', 'end');
       }
     });
@@ -269,8 +354,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
 
   channel.on({
     message: async (msg) => {
-      await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, () =>
-        intakeMessage({
+      await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
+        await restoreGate;
+        await intakeMessage({
           channel,
           agent: startupAgent,
           agentRegistry,
@@ -279,18 +365,20 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           workspaces,
           activeRuns,
           pending,
+          persistentQueue,
           msg,
           controls,
           runHistory,
           chatModeCache,
-        }),
-      ).catch((err) => log.fail('intake', err));
+        });
+      }).catch((err) => log.fail('intake', err));
     },
     reject: (evt) => {
       log.info('intake', 'reject', { chatId: evt.chatId, reason: evt.reason });
     },
     cardAction: async (evt) => {
       await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
+        await restoreGate;
         await handleCardAction({
           channel,
           evt,
@@ -302,6 +390,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           backendStore,
           controls,
           pending,
+          persistentQueue,
           runHistory,
           chatModeCache,
         });
@@ -358,6 +447,13 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   });
 
   await channel.connect();
+  try {
+    await restorePersistentQueue(persistentQueue, pending);
+  } catch (err) {
+    log.fail('queue', err, { step: 'persistent-restore' });
+  } finally {
+    resolveRestoreGate();
+  }
 
   const identity = channel.botIdentity;
   log.info('ws', 'connected', {
@@ -385,14 +481,54 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   return {
     channel,
     disconnect: async () => {
+      closing = true;
       keepalive.stop();
+      await activeRuns.stopAll('lifecycle');
       commentQueue.cancelAll();
       pending.cancelAll();
       await channel.disconnect();
-      await activeRuns.stopAll();
       await Promise.allSettled([sessions.flush(), workspaces.flush()]);
     },
   };
+}
+
+export async function restorePersistentQueue(persistentQueue: PersistentQueue, pending: PendingQueue): Promise<number> {
+  const records = await persistentQueue.recoverable();
+  let restored = 0;
+  for (const record of records) {
+    if (record.messages.length === 0) continue;
+    let restoredRecord = record;
+    if (record.state === 'running') {
+      try {
+        const queuedRecord = await persistentQueue.markQueued(record.id);
+        if (!queuedRecord) {
+          log.warn('queue', 'persistent-restore-skip-missing-running', {
+            scope: record.scope,
+            durableId: record.id,
+          });
+          continue;
+        }
+        restoredRecord = queuedRecord;
+        log.info('queue', 'persistent-restore-mark-queued', {
+          scope: restoredRecord.scope,
+          durableId: restoredRecord.id,
+        });
+      } catch (err) {
+        log.fail('queue', err, { step: 'persistent-restore-mark-queued', scope: record.scope, durableId: record.id });
+      }
+    }
+    const size = pending.pushBatch(restoredRecord.scope, restoredRecord.messages, { durableId: restoredRecord.id });
+    restored++;
+    log.info('queue', 'persistent-restored', {
+      scope: restoredRecord.scope,
+      durableId: restoredRecord.id,
+      state: restoredRecord.state,
+      previousState: record.state,
+      batchSize: restoredRecord.messages.length,
+      queueSize: size,
+    });
+  }
+  return restored;
 }
 
 interface IntakeDeps {
@@ -404,6 +540,7 @@ interface IntakeDeps {
   workspaces: WorkspaceStore;
   activeRuns: ActiveRuns;
   pending: PendingQueue;
+  persistentQueue: PersistentQueue;
   runHistory: RunHistory;
   msg: NormalizedMessage;
   controls: Controls;
@@ -420,6 +557,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     workspaces,
     activeRuns,
     pending,
+    persistentQueue,
     runHistory,
     msg,
     controls,
@@ -482,15 +620,25 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const resolved = await resolveAgentForScope(scope, { agent, agentRegistry, backendStore });
 
   if (isStopCommandText(msg.content)) {
-    const result = interruptScopeNow(activeRuns, pending, scope);
-    log.info('intake', 'immediate-stop', {
-      scope,
-      interrupted: result.interrupted,
-      droppedPending: result.droppedPending,
-    });
+    try {
+      const result = await interruptScopeNow(activeRuns, pending, persistentQueue, scope);
+      log.info('intake', 'immediate-stop', {
+        scope,
+        interrupted: result.interrupted,
+        droppedPending: result.droppedPending,
+        droppedPersistent: result.droppedPersistent,
+      });
+    } catch (err) {
+      log.fail('intake', err, { step: 'immediate-stop', scope });
+      await channel.send(msg.chatId, { markdown: '❌ 终止任务失败：持久化队列清理失败，已保留运行中任务和内存队列以避免状态不一致。请检查日志后重试 `/stop`。' }, {
+        replyTo: msg.messageId,
+        ...(msg.threadId ? { replyInThread: true as const } : {}),
+      }).catch((sendErr) => log.fail('intake', sendErr, { step: 'immediate-stop-reply', scope }));
+    }
     return;
   }
 
+  const parsedCommand = parseCommandText(msg.content);
   const handled = await tryHandleCommand({
     channel,
     msg,
@@ -504,27 +652,80 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     backendKey: resolved.backendKey,
     activeRuns,
     pending,
+    persistentQueue,
     runHistory,
     controls,
+    cancelQueuedWork: async (targetScope = scope) => {
+      const droppedPersistent = await persistentQueue.cancelScope(targetScope);
+      const dropped = pending.cancel(targetScope);
+      log.info('intake', 'command-drop-pending', {
+        scope: targetScope,
+        cmd: parsedCommand?.cmd,
+        droppedPending: dropped.length,
+        droppedPersistent,
+      });
+    },
+    cancelQueuedOnlyWork: async (targetScope = scope) => {
+      const droppedIds = await persistentQueue.cancelQueuedScopeIds(targetScope);
+      const dropped = pending.cancel(targetScope, {
+        keepBlocked: activeRuns.has(targetScope),
+        durableIds: new Set(droppedIds),
+      });
+      log.info('intake', 'command-drop-pending-queued-only', {
+        scope: targetScope,
+        cmd: parsedCommand?.cmd,
+        droppedPending: dropped.length,
+        droppedPersistent: droppedIds.length,
+      });
+    },
+    cancelPendingQueuedWork: async (targetScope = scope) => {
+      const droppedIds = await persistentQueue.cancelQueuedScopeIds(targetScope);
+      const dropped = pending.cancel(targetScope, {
+        keepBlocked: activeRuns.has(targetScope),
+        durableIds: new Set(droppedIds),
+      });
+      log.info('intake', 'command-drop-pending', {
+        scope: targetScope,
+        cmd: parsedCommand?.cmd,
+        droppedPending: dropped.length,
+        droppedPersistent: droppedIds.length,
+      });
+    },
   });
   if (handled) {
-    const dropped = pending.cancel(scope);
-    log.info('intake', 'command', { scope, droppedPending: dropped.length });
+    log.info('intake', 'command', { scope });
     return;
   }
 
-  const size = pending.push(scope, msg);
-  log.info('intake', 'queued', { scope, queueSize: size, flushDelayMs: PENDING_FLUSH_DELAY_MS });
+  let record;
+  try {
+    record = await persistentQueue.enqueue(scope, [msg]);
+  } catch (err) {
+    log.fail('intake', err, { step: 'persistent-enqueue', scope, messageId: msg.messageId });
+    try {
+      await channel.send(msg.chatId, { markdown: '❌ 队列持久化失败，消息未入队。请稍后重试。' }, {
+        replyTo: msg.messageId,
+        ...(msg.threadId ? { replyInThread: true as const } : {}),
+      });
+    } catch (sendErr) {
+      log.fail('intake', sendErr, { step: 'persistent-enqueue-reply', scope, messageId: msg.messageId });
+    }
+    return;
+  }
+  const size = pending.push(scope, msg, { durableId: record.id });
+  log.info('intake', 'queued', { scope, queueSize: size, flushDelayMs: PENDING_FLUSH_DELAY_MS, durableId: record.id });
 }
 
-export function interruptScopeNow(
+export async function interruptScopeNow(
   activeRuns: ActiveRuns,
   pending: PendingQueue,
+  persistentQueue: PersistentQueue,
   scope: string,
-): { interrupted: boolean; droppedPending: number } {
+): Promise<{ interrupted: boolean; droppedPending: number; droppedPersistent: number }> {
+  const droppedPersistent = await persistentQueue.cancelScope(scope);
   const interrupted = activeRuns.interrupt(scope);
   const dropped = pending.cancel(scope);
-  return { interrupted, droppedPending: dropped.length };
+  return { interrupted, droppedPending: dropped.length, droppedPersistent };
 }
 
 export function summarizeBatchForHistory(batch: NormalizedMessage[]): string {
@@ -550,7 +751,11 @@ interface RunBatchDeps {
   mode: ChatMode;
   runHistory: RunHistory;
   pending: PendingQueue;
+  persistentQueue: PersistentQueue;
+  durableId?: string;
   autoRetryKeys: AutoRetryKeys;
+  onRunRegistered?: () => void;
+  isClosing?: () => boolean;
 }
 
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
@@ -567,7 +772,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     mode,
     runHistory,
     pending,
+    persistentQueue,
+    durableId,
     autoRetryKeys,
+    onRunRegistered,
+    isClosing,
   } = deps;
   if (batch.length === 0) return;
   const firstMsg = batch[0];
@@ -586,6 +795,19 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   log.info('run', 'timeline', { runId: historyEntry.runId, step: 'intake', batchSize: batch.length });
   log.info('run', 'timeline', { runId: historyEntry.runId, step: 'queue', scope, batchSize: batch.length });
 
+  const handle = activeRuns.registerPreRun(scope);
+  const shouldPreserveBeforeAgentRun = (step: string): boolean => {
+    if (!handle.interrupted && isClosing?.()) {
+      handle.interrupted = true;
+      handle.interruptReason = 'lifecycle';
+    }
+    if (!handle.interrupted) return false;
+    log.warn('queue', 'persistent-interrupted-before-agent-run', { scope, durableId, step, reason: handle.interruptReason });
+    runHistory.finish(historyEntry.runId, 'interrupted', '任务已取消');
+    activeRuns.unregister(scope, handle);
+    return true;
+  };
+
   const resourceItems = batch.flatMap((m) =>
     m.resources.map((r) => ({ messageId: m.messageId, resource: r })),
   );
@@ -600,6 +822,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       return [];
     });
   }
+  if (shouldPreserveBeforeAgentRun('media')) return;
   if (attachments.length > 0) {
     log.info('media', 'resolved', { count: attachments.length });
   }
@@ -630,6 +853,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       log.fail('quote', err, { messageId: targetId, fallback: 'skip-quote' });
       return undefined;
     });
+    if (shouldPreserveBeforeAgentRun('quote')) return;
     if (q) {
       quotes.push(q);
       log.info('quote', 'fetched', {
@@ -674,16 +898,34 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       log.fail('session', err, { cwd, sessionKey, fallback: 'run-without-precreated-session' });
       return undefined;
     });
+    if (shouldPreserveBeforeAgentRun('session')) return;
     if (resumeFrom) {
       log.info('session', 'resume-precreate', { sessionId: resumeFrom, cwd, sessionKey });
     }
   }
+  if (shouldPreserveBeforeAgentRun('session')) return;
   log.info('run', 'timeline', {
     runId: historyEntry.runId,
     step: 'session',
     sessionId: resumeFrom,
     cwd,
   });
+
+  if (durableId) {
+    let durableExists = true;
+    try {
+      durableExists = await persistentQueue.hasStrict(durableId);
+    } catch (err) {
+      log.fail('queue', err, { step: 'persistent-has-before-agent-run', scope, durableId, fallback: 'continue' });
+    }
+    if (!durableExists) {
+      log.warn('queue', 'persistent-cancelled-before-agent-run', { scope, durableId });
+      runHistory.finish(historyEntry.runId, 'interrupted', '任务已取消');
+      activeRuns.unregister(scope, handle);
+      return;
+    }
+  }
+  if (shouldPreserveBeforeAgentRun('before-agent-run')) return;
 
   const agentStopGraceMs = getAgentStopGraceMs(controls.cfg);
   const run = agent.run({
@@ -693,7 +935,29 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     poolKey: scope,
     stopGraceMs: agentStopGraceMs,
   });
-  const handle = activeRuns.register(scope, run);
+  activeRuns.attachRun(scope, handle, run);
+  onRunRegistered?.();
+  if (durableId) {
+    let durableExists = true;
+    try {
+      durableExists = await persistentQueue.hasStrict(durableId);
+    } catch (err) {
+      log.fail('queue', err, { step: 'persistent-has-after-agent-register', scope, durableId, fallback: 'continue' });
+    }
+    if (!durableExists) {
+      log.warn('queue', 'persistent-cancelled-after-agent-register', { scope, durableId });
+      handle.interrupted = true;
+      await run.stop().catch((err) => {
+        log.fail('queue', err, { step: 'stop-after-persistent-cancel', scope, durableId });
+      });
+      await persistentQueue.complete(durableId).catch((err) => {
+        log.fail('queue', err, { step: 'complete-after-persistent-cancel', scope, durableId });
+      });
+      runHistory.finish(historyEntry.runId, 'interrupted', '任务已取消');
+      activeRuns.unregister(scope, handle);
+      return;
+    }
+  }
   log.info('run', 'timeline', {
     runId: historyEntry.runId,
     step: 'agent',
@@ -908,10 +1172,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       });
     } else if (finalState.terminal === 'running') {
       handle.interrupted = true;
-      finalState = reduce(finalState, {
-        type: 'error',
-        message: `卡片更新失败，已降级为普通消息：${message}`,
-      });
+      finalState = handle.interruptReason === 'lifecycle'
+        ? markInterrupted(finalState)
+        : reduce(finalState, {
+          type: 'error',
+          message: `卡片更新失败，已降级为普通消息：${message}`,
+        });
       await run.stop().catch((stopErr) => {
         log.fail('stream', stopErr, { step: 'stop-after-update-failure' });
       });
@@ -939,17 +1205,39 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       terminal: finalState.terminal,
       errorMsg: finalState.errorMsg,
     });
-    maybeEnqueueAutoRetryForOpaqueSdkError({
-      scope,
-      batch,
-      finalState,
-      handleInterrupted: handle.interrupted,
-      pending,
-      autoRetryKeys,
-      sessions,
-      sessionKey,
-    });
-    activeRuns.unregister(scope, run);
+    const preserveDurable = handle.interruptReason === 'lifecycle'
+      && (
+        finalState.terminal === 'interrupted'
+        || finalState.terminal === 'running'
+        || handle.terminalAfterLifecycleInterrupt === true
+      );
+    let durableCompleted = !durableId || finalState.terminal === 'running' || preserveDurable;
+    if (durableId && finalState.terminal !== 'running' && !preserveDurable) {
+      await persistentQueue.complete(durableId).then(
+        () => {
+          durableCompleted = true;
+        },
+        (err) => {
+          log.fail('queue', err, { step: 'persistent-complete', scope, durableId });
+        },
+      );
+    }
+    if (durableCompleted) {
+      await maybeEnqueueAutoRetryForOpaqueSdkError({
+        scope,
+        batch,
+        finalState,
+        handleInterrupted: handle.interrupted,
+        pending,
+        persistentQueue,
+        autoRetryKeys,
+        sessions,
+        sessionKey,
+      }).catch((err) => {
+        log.fail('run', err, { step: 'auto-retry-opaque-sdk-error', scope });
+      });
+    }
+    activeRuns.unregister(scope, handle);
     if (reactionId) {
       await removeReaction(channel, lastMsg.messageId, reactionId);
     }
@@ -1103,17 +1391,18 @@ function withMarkdownRefreshCutoffNote(markdown: string): string {
   return `${markdown.trimEnd()}\n\n${MARKDOWN_REFRESH_CUTOFF_NOTE}`;
 }
 
-export function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
+export async function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
   scope: string;
   batch: NormalizedMessage[];
   finalState: RunState;
   handleInterrupted: boolean;
   pending: PendingQueue;
+  persistentQueue?: PersistentQueue;
   autoRetryKeys: AutoRetryKeys;
   sessions?: SessionStore;
   sessionKey?: string;
-}): boolean {
-  const { scope, batch, finalState, handleInterrupted, pending, autoRetryKeys, sessions, sessionKey } = opts;
+}): Promise<boolean> {
+  const { scope, batch, finalState, handleInterrupted, pending, persistentQueue, autoRetryKeys, sessions, sessionKey } = opts;
   const key = autoRetryKey(scope, batch);
   if (
     !shouldAutoRetryOpaqueSdkError(finalState, handleInterrupted, pending.queuedSize(scope)) ||
@@ -1122,19 +1411,28 @@ export function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
     return false;
   }
 
-  rememberAutoRetryKey(autoRetryKeys, key);
+  const retryBatch = batch.map((msg) => ({ ...msg }));
+  let record;
+  if (persistentQueue) {
+    try {
+      record = await persistentQueue.enqueue(scope, retryBatch);
+    } catch (err) {
+      log.fail('run', err, { step: 'auto-retry-persistent-enqueue', scope, runId: finalState.runId });
+      return false;
+    }
+  }
   let clearedSessionKey: string | undefined;
   if (sessions && sessionKey === 'cursor:sdk') {
     sessions.clear(scope, sessionKey);
     clearedSessionKey = sessionKey;
   }
-  for (const msg of batch) {
-    pending.push(scope, { ...msg });
-  }
+  pending.pushBatch(scope, retryBatch, record ? { durableId: record.id } : undefined);
+  rememberAutoRetryKey(autoRetryKeys, key);
   log.warn('run', 'auto-retry-opaque-sdk-error', {
     scope,
     batchSize: batch.length,
     runId: finalState.runId,
+    durableId: record?.id,
     errorMsg: finalState.errorMsg,
     clearedSessionKey,
   });
@@ -1374,7 +1672,13 @@ export async function processAgentStream(
 
   try {
     for await (const evt of handle.run.events) {
-      if (handle.interrupted) break;
+      const terminalEvent = evt.type === 'done' || evt.type === 'error';
+      const interruptedBeforeTerminal = terminalEvent && handle.interrupted;
+      const lifecycleInterruptedBeforeTerminal = interruptedBeforeTerminal
+        && handle.interruptReason === 'lifecycle';
+      if (handle.interrupted && !terminalEvent) break;
+      if (interruptedBeforeTerminal && !lifecycleInterruptedBeforeTerminal) break;
+      if (evt.type === 'error' && interruptedBeforeTerminal) break;
 
       // Track tool flight before re-arming the idle timer so the arm step
       // sees the correct set size. tool_use opens a window; tool_result
@@ -1419,6 +1723,9 @@ export async function processAgentStream(
       const prevTerminal = state.terminal;
       const prevFooter = state.footer;
       state = reduce(state, evt);
+      if (lifecycleInterruptedBeforeTerminal && evt.type === 'error' && state.terminal !== 'running') {
+        handle.terminalAfterLifecycleInterrupt = true;
+      }
       if (state.footer !== prevFooter || state.terminal !== prevTerminal) {
         log.info('card', 'transition', { footer: state.footer, terminal: state.terminal });
       }
@@ -1431,7 +1738,10 @@ export async function processAgentStream(
   } catch (err) {
     if (err instanceof FlushFailure) throw err.cause;
     log.fail('agent-stream', err);
-    if (state.terminal === 'running') {
+    if (state.terminal === 'running' && handle.interrupted && handle.interruptReason === 'lifecycle') {
+      handle.terminalAfterLifecycleInterrupt = true;
+      state = markInterrupted(state);
+    } else if (state.terminal === 'running') {
       state = reduce(state, { type: 'error', message: formatAgentStreamError(err) });
     }
   } finally {
@@ -1451,6 +1761,9 @@ export async function processAgentStream(
     } else {
       state = finalizeIfRunning(state);
     }
+  }
+  if (state.terminal === 'done' && idleFired && idleTimeoutMs !== undefined) {
+    state = markIdleTimeout(state, Math.round(idleTimeoutMs / 60_000));
   }
   log.info('card', 'final', { terminal: state.terminal, interrupted: handle.interrupted });
   try {

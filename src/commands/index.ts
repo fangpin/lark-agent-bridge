@@ -8,6 +8,7 @@ import type { AgentAdapter } from '../agent/types';
 import type { BackendStore } from '../backend/store';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { PendingQueue } from '../bot/pending-queue';
+import type { PersistentQueue } from '../bot/persistent-queue';
 import type { RunHistory } from '../bot/run-history';
 import {
   accountCurrentCard,
@@ -79,6 +80,9 @@ export interface Controls {
 export interface CommandContext {
   channel: LarkChannel;
   msg: NormalizedMessage;
+  cancelQueuedWork?: (scope?: string) => Promise<void>;
+  cancelQueuedOnlyWork?: (scope?: string) => Promise<void>;
+  cancelPendingQueuedWork?: (scope?: string) => Promise<void>;
   /**
    * Session scope string. For p2p / regular group it equals `msg.chatId`;
    * for topic groups it's `${chatId}:${threadId}` (so each topic gets its
@@ -99,6 +103,7 @@ export interface CommandContext {
   backendKey: string;
   activeRuns: ActiveRuns;
   pending?: PendingQueue;
+  persistentQueue?: PersistentQueue;
   runHistory?: RunHistory;
   controls: Controls;
   /** Set when invoked from a CardKit 2.0 form submit. Keys are input `name`s. */
@@ -270,6 +275,51 @@ async function replyCard(ctx: CommandContext, card: object): Promise<void> {
   }
 }
 
+async function cancelQueuedWork(ctx: CommandContext, scope = ctx.scope): Promise<void> {
+  await ctx.cancelQueuedWork?.(scope);
+}
+
+async function cancelPendingQueuedWork(ctx: CommandContext, scope = ctx.scope): Promise<void> {
+  await (ctx.cancelPendingQueuedWork ?? ctx.cancelQueuedOnlyWork ?? ctx.cancelQueuedWork)?.(scope);
+}
+
+async function cancelQueuedOnlyWork(ctx: CommandContext, scope = ctx.scope): Promise<void> {
+  await (ctx.cancelQueuedOnlyWork ?? ctx.cancelPendingQueuedWork ?? ctx.cancelQueuedWork)?.(scope);
+}
+
+async function cancelQueuedWorkBeforeMutation(ctx: CommandContext, scope = ctx.scope): Promise<boolean> {
+  try {
+    await cancelQueuedWork(ctx, scope);
+    return true;
+  } catch (err) {
+    log.fail('command', err, { step: 'cancel-queued-work', scope });
+    await reply(ctx, `❌ 清理已排队任务失败：${err instanceof Error ? err.message : String(err)}\n状态未变更，请处理后重试。`);
+    return false;
+  }
+}
+
+async function cancelPendingQueuedWorkBeforeMutation(ctx: CommandContext, scope = ctx.scope): Promise<boolean> {
+  try {
+    await cancelPendingQueuedWork(ctx, scope);
+    return true;
+  } catch (err) {
+    log.fail('command', err, { step: 'cancel-pending-queued-work', scope });
+    await reply(ctx, `❌ 清理已排队任务失败：${err instanceof Error ? err.message : String(err)}\n状态未变更，请处理后重试。`);
+    return false;
+  }
+}
+
+async function cancelQueuedOnlyWorkBeforeMutation(ctx: CommandContext, scope = ctx.scope): Promise<boolean> {
+  try {
+    await cancelQueuedOnlyWork(ctx, scope);
+    return true;
+  } catch (err) {
+    log.fail('command', err, { step: 'cancel-queued-only-work', scope });
+    await reply(ctx, `❌ 清理已排队任务失败：${err instanceof Error ? err.message : String(err)}\n状态未变更，请处理后重试。`);
+    return false;
+  }
+}
+
 interface CommandStatusCardOpts {
   title: string;
   status: 'success' | 'warning' | 'info' | 'error';
@@ -368,6 +418,7 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
     return handleNewChat(rawName, ctx);
   }
 
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
   const wasRunning = ctx.activeRuns.interrupt(ctx.scope);
   await ctx.agent.evictScope?.(ctx.scope, workspaceCwd(ctx));
   ctx.sessions.clear(ctx.scope, ctx.agent.sessionKey);
@@ -512,6 +563,7 @@ async function handleCd(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, `路径不存在：\`${absolute}\``);
     return;
   }
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
   ctx.activeRuns.interrupt(ctx.scope);
   await ctx.agent.evictScope?.(ctx.scope, workspaceCwd(ctx));
   ctx.workspaces.setCwd(workspaceScope(ctx), absolute);
@@ -571,6 +623,7 @@ async function handleWsUse(name: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, `未找到工作空间：\`${name}\``);
     return;
   }
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
   ctx.activeRuns.interrupt(ctx.scope);
   await ctx.agent.evictScope?.(ctx.scope, workspaceCwd(ctx));
   ctx.workspaces.setCwd(workspaceScope(ctx), cwd);
@@ -624,6 +677,7 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
 
 async function applyResume(sessionId: string, ctx: CommandContext): Promise<void> {
   const cwd = effectiveCwd(ctx);
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
   ctx.activeRuns.interrupt(ctx.scope);
   ctx.sessions.set(ctx.scope, ctx.agent.sessionKey, sessionId, cwd);
   await reply(
@@ -680,6 +734,7 @@ async function handleBackend(args: string, ctx: CommandContext): Promise<void> {
   }
 
   const nextAgent = await ctx.agentRegistry.get(nextKey);
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
   ctx.activeRuns.interrupt(ctx.scope);
   await ctx.agent.evictScope?.(ctx.scope, workspaceCwd(ctx));
   if (requested === 'default') ctx.backendStore.clear(ctx.scope);
@@ -755,6 +810,7 @@ async function handleDocBindCurrentChat(docInput: string, ctx: CommandContext): 
   const previousAgent = await ctx.agentRegistry.getOrDefault(previousKey);
   const cwd = currentSession.cwd ?? effectiveCwd(ctx);
 
+  if (!await cancelQueuedWorkBeforeMutation(ctx, scope)) return;
   ctx.activeRuns.interrupt(scope);
   await previousAgent.evictScope?.(scope, cwd);
   if (currentBackend) ctx.backendStore.set(scope, backendKey);
@@ -805,6 +861,7 @@ async function handleDocBindExplicit(parts: string[], ctx: CommandContext): Prom
   const nextAgent = await ctx.agentRegistry.get(backendKey);
   const cwd = ctx.workspaces.cwdFor(scope) ?? homedir();
 
+  if (!await cancelQueuedWorkBeforeMutation(ctx, scope)) return;
   ctx.activeRuns.interrupt(scope);
   await previousAgent.evictScope?.(scope, cwd);
   if (backendInput === 'default') ctx.backendStore.clear(scope);
@@ -874,6 +931,7 @@ async function handleDocClear(parts: string[], ctx: CommandContext): Promise<voi
   const cwd = ctx.workspaces.cwdFor(scope) ?? homedir();
   const previousKey = ctx.backendStore?.get(scope);
   const previousAgent = ctx.agentRegistry ? await ctx.agentRegistry.getOrDefault(previousKey) : ctx.agent;
+  if (!await cancelQueuedWorkBeforeMutation(ctx, scope)) return;
   ctx.activeRuns.interrupt(scope);
   await previousAgent.evictScope?.(scope, cwd);
   const clearedBackend = ctx.backendStore?.clear(scope) ?? false;
@@ -912,14 +970,31 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
 }
 
 async function handleStop(_args: string, ctx: CommandContext): Promise<void> {
+  let droppedPersistent = 0;
+  try {
+    droppedPersistent = await ctx.persistentQueue?.cancelScope(ctx.scope) ?? 0;
+  } catch (err) {
+    log.fail('command', err, { step: 'stop-persistent-cancel', scope: ctx.scope });
+    await replyCard(
+      ctx,
+      commandStatusCard({
+        title: '终止任务失败',
+        status: 'error',
+        lines: ['持久化队列清理失败，已保留运行中任务和内存队列以避免状态不一致。请检查日志后重试 `/stop`。'],
+      }),
+    );
+    return;
+  }
+
   const ok = ctx.activeRuns.interrupt(ctx.scope);
-  log.info('command', 'stop', { interrupted: ok });
+  const droppedPending = ctx.pending?.cancel(ctx.scope).length ?? 0;
+  log.info('command', 'stop', { interrupted: ok, droppedPending, droppedPersistent });
   await replyCard(
     ctx,
     commandStatusCard({
-      title: ok ? '已请求终止当前任务' : '当前没有运行中的任务',
-      status: ok ? 'warning' : 'info',
-      lines: ok
+      title: ok || droppedPending > 0 || droppedPersistent > 0 ? '已请求终止当前任务' : '当前没有运行中的任务',
+      status: ok || droppedPending > 0 || droppedPersistent > 0 ? 'warning' : 'info',
+      lines: ok || droppedPending > 0 || droppedPersistent > 0
         ? ['运行卡片会更新为“已被中断”。如果卡片没有及时变化，可用 `/status` 或 `/workers` 复查。']
         : ['没有找到当前会话正在执行的 agent run。'],
     }),
@@ -963,6 +1038,7 @@ async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
   }
 
   if (trimmed === 'default') {
+    if (!await cancelPendingQueuedWorkBeforeMutation(ctx)) return;
     const cleared = ctx.sessions.clearIdleTimeoutOverride(ctx.scope);
     log.info('command', 'timeout-clear', { scope: ctx.scope, cleared });
     await replyCard(
@@ -977,6 +1053,7 @@ async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
   }
 
   if (trimmed === 'off' || trimmed === '0') {
+    if (!await cancelPendingQueuedWorkBeforeMutation(ctx)) return;
     ctx.sessions.setIdleTimeoutMinutes(ctx.scope, 0);
     log.info('command', 'timeout-off', { scope: ctx.scope });
     await replyCard(
@@ -995,6 +1072,7 @@ async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, '❌ 用法:`/timeout <1-120>` / `/timeout off` / `/timeout default`');
     return;
   }
+  if (!await cancelPendingQueuedWorkBeforeMutation(ctx)) return;
   ctx.sessions.setIdleTimeoutMinutes(ctx.scope, n);
   log.info('command', 'timeout-set', { scope: ctx.scope, minutes: n });
   await replyCard(
@@ -1067,7 +1145,7 @@ async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, '用法：`/retry <run-id>`，或点击失败卡片上的重试按钮。');
     return;
   }
-  if (!ctx.pending || !ctx.runHistory) {
+  if (!ctx.pending || !ctx.persistentQueue || !ctx.runHistory) {
     await reply(ctx, '当前运行环境不支持重试队列。');
     return;
   }
@@ -1093,11 +1171,28 @@ async function handleRetry(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, '这个任务属于另一个 agent 后端，不能用当前 agent 重试。');
     return;
   }
-  ctx.activeRuns.interrupt(ctx.scope);
-  let size = 0;
-  for (const msg of entry.batch) {
-    size = ctx.pending.push(ctx.scope, msg);
+  const retryBatch = entry.batch.map((msg) => ({ ...msg }));
+  let record;
+  try {
+    record = await ctx.persistentQueue.enqueue(ctx.scope, retryBatch);
+  } catch (err) {
+    log.fail('command', err, { cmd: '/retry', step: 'persistent-enqueue', scope: ctx.scope, runId });
+    await reply(ctx, `重试排队失败：${err instanceof Error ? err.message : String(err)}`);
+    return;
   }
+  try {
+    await ctx.persistentQueue.cancelScopeExcept(ctx.scope, new Set([record.id]));
+  } catch (err) {
+    log.fail('command', err, { cmd: '/retry', step: 'persistent-cancel-active', scope: ctx.scope, runId, durableId: record.id });
+    await ctx.persistentQueue.complete(record.id).catch((completeErr) => {
+      log.fail('command', completeErr, { cmd: '/retry', step: 'persistent-remove-failed-retry', scope: ctx.scope, runId, durableId: record.id });
+    });
+    await reply(ctx, `清理已排队任务失败，当前运行未停止：${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  ctx.pending.cancel(ctx.scope);
+  ctx.activeRuns.interrupt(ctx.scope);
+  const size = ctx.pending.pushBatch(ctx.scope, retryBatch, { durableId: record.id });
   await reply(ctx, `已重新排队上次任务（${entry.batch.length} 条消息，当前队列 ${size}）。`);
 }
 
@@ -1386,6 +1481,8 @@ async function handleClear(args: string, ctx: CommandContext): Promise<void> {
     force,
   };
 
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
+
   let interrupted = false;
   let historyPaths: string[] = [];
   try {
@@ -1404,7 +1501,6 @@ async function handleClear(args: string, ctx: CommandContext): Promise<void> {
   }
 
   await reply(ctx, formatClearSuccess(target, force, interrupted, historyPaths));
-
 }
 
 async function handleExit(args: string, ctx: CommandContext): Promise<void> {
@@ -1592,6 +1688,8 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
     chatMode: ctx.chatMode,
   });
   // Killing any in-flight run on this chat — /doctor is a "I'm stuck" call.
+  // Clean durable + memory queues first so interrupted runs cannot recover.
+  if (!await cancelQueuedWorkBeforeMutation(ctx)) return;
   ctx.activeRuns.interrupt(ctx.scope);
 
   const rawLogs = await readRecentLogs({ maxBytes: 60_000 });
@@ -1825,6 +1923,11 @@ async function submitAccount(ctx: CommandContext): Promise<void> {
       return;
     }
 
+    if (!await cancelQueuedOnlyWorkBeforeMutation(ctx)) {
+      await finishFailure('清理已排队任务失败，凭据未保存；请检查日志后重试。');
+      return;
+    }
+
     // Encrypted-at-rest path: store the plaintext secret in the AES keystore,
     // and write config.json with an exec-provider SecretRef instead of the
     // raw secret. lark-cli's `config bind --source lark-channel` reads the
@@ -2026,6 +2129,13 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
         await new Promise<void>((r) => setTimeout(r, FORM_SETTLE_MS - elapsed));
       }
     };
+
+    if (!await cancelQueuedOnlyWorkBeforeMutation(ctx)) {
+      await waitForSettle();
+      await updateManagedCard(channel, formMsgId, configCancelledCard()).catch(() => {});
+      forgetManagedCard(formMsgId);
+      return;
+    }
 
     // In-place mutation — the cfg object is shared by reference with
     // runAgentBatch's reads, so this takes effect on the next message.

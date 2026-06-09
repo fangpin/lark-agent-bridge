@@ -10,6 +10,7 @@ export const paths = {
   sessionsFile: join(appDir, 'sessions.json'),
   workspacesFile: join(appDir, 'workspaces.json'),
   processesFile: join(appDir, 'processes.json'),
+  persistentQueueFile: join(appDir, 'queue.json'),
   secretsFile: join(appDir, 'secrets.enc'),
   keystoreSaltFile: join(appDir, '.keystore.salt'),
   /**
