@@ -79,6 +79,8 @@ function summarizeInput(name: string, input: unknown): string {
       return pick('url');
     case 'web_search':
       return pick('query', 60) || pick('search_term', 60);
+    case 'skill':
+      return pick('skill') || pick('name');
     case 'agent':
     case 'task':
       return pick('description') || pick('subagent_type');
@@ -169,6 +171,7 @@ function canonicalToolName(name: string): string {
   if (n === 'notebookedit' || n === 'editnotebook') return 'notebook_edit';
   if (n === 'websearch') return 'web_search';
   if (n === 'webfetch') return 'web_fetch';
+  if (n === 'skill') return 'skill';
   if (n === 'agent' || n === 'task' || n === 'subagent') return 'agent';
   return name.toLowerCase();
 }

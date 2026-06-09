@@ -66,6 +66,18 @@ describe('ensureResumeSession', () => {
     expect(store.resumeFor('scope-3', '/tmp/project', 'cursor:sdk')).toBe('sess-new');
   });
 
+  test('does not pre-create sessions for agents that support streaming fresh runs', async () => {
+    const store = new SessionStore('/tmp/unused-sessions-3b.json');
+    const prepare = vi.fn(async () => 'sess-new');
+    const agent = mockAgent('cursor:cli', prepare);
+
+    const id = await ensureResumeSession(agent, store, 'scope-3b', '/tmp/project', { precreate: false });
+
+    expect(id).toBeUndefined();
+    expect(prepare).not.toHaveBeenCalled();
+    expect(store.resumeFor('scope-3b', '/tmp/project', 'cursor:cli')).toBeUndefined();
+  });
+
   test('replaces only the active agent session that the agent cannot resume', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const store = new SessionStore('/tmp/unused-sessions-4.json');

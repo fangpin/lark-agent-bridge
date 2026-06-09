@@ -180,6 +180,29 @@ describe('run renderers', () => {
     expect(JSON.stringify(card)).not.toContain('channel.ts');
   });
 
+  test('shows the invoked skill name in Skill tool summaries', () => {
+    const state = reduce(initialState, {
+      type: 'tool_use',
+      id: 'skill-1',
+      name: 'Skill',
+      input: { skill: 'superpowers:systematic-debugging' },
+    });
+    const completed = reduce(state, {
+      type: 'tool_result',
+      id: 'skill-1',
+      output: 'Launching skill: superpowers:systematic-debugging',
+      isError: false,
+    });
+    const done = reduce(completed, { type: 'done' });
+
+    const text = renderText(done);
+    expect(text).toContain('✅ **Skill** — superpowers:systematic-debugging');
+    expect(text).not.toContain('✅ **Skill**\n\n');
+
+    const card = renderCard(done) as { body: { elements: Array<Record<string, unknown>> } };
+    expect(JSON.stringify(card)).toContain('✅ **Skill** — superpowers:systematic-debugging');
+  });
+
   test('caps markdown tool lines to keep streaming cards small', () => {
     let state = initialState;
     for (let i = 0; i < 12; i++) {

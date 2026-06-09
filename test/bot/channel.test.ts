@@ -2784,8 +2784,10 @@ describe('flush durable setup failures', () => {
     });
     const persistentQueue = tempPersistentQueue();
     const runSpy = vi.fn();
+    const baseAgent = fakeAgent(runSpy);
     const agent = {
-      ...fakeAgent(runSpy),
+      ...baseAgent,
+      descriptor: { ...baseAgent.descriptor, supportsWorkers: true },
       async prepareSession() {
         await prepareStarted;
         return 'prepared-session';
@@ -2810,9 +2812,8 @@ describe('flush durable setup failures', () => {
     await persistentQueue.cancelScope('chat-1');
     releasePrepare();
 
-    await vi.waitFor(() => expect(runSpy).not.toHaveBeenCalled());
+    await vi.waitFor(async () => expect(await persistentQueue.recoverable()).toEqual([]));
     expect(runSpy).not.toHaveBeenCalled();
-    expect(await persistentQueue.recoverable()).toEqual([]);
   });
 
   test('keeps older setup-failure retry ahead of newer messages for the same scope', async () => {
@@ -2916,6 +2917,7 @@ describe('opaque Cursor SDK auto retry', () => {
         'sdk run failed (runId=run-87dd74df-deb6-45ca-8862-85847622ee9a, status=error); Cursor returned no error detail',
     };
     const autoRetryKeys = new Set<string>();
+    const clearSession = vi.fn();
 
     await expect(
       maybeEnqueueAutoRetryForOpaqueSdkError({
@@ -2926,12 +2928,15 @@ describe('opaque Cursor SDK auto retry', () => {
         pending,
         autoRetryKeys,
         persistentQueue,
+        sessions: { clear: clearSession } as unknown as SessionStore,
+        sessionKey: 'cursor:sdk',
       }),
     ).resolves.toBe(true);
     expect(pending.queuedSize('chat-1')).toBe(2);
     const records = await persistentQueue.recoverable();
     expect(records).toHaveLength(1);
     expect(records[0]?.messages.map((msg) => msg.messageId)).toEqual(['msg-1', 'msg-2']);
+    expect(clearSession).toHaveBeenCalledWith('chat-1', 'cursor:sdk');
     pending.cancel('chat-1');
     await persistentQueue.cancelScope('chat-1');
 
@@ -2944,6 +2949,8 @@ describe('opaque Cursor SDK auto retry', () => {
         pending,
         autoRetryKeys,
         persistentQueue,
+        sessions: { clear: clearSession } as unknown as SessionStore,
+        sessionKey: 'cursor:sdk',
       }),
     ).resolves.toBe(false);
     expect(pending.queuedSize('chat-1')).toBe(0);

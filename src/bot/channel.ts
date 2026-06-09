@@ -893,7 +893,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     resumeFrom = await withTimeout(
       'session.precreate',
       SESSION_PRECREATE_TIMEOUT_MS,
-      ensureResumeSession(agent, sessions, scope, cwd),
+      ensureResumeSession(agent, sessions, scope, cwd, { precreate: agent.descriptor.supportsWorkers }),
     ).catch((err) => {
       log.fail('session', err, { cwd, sessionKey, fallback: 'run-without-precreated-session' });
       return undefined;
@@ -1231,6 +1231,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         pending,
         persistentQueue,
         autoRetryKeys,
+        sessions,
+        sessionKey,
       }).catch((err) => {
         log.fail('run', err, { step: 'auto-retry-opaque-sdk-error', scope });
       });
@@ -1397,8 +1399,10 @@ export async function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
   pending: PendingQueue;
   persistentQueue?: PersistentQueue;
   autoRetryKeys: AutoRetryKeys;
+  sessions?: SessionStore;
+  sessionKey?: string;
 }): Promise<boolean> {
-  const { scope, batch, finalState, handleInterrupted, pending, persistentQueue, autoRetryKeys } = opts;
+  const { scope, batch, finalState, handleInterrupted, pending, persistentQueue, autoRetryKeys, sessions, sessionKey } = opts;
   const key = autoRetryKey(scope, batch);
   if (
     !shouldAutoRetryOpaqueSdkError(finalState, handleInterrupted, pending.queuedSize(scope)) ||
@@ -1417,6 +1421,11 @@ export async function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
       return false;
     }
   }
+  let clearedSessionKey: string | undefined;
+  if (sessions && sessionKey === 'cursor:sdk') {
+    sessions.clear(scope, sessionKey);
+    clearedSessionKey = sessionKey;
+  }
   pending.pushBatch(scope, retryBatch, record ? { durableId: record.id } : undefined);
   rememberAutoRetryKey(autoRetryKeys, key);
   log.warn('run', 'auto-retry-opaque-sdk-error', {
@@ -1425,6 +1434,7 @@ export async function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
     runId: finalState.runId,
     durableId: record?.id,
     errorMsg: finalState.errorMsg,
+    clearedSessionKey,
   });
   return true;
 }
