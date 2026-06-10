@@ -34,7 +34,7 @@ describe('run renderers', () => {
     expect(card.body.elements.some((element) => element.tag === 'button')).toBe(false);
   });
 
-  test('adds native copy buttons for completed card code blocks', () => {
+  test('adds code resend buttons for completed card code blocks', () => {
     const card = renderCard({
       ...doneState(),
       blocks: [
@@ -50,12 +50,13 @@ describe('run renderers', () => {
       expect.arrayContaining([
         expect.objectContaining({
           tag: 'button',
-          text: { tag: 'plain_text', content: '复制代码 1' },
-          behaviors: [{ type: 'copy', value: { text: 'const answer = 42;' } }],
+          text: { tag: 'plain_text', content: '发送代码 1' },
+          behaviors: [{ type: 'callback', value: { cmd: 'copy.code', code: 'const answer = 42;' } }],
         }),
       ]),
     );
     expect(JSON.stringify(card)).not.toContain('__claude_cb');
+    expect(JSON.stringify(card)).not.toContain('"type":"copy"');
   });
 
   test('shows runtime progress for tracked running cards', () => {
@@ -179,6 +180,32 @@ describe('run renderers', () => {
 
     expect(state.blocks).toEqual([]);
     expect(renderText(state)).toContain('📋 **任务看板** · 0/1 完成 · 当前: 优化卡片展示');
+  });
+
+  test('renders every task board item instead of folding overflow items', () => {
+    const state = reduce(initialState, {
+      type: 'tool_use',
+      id: 'tool-1',
+      name: 'TodoWrite',
+      input: {
+        todos: Array.from({ length: 8 }, (_, index) => ({
+          id: `task-${index + 1}`,
+          content: `任务 ${index + 1}`,
+          status: index === 0 ? 'in_progress' : 'pending',
+        })),
+      },
+    });
+
+    const text = renderText(state);
+    expect(text).toContain('任务 1');
+    expect(text).toContain('任务 8');
+    expect(text).not.toContain('…还有');
+
+    const card = renderCard(state) as { body: { elements: Array<{ elements?: Array<{ content?: string }> }> } };
+    const boardMarkdown = card.body.elements[0]?.elements?.[0]?.content;
+    expect(boardMarkdown).toContain('任务 1');
+    expect(boardMarkdown).toContain('任务 8');
+    expect(boardMarkdown).not.toContain('…还有');
   });
 
   test('suppresses low-signal context tools from user-facing output', () => {

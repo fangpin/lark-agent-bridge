@@ -19,6 +19,17 @@ describe('translateCodexEvent', () => {
     ]).toEqual([{ type: 'text', delta: 'hello' }]);
   });
 
+  test('treats upstream API rate-limit agent messages as terminal errors', () => {
+    const message = 'API Error: Request rejected (429) · upstream error: {"error":{"message":"Too Many Requests","code":"-4399"}}';
+
+    expect([
+      ...translateCodexEvent({
+        type: 'item.completed',
+        item: { id: 'item-1', type: 'agent_message', text: message },
+      }),
+    ]).toEqual([{ type: 'error', message }]);
+  });
+
   test('translates command execution lifecycle into tool events', () => {
     const started = translateCodexEvent({
       type: 'item.started',
@@ -110,6 +121,12 @@ describe('translateCodexEvent', () => {
     expect([...translateCodexEvent({ type: 'error', message: 'Reconnecting... 1/5' })]).toEqual([
       { type: 'progress', phase: 'thinking', label: 'Reconnecting... 1/5' },
     ]);
+  });
+
+  test('treats top-level upstream API rate-limit errors as terminal errors', () => {
+    const message = 'API Error: Request rejected (429) · upstream error: {"error":{"message":"Too Many Requests"}}';
+
+    expect([...translateCodexEvent({ type: 'error', message })]).toEqual([{ type: 'error', message }]);
   });
 
   test('keeps failed turns terminal', () => {

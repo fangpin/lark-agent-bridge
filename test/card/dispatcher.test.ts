@@ -135,6 +135,30 @@ describe('handleCardAction callback forwarding', () => {
   });
 });
 
+describe('handleCardAction code resend', () => {
+  test('replies with the selected code block without enqueueing agent work', async () => {
+    const send = vi.fn(async () => ({ messageId: 'om-code' }));
+    const d = deps({
+      evt: callbackEvent({ cmd: 'copy.code', code: 'const answer = 42;' }),
+      channel: {
+        async getChatMode() {
+          return 'p2p';
+        },
+        send,
+      } as unknown as CardDispatchDeps['channel'],
+    });
+    const pushBatch = vi.spyOn(d.pending, 'pushBatch');
+
+    await handleCardAction(d);
+
+    expect(pushBatch).not.toHaveBeenCalled();
+    expect(d.persistentQueue.enqueue).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledWith('chat-1', {
+      markdown: '```text\nconst answer = 42;\n```',
+    }, { replyTo: 'om-card' });
+  });
+});
+
 describe('handleCardAction mutating command cleanup', () => {
   test('card backend switch cancels durable and memory queued work before mutating backend state', async () => {
     const callOrder: string[] = [];

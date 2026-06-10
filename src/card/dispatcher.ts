@@ -92,6 +92,11 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   if (!cmd) return;
   log.info('cardAction', 'cmd', { cmd, scope });
 
+  if (cmd === 'copy.code') {
+    await resendCodeBlock(deps.channel, deps.evt, payload, threadId);
+    return;
+  }
+
   const backendKey = deps.backendStore?.get(scope) ?? deps.agentRegistry?.defaultKey() ?? deps.agent.id;
   const agent = deps.agentRegistry ? await deps.agentRegistry.getOrDefault(backendKey) : deps.agent;
 
@@ -148,6 +153,28 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   } catch (err) {
     log.fail('cardAction', err, { cmd });
   }
+}
+
+async function resendCodeBlock(
+  channel: LarkChannel,
+  evt: CardActionEvent,
+  payload: Record<string, unknown>,
+  threadId: string | undefined,
+): Promise<void> {
+  const code = typeof payload.code === 'string' ? payload.code : '';
+  if (!code) return;
+  await channel.send(
+    evt.chatId,
+    { markdown: ['```text', escapeFence(code), '```'].join('\n') },
+    {
+      replyTo: evt.messageId,
+      ...(threadId ? { replyInThread: true as const } : {}),
+    },
+  );
+}
+
+function escapeFence(text: string): string {
+  return text.replace(/```/g, '``\u200b`');
 }
 
 async function resolveScope(

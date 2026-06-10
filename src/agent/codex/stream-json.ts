@@ -1,3 +1,4 @@
+import { isRetryableUpstreamRateLimitError } from '../retryable-errors';
 import type { AgentEvent } from '../types';
 
 interface CodexRawEvent {
@@ -84,6 +85,10 @@ export function* translateCodexEvent(raw: unknown, rememberedSessionId?: string)
 
   if (evt.type === 'error') {
     const message = errorMessage(evt.error ?? evt.message);
+    if (isRetryableUpstreamRateLimitError(message)) {
+      yield { type: 'error', message };
+      return;
+    }
     if (message) yield { type: 'progress', phase: 'thinking', label: message };
   }
 }
@@ -94,6 +99,10 @@ function* translateItemEvent(evt: CodexRawEvent): Generator<AgentEvent> {
   const id = typeof item.id === 'string' && item.id ? item.id : 'codex-item';
 
   if (item.type === 'agent_message' && evt.type === 'item.completed' && item.text) {
+    if (isRetryableUpstreamRateLimitError(item.text)) {
+      yield { type: 'error', message: item.text };
+      return;
+    }
     yield { type: 'text', delta: item.text };
     return;
   }

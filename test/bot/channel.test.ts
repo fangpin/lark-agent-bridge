@@ -12,10 +12,12 @@ import { ActiveRuns } from '../../src/bot/active-runs';
 import {
   createMarkdownRefreshCutoff,
   interruptScopeNow,
+  maybeEnqueueAutoRetryForAgentError,
   maybeEnqueueAutoRetryForOpaqueSdkError,
   processAgentStream,
   commentQueueScope,
   restorePersistentQueue,
+  shouldAutoRetryAgentError,
   shouldAutoRetryOpaqueSdkError,
   startChannel as realStartChannel,
   summarizeBatchForHistory,
@@ -25,6 +27,7 @@ import { PersistentQueue } from '../../src/bot/persistent-queue';
 import { RunHistory } from '../../src/bot/run-history';
 import { createInitialState, markIdleTimeout } from '../../src/card/run-state';
 import { renderText } from '../../src/card/text-renderer';
+import { log } from '../../src/core/logger';
 import type { AppConfig } from '../../src/config/schema';
 import type { Controls } from '../../src/commands';
 import type { SessionStore } from '../../src/session/store';
@@ -888,6 +891,66 @@ describe('channel streamMessageId persistence', () => {
       config: {
         streaming_mode: false,
         summary: { content: '已完成' },
+      },
+    });
+  });
+
+  test('markdown reply mode adds code resend buttons for completed code blocks in the final card', async () => {
+    const messages: Record<string, (msg: NormalizedMessage) => Promise<void>> = {};
+    const markdownUpdates: string[] = [];
+    const finalCards: unknown[] = [];
+    let resolveFinalCard!: () => void;
+    const finalCardUpdated = new Promise<void>((resolve) => {
+      resolveFinalCard = resolve;
+    });
+    const fakeChannel = {
+      ...createFakeChannel(messages),
+      async stream(_chatId: string, payload: { markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void> }) {
+        if (!payload.markdown) throw new Error('markdown stream producer was not registered');
+        await payload.markdown({
+          async setContent(markdown: string) {
+            markdownUpdates.push(markdown);
+          },
+        });
+        return { messageId: 'om_markdown_stream' };
+      },
+      async updateCard(_messageId: string, card: unknown) {
+        finalCards.push(card);
+        resolveFinalCard();
+      },
+    } as unknown as LarkChannel;
+    const cfg = markdownReplyConfig();
+    vi.mocked(createLarkChannel).mockReturnValue(fakeChannel);
+
+    await startChannel({
+      cfg,
+      agent: fakeAgentWithEvents(async function* (): AsyncGenerator<AgentEvent> {
+        yield { type: 'text', delta: 'Use this:\n\n```ts\nconst answer = 42;\n```\n\nDone.' };
+        yield { type: 'done' };
+      }),
+      sessions: fakeSessions(),
+      workspaces: fakeWorkspaces('/tmp/project'),
+      controls: fakeControls(cfg),
+      persistentQueue: tempPersistentQueue(),
+    });
+
+    const onMessage = messages.message;
+    if (!onMessage) throw new Error('message handler was not registered');
+    await onMessage(fakeMessage('om_original', 'original prompt'));
+    await finalCardUpdated;
+
+    expect(markdownUpdates.at(-1)).toContain('```ts\nconst answer = 42;\n```');
+    expect(JSON.stringify(finalCards[0])).toContain('"content":"发送代码 1"');
+    expect(JSON.stringify(finalCards[0])).not.toContain('"type":"copy"');
+    expect(finalCards[0]).toMatchObject({
+      body: {
+        elements: expect.arrayContaining([
+          expect.objectContaining({
+            tag: 'button',
+            text: { tag: 'plain_text', content: '发送代码 1' },
+            behaviors: [{ type: 'callback', value: { cmd: 'copy.code', code: 'const answer = 42;' } }],
+          }),
+        ]),
       },
     });
   });
@@ -2889,21 +2952,28 @@ describe('flush durable setup failures', () => {
 });
 
 describe('opaque Cursor SDK auto retry', () => {
-  test('recognizes only uninterrupted opaque SDK status errors with no queued user messages', () => {
+  test('recognizes only uninterrupted retryable agent errors with no queued user messages', () => {
     const state = {
       ...createInitialState('run-1'),
       terminal: 'error' as const,
       errorMsg:
         'agent 失败:sdk run failed (runId=run-1, status=error); Cursor returned no error detail | result={"status":"error"}',
     };
+    const rateLimitState = {
+      ...state,
+      errorMsg:
+        'API Error: Request rejected (429) · upstream error: {"error":{"message":"Too Many Requests","code":"-4399"}}',
+    };
 
+    expect(shouldAutoRetryAgentError(state, false, 0)).toBe(true);
+    expect(shouldAutoRetryAgentError(rateLimitState, false, 0)).toBe(true);
+    expect(shouldAutoRetryAgentError(state, true, 0)).toBe(false);
+    expect(shouldAutoRetryAgentError(state, false, 1)).toBe(false);
+    expect(shouldAutoRetryAgentError({ ...state, errorMsg: 'Cursor API 鉴权失败' }, false, 0)).toBe(false);
     expect(shouldAutoRetryOpaqueSdkError(state, false, 0)).toBe(true);
-    expect(shouldAutoRetryOpaqueSdkError(state, true, 0)).toBe(false);
-    expect(shouldAutoRetryOpaqueSdkError(state, false, 1)).toBe(false);
-    expect(shouldAutoRetryOpaqueSdkError({ ...state, errorMsg: 'Cursor API 鉴权失败' }, false, 0)).toBe(false);
   });
 
-  test('queues the original batch once for opaque SDK status errors', async () => {
+  test('queues the original batch once for retryable agent errors', async () => {
     const flushed: NormalizedMessage[][] = [];
     const pending = new PendingQueue(1000, (_scope, batch) => {
       flushed.push(batch);
@@ -2914,13 +2984,13 @@ describe('opaque Cursor SDK auto retry', () => {
       ...createInitialState('run-1'),
       terminal: 'error' as const,
       errorMsg:
-        'sdk run failed (runId=run-87dd74df-deb6-45ca-8862-85847622ee9a, status=error); Cursor returned no error detail',
+        'API Error: Request rejected (429) · upstream error: {"error":{"message":"Too Many Requests","code":"-4399"}}',
     };
     const autoRetryKeys = new Set<string>();
     const clearSession = vi.fn();
 
     await expect(
-      maybeEnqueueAutoRetryForOpaqueSdkError({
+      maybeEnqueueAutoRetryForAgentError({
         scope: 'chat-1',
         batch,
         finalState: state,
@@ -2929,19 +2999,19 @@ describe('opaque Cursor SDK auto retry', () => {
         autoRetryKeys,
         persistentQueue,
         sessions: { clear: clearSession } as unknown as SessionStore,
-        sessionKey: 'cursor:sdk',
+        sessionKey: 'claude',
       }),
     ).resolves.toBe(true);
     expect(pending.queuedSize('chat-1')).toBe(2);
     const records = await persistentQueue.recoverable();
     expect(records).toHaveLength(1);
     expect(records[0]?.messages.map((msg) => msg.messageId)).toEqual(['msg-1', 'msg-2']);
-    expect(clearSession).toHaveBeenCalledWith('chat-1', 'cursor:sdk');
+    expect(clearSession).not.toHaveBeenCalled();
     pending.cancel('chat-1');
     await persistentQueue.cancelScope('chat-1');
 
     await expect(
-      maybeEnqueueAutoRetryForOpaqueSdkError({
+      maybeEnqueueAutoRetryForAgentError({
         scope: 'chat-1',
         batch,
         finalState: state,
@@ -2950,7 +3020,7 @@ describe('opaque Cursor SDK auto retry', () => {
         autoRetryKeys,
         persistentQueue,
         sessions: { clear: clearSession } as unknown as SessionStore,
-        sessionKey: 'cursor:sdk',
+        sessionKey: 'claude',
       }),
     ).resolves.toBe(false);
     expect(pending.queuedSize('chat-1')).toBe(0);

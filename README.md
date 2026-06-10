@@ -9,7 +9,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local coding-ag
 - Forwards Feishu / Lark messages (DM directly, or `@bot` in a group) to your local coding agent, running in a working directory you control.
 - **Streaming card**: the agent's text and tool calls update on a single Lark card in real time — no waiting for the final reply.
 - **Resilient run UI**: failed or timed-out runs show a one-click retry button; card update failures degrade to a plain markdown fallback instead of leaving a stale running card.
-- **Copyable code blocks**: completed cards add native copy buttons for code blocks when the Lark client supports card copy actions.
+- **Code block actions**: completed cards add a button under code blocks that resends the selected block as a standalone message for easy copying.
 - **Per-chat sessions**: each chat keeps its own agent session, so conversations resume where they left off.
 - **Preempt + batch**: a new message interrupts the running run; rapid-fire messages get coalesced into one request.
 - **Multiple workspaces**: `/ws` switches between named project directories, with sessions tracked per workspace.

@@ -1,6 +1,5 @@
 import type { TodoItem, TodoStatus } from './run-state';
 
-const MAX_VISIBLE_TODOS = 6;
 const TODO_CONTENT_MAX = 90;
 
 export function todoSummaryText(todos: TodoItem[]): string {
@@ -25,11 +24,9 @@ export function renderTodoBoard(todos: TodoItem[], running: boolean): object | u
 }
 
 export function renderTodoMarkdown(todos: TodoItem[]): string {
-  const visible = todos.slice(0, MAX_VISIBLE_TODOS);
-  const lines = visible.map((todo) => `${statusIcon(todo.status)} ${truncate(oneLine(todo.content), TODO_CONTENT_MAX)}`);
-  const hidden = todos.length - visible.length;
-  if (hidden > 0) lines.push(`…还有 ${hidden} 项`);
-  return lines.join('\n');
+  return todos
+    .map((todo) => `${statusIcon(todo.status)} ${truncate(oneLine(todo.content), TODO_CONTENT_MAX)}`)
+    .join('\n');
 }
 
 function panelHeader(titleMd: string): object {

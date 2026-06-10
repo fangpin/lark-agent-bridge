@@ -6,11 +6,12 @@ import type {
   NormalizedMessage,
 } from '@larksuiteoapi/node-sdk';
 import { Domain, LoggerLevel, createLarkChannel } from '@larksuiteoapi/node-sdk';
+import { isRetryableUpstreamRateLimitError } from '../agent/retryable-errors';
 import type { AgentRegistry } from '../agent/registry';
 import type { AgentAdapter } from '../agent/types';
 import type { BackendStore } from '../backend/store';
 import { handleCardAction } from '../card/dispatcher';
-import { renderCard } from '../card/run-renderer';
+import { renderCard, renderMarkdownTextElements } from '../card/run-renderer';
 import {
   finalizeIfRunning,
   createInitialState,
@@ -1223,7 +1224,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       );
     }
     if (durableCompleted) {
-      await maybeEnqueueAutoRetryForOpaqueSdkError({
+      await maybeEnqueueAutoRetryForAgentError({
         scope,
         batch,
         finalState,
@@ -1391,7 +1392,7 @@ function withMarkdownRefreshCutoffNote(markdown: string): string {
   return `${markdown.trimEnd()}\n\n${MARKDOWN_REFRESH_CUTOFF_NOTE}`;
 }
 
-export async function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
+export async function maybeEnqueueAutoRetryForAgentError(opts: {
   scope: string;
   batch: NormalizedMessage[];
   finalState: RunState;
@@ -1405,7 +1406,7 @@ export async function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
   const { scope, batch, finalState, handleInterrupted, pending, persistentQueue, autoRetryKeys, sessions, sessionKey } = opts;
   const key = autoRetryKey(scope, batch);
   if (
-    !shouldAutoRetryOpaqueSdkError(finalState, handleInterrupted, pending.queuedSize(scope)) ||
+    !shouldAutoRetryAgentError(finalState, handleInterrupted, pending.queuedSize(scope)) ||
     autoRetryKeys.has(key)
   ) {
     return false;
@@ -1428,7 +1429,7 @@ export async function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
   }
   pending.pushBatch(scope, retryBatch, record ? { durableId: record.id } : undefined);
   rememberAutoRetryKey(autoRetryKeys, key);
-  log.warn('run', 'auto-retry-opaque-sdk-error', {
+  log.warn('run', 'auto-retry-agent-error', {
     scope,
     batchSize: batch.length,
     runId: finalState.runId,
@@ -1439,7 +1440,13 @@ export async function maybeEnqueueAutoRetryForOpaqueSdkError(opts: {
   return true;
 }
 
-export function shouldAutoRetryOpaqueSdkError(
+export function maybeEnqueueAutoRetryForOpaqueSdkError(
+  opts: Parameters<typeof maybeEnqueueAutoRetryForAgentError>[0],
+): Promise<boolean> {
+  return maybeEnqueueAutoRetryForAgentError(opts);
+}
+
+export function shouldAutoRetryAgentError(
   finalState: RunState,
   handleInterrupted: boolean,
   queuedPending: number,
@@ -1448,8 +1455,16 @@ export function shouldAutoRetryOpaqueSdkError(
     finalState.terminal === 'error' &&
     !handleInterrupted &&
     queuedPending === 0 &&
-    isOpaqueCursorSdkRunError(finalState.errorMsg)
+    (isOpaqueCursorSdkRunError(finalState.errorMsg) || isRetryableUpstreamRateLimitError(finalState.errorMsg))
   );
+}
+
+export function shouldAutoRetryOpaqueSdkError(
+  finalState: RunState,
+  handleInterrupted: boolean,
+  queuedPending: number,
+): boolean {
+  return shouldAutoRetryAgentError(finalState, handleInterrupted, queuedPending);
 }
 
 function isOpaqueCursorSdkRunError(message: string | undefined): boolean {
@@ -1564,7 +1579,10 @@ async function markGroupChatUnreadAfterFinalCard(
 }
 
 function markdownFinalCard(markdown: string, state: RunState): object {
-  const elements: object[] = [{ tag: 'markdown', content: markdown || '_（未返回内容）_' }];
+  const content = markdown || '_（未返回内容）_';
+  const elements: object[] = state.terminal === 'running'
+    ? [{ tag: 'markdown', content }]
+    : renderMarkdownTextElements(content, true);
   if (state.runId && (state.terminal === 'error' || state.terminal === 'idle_timeout')) {
     elements.push({
       tag: 'button',

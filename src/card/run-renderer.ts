@@ -223,6 +223,10 @@ function renderTextGroup(content: string, copyableCode: boolean): object[] {
   return elements.length > 0 ? elements : [markdown(content)];
 }
 
+export function renderMarkdownTextElements(content: string, copyableCode: boolean): object[] {
+  return renderTextGroup(content, copyableCode);
+}
+
 function splitFencedCodeBlocks(content: string): MarkdownSegment[] {
   const segments: MarkdownSegment[] = [];
   const fenceRe = /```[^\n`]*\n[\s\S]*?\n```/g;
@@ -252,8 +256,8 @@ function extractFenceBody(fenced: string): string {
 function copyCodeButton(index: number, code: string): object {
   return {
     tag: 'button',
-    text: { tag: 'plain_text', content: `复制代码 ${index}` },
-    behaviors: [{ type: 'copy', value: { text: code } }],
+    text: { tag: 'plain_text', content: `发送代码 ${index}` },
+    behaviors: [{ type: 'callback', value: { cmd: 'copy.code', code } }],
   };
 }
 
