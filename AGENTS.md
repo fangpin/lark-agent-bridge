@@ -96,6 +96,7 @@ Use `npm`, not `pnpm`, unless the user explicitly asks otherwise.
 - Avoid awaiting Lark updates inside the agent event loop without a timeout. A hung or failed card update must not prevent idle watchdogs, run cleanup, queue unblocking, or fallback delivery from completing.
 - Card and markdown streaming updates are not a reliable source of truth. If an update fails or times out, stop the active run when appropriate and send a plain markdown fallback so the user sees a terminal state.
 - When adding recovery or retry behavior, record enough run history to replay safely, and restrict replay to the original scope/session unless there is an explicit user action.
+- Treat upstream agent/API errors as terminal failures even when a backend reports them as assistant text, top-level error events, or stderr wrapped by process-exit messages. Rate-limit detection should cover real `API Error` 429 / `Too Many Requests` failures across backends without misclassifying explanatory prose, and automatic retries must remain bounded, preserve persistent-queue semantics, and only clear sessions for backend-specific cases such as Cursor SDK worker poisoning.
 
 ## Logging And Diagnostics
 
