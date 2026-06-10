@@ -168,6 +168,37 @@ describe('run renderers', () => {
     expect(renderText(updated)).not.toContain('TaskUpdate');
   });
 
+  test('applies TaskUpdate status changes by harness task number', () => {
+    let state = initialState;
+    for (const [index, subject] of ['测试旧规则', '更新规则', '验证规则'].entries()) {
+      const toolId = `create-${index}`;
+      state = reduce(state, {
+        type: 'tool_use',
+        id: toolId,
+        name: 'TaskCreate',
+        input: { subject },
+      });
+      state = reduce(state, {
+        type: 'tool_result',
+        id: toolId,
+        output: `Task #${34 + index} created successfully: ${subject}`,
+        isError: false,
+      });
+    }
+
+    const updated = reduce(state, {
+      type: 'tool_use',
+      id: 'tool-update',
+      name: 'TaskUpdate',
+      input: {
+        taskId: '35',
+        status: 'completed',
+      },
+    });
+
+    expect(renderText(updated)).toContain('📋 **任务看板** · 1/3 完成');
+  });
+
   test('recognizes updateTodos aliases as the task board source', () => {
     const state = reduce(initialState, {
       type: 'tool_use',

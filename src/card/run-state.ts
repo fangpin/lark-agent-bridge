@@ -14,6 +14,7 @@ export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled';
 
 export interface TodoItem {
   id: string;
+  createToolId?: string;
   content: string;
   status: TodoStatus;
 }
@@ -145,7 +146,7 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
       if (taskTool) {
         return touch({
           ...state,
-          todos: applyTaskTool(state.todos, taskTool),
+          todos: applyTaskTool(state.todos, taskTool, evt.id),
           reasoning: { ...state.reasoning, active: false },
           footer: 'tool_running',
           activity: { kind: 'phase', phase: 'tool_running', label: '更新任务看板' },
@@ -161,6 +162,14 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
     }
 
     case 'tool_result': {
+      const taskCreateResult = readTaskCreateResult(evt.output);
+      if (taskCreateResult) {
+        return touch({
+          ...state,
+          todos: applyTaskCreateResult(state.todos, taskCreateResult, evt.id),
+        });
+      }
+
       let completedTool: ToolEntry | undefined;
       const blocks = state.blocks.map((b) => {
         if (b.kind !== 'tool' || b.tool.id !== evt.id) return b;
@@ -335,11 +344,25 @@ function applyTodoWrite(
   return Array.from(byId.values());
 }
 
+function readTaskCreateResult(output: string): { taskId: string } | undefined {
+  const match = output.match(/^Task #(\S+) created successfully:/);
+  const taskId = match?.[1];
+  if (!taskId) return undefined;
+  return { taskId };
+}
+
+function applyTaskCreateResult(existing: TodoItem[], result: { taskId: string }, toolId: string): TodoItem[] {
+  const pendingIndex = existing.findIndex((todo) => todo.createToolId === toolId);
+  if (pendingIndex < 0) return existing;
+  return existing.map((todo, index) => (index === pendingIndex ? { ...todo, id: result.taskId } : todo));
+}
+
 function applyTaskTool(
   existing: TodoItem[],
   update: { kind: 'create'; todo: TodoItem } | { kind: 'update'; id: string; status?: TodoStatus; content?: string },
+  toolId: string,
 ): TodoItem[] {
-  if (update.kind === 'create') return [...existing, update.todo];
+  if (update.kind === 'create') return [...existing, { ...update.todo, createToolId: toolId }];
   return existing.map((todo) =>
     todo.id === update.id
       ? {
