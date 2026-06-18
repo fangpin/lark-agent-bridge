@@ -2,6 +2,8 @@
 
 A lightweight bot that bridges Feishu / Lark messenger with your local coding-agent CLI (Claude Code, Cursor Agent, or another compatible wrapper). Run one command, scan a QR code to bind a Lark app, and talk to the agent from chat — read screenshots, edit code, anything you'd do at the terminal.
 
+Homepage: [fangpin.github.io/lark-agent-bridge](https://fangpin.github.io/lark-agent-bridge/)
+
 [中文 README](./README.zh.md)
 
 ## What it does
