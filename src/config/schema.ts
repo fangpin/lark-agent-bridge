@@ -384,15 +384,22 @@ export function getAgentBackendConfigs(
         .map(([key, command]) => [key, normalizeAgentCommand(command)]),
     );
   }
-  const single = normalizeAgentCommand(cfg.preferences?.agentCommand);
-  return { [single.backend]: single };
+  if (cfg.preferences?.agentCommand) {
+    const single = normalizeAgentCommand(cfg.preferences.agentCommand);
+    return { [single.backend]: single };
+  }
+  return {
+    cursor: normalizeAgentCommand({ backend: 'cursor' }),
+    codex: normalizeAgentCommand({ backend: 'codex' }),
+    claude: normalizeAgentCommand({ backend: 'claude' }),
+  };
 }
 
 export function getDefaultAgentBackendKey(cfg: AppConfig): string {
   const configs = getAgentBackendConfigs(cfg);
   const preferred = cfg.preferences?.defaultBackend?.trim();
   if (preferred && configs[preferred]) return preferred;
-  return Object.keys(configs)[0] ?? 'claude';
+  return configs.claude ? 'claude' : (Object.keys(configs)[0] ?? 'claude');
 }
 
 export function getAgentCommand(

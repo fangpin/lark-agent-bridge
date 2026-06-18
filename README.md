@@ -147,7 +147,7 @@ Use `lark-agent-bridge start --check` before starting the bot, or `/doctor setup
 
 ### Custom agent command
 
-By default the bridge uses the Claude backend and appends Claude Code arguments to `claude`. To use a compatible wrapper, add `preferences.agentCommand` to `~/.lark-channel/config.json`:
+By default the bridge exposes `cursor`, `codex`, and `claude` backend profiles, and selects `claude` as the default backend. The `cursor` profile uses the Cursor SDK path by default. To use a single custom Claude-compatible wrapper, add `preferences.agentCommand` to `~/.lark-channel/config.json`:
 
 ```json
 {
@@ -162,7 +162,7 @@ By default the bridge uses the Claude backend and appends Claude Code arguments 
 }
 ```
 
-With `claudeArgsOption`, the bridge safely joins Claude Code arguments and runs commands like `my-claude-wrapper --model gpt-5.5 --claude-args "-p ... --output-format stream-json --verbose ..."`. Without `claudeArgsOption`, it appends Claude args as normal argv entries. If `agentCommand` is omitted, it keeps using plain `claude`.
+With `claudeArgsOption`, the bridge safely joins Claude Code arguments and runs commands like `my-claude-wrapper --model gpt-5.5 --claude-args "-p ... --output-format stream-json --verbose ..."`. Without `claudeArgsOption`, it appends Claude args as normal argv entries. If `agentCommand` is omitted, the bridge falls back to the default multi-backend registry instead of a single Claude backend.
 
 ### Multiple backends in one bot
 
@@ -173,9 +173,9 @@ A single bridge process can expose multiple backend profiles and choose one per 
   "preferences": {
     "defaultBackend": "claude",
     "agentBackends": {
-      "claude": { "backend": "claude", "command": "claude" },
+      "cursor": { "backend": "cursor", "command": "agent" },
       "codex": { "backend": "codex", "command": "codex" },
-      "cursor": { "backend": "cursor", "command": "agent" }
+      "claude": { "backend": "claude", "command": "claude" }
     }
   }
 }
@@ -185,9 +185,9 @@ Sessions are isolated by backend. New bound groups use the current backend label
 
 `/new worktree <name> [backend]` uses `preferences.worktreeBranchPrefix` for the branch prefix (default `feat`). For example, from cwd `~/repos/project_a`, prefix `pin`, and name `abc`, it creates branch `pin/abc` and worktree path `~/repos/project_a_pin_abc`. If `[backend]` is provided, the new group is labeled and bound to that backend instead of the current chat backend.
 
-### Cursor backend (`@cursor/sdk` or CLI)
+### Cursor backend (`@cursor/sdk` by default, CLI optional)
 
-To use Cursor Agent, configure the Cursor backend. The default runtime is `@cursor/sdk`: the bridge keeps a small LRU pool of persistent SDK agents, resumes the original Cursor session across messages, and exposes `/workers` plus `/doctor workers` for worker-pool diagnosis.
+`cursor` is an available backend profile. Its default runtime is `@cursor/sdk`: the bridge keeps a small LRU pool of persistent SDK agents, resumes the original Cursor session across messages, and exposes `/workers` plus `/doctor workers` for worker-pool diagnosis.
 
 ```json
 {

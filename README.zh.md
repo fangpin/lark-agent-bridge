@@ -147,7 +147,7 @@ Host CLI 里的 `status` / `doctor` / `handover` / `workspace` / `service` 目�
 
 ### 自定义 agent 命令
 
-默认情况下 bridge 使用 Claude backend，并把 Claude Code 参数追加到 `claude` 后面。要使用兼容包装命令，可以在 `~/.lark-channel/config.json` 里加入 `preferences.agentCommand`：
+默认情况下 bridge 会暴露 `cursor`、`codex`、`claude` 三个 backend profile，并选择 `claude` 作为默认 backend。`cursor` profile 默认走 Cursor SDK 路径。要使用单个自定义 Claude 兼容包装命令，可以在 `~/.lark-channel/config.json` 里加入 `preferences.agentCommand`：
 
 ```json
 {
@@ -162,7 +162,7 @@ Host CLI 里的 `status` / `doctor` / `handover` / `workspace` / `service` 目�
 }
 ```
 
-配置 `claudeArgsOption` 后，bridge 会把 Claude Code 参数安全拼成一个字符串，运行类似 `my-claude-wrapper --model gpt-5.5 --claude-args "-p ... --output-format stream-json --verbose ..."` 的命令。不配置 `claudeArgsOption` 时会把 Claude 参数作为普通 argv 追加；不配置 `agentCommand` 时仍然使用默认的 `claude`。
+配置 `claudeArgsOption` 后，bridge 会把 Claude Code 参数安全拼成一个字符串，运行类似 `my-claude-wrapper --model gpt-5.5 --claude-args "-p ... --output-format stream-json --verbose ..."` 的命令。不配置 `claudeArgsOption` 时会把 Claude 参数作为普通 argv 追加；不配置 `agentCommand` 时会回退到默认的多 backend registry，而不是单个 `claude` backend。
 
 ### 单个 bot 同时配置多个 backend
 
@@ -173,9 +173,9 @@ Host CLI 里的 `status` / `doctor` / `handover` / `workspace` / `service` 目�
   "preferences": {
     "defaultBackend": "claude",
     "agentBackends": {
-      "claude": { "backend": "claude", "command": "claude" },
+      "cursor": { "backend": "cursor", "command": "agent" },
       "codex": { "backend": "codex", "command": "codex" },
-      "cursor": { "backend": "cursor", "command": "agent" }
+      "claude": { "backend": "claude", "command": "claude" }
     }
   }
 }
@@ -185,9 +185,9 @@ Host CLI 里的 `status` / `doctor` / `handover` / `workspace` / `service` 目�
 
 `/new worktree <name> [backend]` 使用 `preferences.worktreeBranchPrefix` 作为分支前缀（默认 `feat`）。例如当前 cwd 是 `~/repos/project_a`，前缀是 `pin`，名称是 `abc`，会创建分支 `pin/abc` 和 worktree 目录 `~/repos/project_a_pin_abc`。如果传入 `[backend]`，新群会使用该 backend 的后缀并绑定到该 backend，而不是沿用当前群的 backend。
 
-### Cursor backend（`@cursor/sdk` 或 CLI）
+### Cursor backend（默认 `@cursor/sdk`，CLI 可选）
 
-要接入 Cursor Agent，配置 Cursor backend。默认 runtime 是 `@cursor/sdk`：bridge 会维护一个小型 LRU 的持久 SDK agent 池，在多轮消息之间 resume 原 Cursor session，并提供 `/workers` 和 `/doctor workers` 用于诊断 worker pool。
+`cursor` 是 bridge 可用的 backend profile 之一。它的默认 runtime 是 `@cursor/sdk`：bridge 会维护一个小型 LRU 的持久 SDK agent 池，在多轮消息之间 resume 原 Cursor session，并提供 `/workers` 和 `/doctor workers` 用于诊断 worker pool。
 
 ```json
 {

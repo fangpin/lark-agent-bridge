@@ -4,6 +4,7 @@ import {
   getAgentCommand,
   getAgentCodexModel,
   getAgentCursorLocalSettings,
+  getAgentCursorRuntime,
   getDefaultAgentBackendKey,
   getMarkGroupUnreadOnFinalCard,
   getWorktreeBranchPrefix,
@@ -99,6 +100,22 @@ describe('agent command config', () => {
   test('loads local Cursor settings by default for SDK runtime', () => {
     expect(getAgentCursorLocalSettings(cfg({}))).toBe('all');
     expect(getAgentCursorLocalSettings(cfg({ agentCursorLocalSettings: 'none' }))).toBe('none');
+  });
+
+  test('provides implicit default backend registry when no backend config is set', () => {
+    expect(getAgentBackendConfigs(cfg({}))).toEqual({
+      cursor: { backend: 'cursor', command: 'agent', args: [] },
+      codex: { backend: 'codex', command: 'codex', args: [] },
+      claude: { backend: 'claude', command: 'claude', args: [] },
+    });
+  });
+
+  test('defaults to claude as the default backend key', () => {
+    expect(getDefaultAgentBackendKey(cfg({}))).toBe('claude');
+  });
+
+  test('does not enable cursor sdk runtime when cursor is not the default backend', () => {
+    expect(getAgentCursorRuntime(cfg({}))).toBe('cli');
   });
 
   test('resolves worktree branch prefix with validation fallback', () => {
