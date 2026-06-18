@@ -68,8 +68,8 @@ export interface HomeCopy {
 export const copy: Record<Locale, HomeCopy> = {
   zh: {
     nav: {
-      docsHref: '#quickstart',
-      docsLabel: '查看接入文档',
+      docsHref: '#docs',
+      docsLabel: '设计与实现',
       githubHref: 'https://github.com/fangpin/lark-agent-bridge',
       githubLabel: 'GitHub',
     },
@@ -82,8 +82,8 @@ export const copy: Record<Locale, HomeCopy> = {
       quickstartCommand: 'npx -y lark-agent-bridge@latest start',
       primaryCtaLabel: '查看 GitHub',
       primaryCtaHref: 'https://github.com/fangpin/lark-agent-bridge',
-      secondaryCtaLabel: '查看接入文档',
-      secondaryCtaHref: '#quickstart',
+      secondaryCtaLabel: '阅读设计文档',
+      secondaryCtaHref: '#docs',
       backendBadges: ['Claude Code', 'Cursor Agent', 'Codex', 'Wrappers'],
       workspaceNotes: [
         '每个 chat 保留独立 session',
@@ -128,7 +128,7 @@ export const copy: Record<Locale, HomeCopy> = {
     },
     quickstart: {
       heading: '快速开始与运维入口',
-      body: '把启动命令、首启说明、常用斜杠命令和文档入口放在一起，而且默认优先指向中文资料。',
+      body: '把启动命令、首启说明、常用斜杠命令和文档入口放在一起，站点内优先提供中文设计与实现文档。',
       command: 'npx -y lark-agent-bridge@latest start',
       setupSteps: [
         '首次启动会出现扫码向导，用飞书 / Lark 绑定 PersonalAgent。',
@@ -137,6 +137,7 @@ export const copy: Record<Locale, HomeCopy> = {
       ],
       commands: ['/ws', '/new worktree', '/retry', '/status', '/workers', '/doctor'],
       docs: [
+        { label: '站点文档', href: '#docs' },
         { label: '中文 README', href: 'https://github.com/fangpin/lark-agent-bridge/blob/main/README.zh.md' },
         { label: '中文介绍', href: 'https://github.com/fangpin/lark-agent-bridge/blob/main/docs/lark-agent-bridge-intro.zh.md' },
         { label: 'English README', href: 'https://github.com/fangpin/lark-agent-bridge/blob/main/README.md' },
@@ -145,6 +146,7 @@ export const copy: Record<Locale, HomeCopy> = {
     footer: {
       links: [
         { label: 'GitHub', href: 'https://github.com/fangpin/lark-agent-bridge' },
+        { label: '站点文档', href: '#docs' },
         { label: '中文 README', href: 'https://github.com/fangpin/lark-agent-bridge/blob/main/README.zh.md' },
         { label: 'English README', href: 'https://github.com/fangpin/lark-agent-bridge/blob/main/README.md' },
       ],
@@ -153,8 +155,8 @@ export const copy: Record<Locale, HomeCopy> = {
   },
   en: {
     nav: {
-      docsHref: '#quickstart',
-      docsLabel: 'Read setup',
+      docsHref: '#docs',
+      docsLabel: 'Design docs',
       githubHref: 'https://github.com/fangpin/lark-agent-bridge',
       githubLabel: 'GitHub',
     },
@@ -167,8 +169,8 @@ export const copy: Record<Locale, HomeCopy> = {
       quickstartCommand: 'npx -y lark-agent-bridge@latest start',
       primaryCtaLabel: 'View on GitHub',
       primaryCtaHref: 'https://github.com/fangpin/lark-agent-bridge',
-      secondaryCtaLabel: 'Read setup',
-      secondaryCtaHref: '#quickstart',
+      secondaryCtaLabel: 'Read design docs',
+      secondaryCtaHref: '#docs',
       backendBadges: ['Claude Code', 'Cursor Agent', 'Codex', 'Wrappers'],
       workspaceNotes: [
         'Each chat keeps its own session',
@@ -213,7 +215,7 @@ export const copy: Record<Locale, HomeCopy> = {
     },
     quickstart: {
       heading: 'Quickstart and operator entry points',
-      body: 'Keep the install command, first-run notes, slash commands, and doc links together while still defaulting to Chinese on first load.',
+      body: 'Keep the install command, first-run notes, slash commands, and doc links together while exposing the mirrored site docs next to the READMEs.',
       command: 'npx -y lark-agent-bridge@latest start',
       setupSteps: [
         'The first launch opens a QR wizard so you can bind a PersonalAgent in Lark / Feishu.',
@@ -222,6 +224,7 @@ export const copy: Record<Locale, HomeCopy> = {
       ],
       commands: ['/ws', '/new worktree', '/retry', '/status', '/workers', '/doctor'],
       docs: [
+        { label: 'Site docs', href: '#docs' },
         { label: 'Chinese README', href: 'https://github.com/fangpin/lark-agent-bridge/blob/main/README.zh.md' },
         { label: 'Chinese intro', href: 'https://github.com/fangpin/lark-agent-bridge/blob/main/docs/lark-agent-bridge-intro.zh.md' },
         { label: 'English README', href: 'https://github.com/fangpin/lark-agent-bridge/blob/main/README.md' },
@@ -230,6 +233,7 @@ export const copy: Record<Locale, HomeCopy> = {
     footer: {
       links: [
         { label: 'GitHub', href: 'https://github.com/fangpin/lark-agent-bridge' },
+        { label: 'Site docs', href: '#docs' },
         { label: 'Chinese README', href: 'https://github.com/fangpin/lark-agent-bridge/blob/main/README.zh.md' },
         { label: 'English README', href: 'https://github.com/fangpin/lark-agent-bridge/blob/main/README.md' },
       ],

@@ -3,6 +3,7 @@
 把飞书 / Lark 消息和本地 coding-agent CLI（Claude Code、Cursor Agent，或其它兼容包装命令）打通的轻量 bot，用一条命令起服务，扫码绑应用，在飞书里和 agent 对话、让它读图 / 改代码。
 
 项目主页：[fangpin.github.io/lark-agent-bridge](https://fangpin.github.io/lark-agent-bridge/)
+设计与实现文档：[fangpin.github.io/lark-agent-bridge/#docs](https://fangpin.github.io/lark-agent-bridge/#docs)
 
 [English README](./README.md)
 

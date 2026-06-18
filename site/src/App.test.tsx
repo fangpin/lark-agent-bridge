@@ -5,6 +5,11 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, test } from 'vitest';
 import App from './App';
 
+function renderAt(hash = '') {
+  window.location.hash = hash;
+  return render(<App />);
+}
+
 describe('homepage shell', () => {
   test('uses a unified dark theme instead of a split light lower section', () => {
     const css = readFileSync(resolve(process.cwd(), 'src/styles.css'), 'utf8');
@@ -15,7 +20,7 @@ describe('homepage shell', () => {
 
   test('defaults to Chinese and switches to English', async () => {
     const user = userEvent.setup();
-    render(<App />);
+    renderAt();
 
     expect(
       screen.getByRole('heading', { name: '把本地 coding agents 接进飞书工作台' }),
@@ -29,7 +34,7 @@ describe('homepage shell', () => {
   });
 
   test('shows the default Chinese hero quickstart and backend chips', () => {
-    render(<App />);
+    renderAt();
 
     const heroCockpit = screen.getByLabelText('Command center preview');
     expect(within(heroCockpit).getByText('npx -y lark-agent-bridge@latest start')).toBeInTheDocument();
@@ -40,7 +45,7 @@ describe('homepage shell', () => {
   });
 
   test('shows product proof directly below the hero', () => {
-    render(<App />);
+    renderAt();
 
     expect(screen.getByRole('heading', { name: '运行界面证据' })).toBeInTheDocument();
     expect(screen.getByAltText('桥接消息流界面')).toBeInTheDocument();
@@ -49,7 +54,7 @@ describe('homepage shell', () => {
   });
 
   test('explains the workbench capabilities and the bridge architecture', () => {
-    render(<App />);
+    renderAt();
 
     expect(screen.getByRole('heading', { name: '为什么它是工程工作台，而不是普通 bot' })).toBeInTheDocument();
     expect(screen.getByText('多后端切换')).toBeInTheDocument();
@@ -63,7 +68,7 @@ describe('homepage shell', () => {
   });
 
   test('shows quickstart, operator commands, and repo/doc links', () => {
-    render(<App />);
+    renderAt();
 
     expect(screen.getByRole('heading', { name: '快速开始与运维入口' })).toBeInTheDocument();
     const quickstartSection = screen.getByRole('heading', { name: '快速开始与运维入口' }).closest('section');
@@ -85,5 +90,26 @@ describe('homepage shell', () => {
       'href',
       'https://github.com/fangpin/lark-agent-bridge',
     );
+  });
+
+  test('renders the Markdown-backed docs overview from the site route', () => {
+    renderAt('#docs');
+
+    expect(screen.getByRole('heading', { name: '系统总览与代码边界' })).toBeInTheDocument();
+    expect(screen.getByText('docs/site/zh/overview.md')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '消息接入与运行编排' })).toBeInTheDocument();
+  });
+
+  test('keeps docs chapters mirrored across Chinese and English', async () => {
+    const user = userEvent.setup();
+    renderAt('#docs/orchestration');
+
+    expect(screen.getByRole('heading', { name: '消息接入与运行编排' })).toBeInTheDocument();
+    expect(screen.getByText('docs/site/zh/orchestration.md')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'EN' }));
+
+    expect(screen.getByRole('heading', { name: 'Message Intake and Run Orchestration' })).toBeInTheDocument();
+    expect(screen.getByText('docs/site/en/orchestration.md')).toBeInTheDocument();
   });
 });
