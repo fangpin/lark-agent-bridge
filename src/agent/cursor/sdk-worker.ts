@@ -8,6 +8,7 @@ import {
   isCursorNetworkError,
   isCursorRateLimitError,
 } from './sdk-error';
+import { formatCursorRunResultError } from './sdk-run-diagnostics';
 import { buildCursorPrompt } from './spawn-run';
 import { translateSdkMessage, type SdkMessageLike } from './sdk-translate';
 import type { AgentEvent } from '../types';
@@ -274,7 +275,16 @@ async function handleRun(id: string, prompt: string, allowReplacement = true): P
 
     const result = await run.wait();
     if (result.status === 'error') {
-      const message = withWorkerRecoveryHint(withRecoverySummary(formatRunResultError(result), recoveryNotes), true);
+      const message = withWorkerRecoveryHint(
+        withRecoverySummary(
+          await formatCursorRunResultError(result, {
+            agentId: agent.agentId,
+            cwd: agentCwd,
+          }),
+          recoveryNotes,
+        ),
+        true,
+      );
       process.stderr.write(`[sdk-worker] ${message}\n`);
       send({
         type: 'error',
@@ -290,27 +300,6 @@ async function handleRun(id: string, prompt: string, allowReplacement = true): P
   } finally {
     activeRunId = undefined;
     activeAbort = undefined;
-  }
-}
-
-function formatRunResultError(result: Awaited<ReturnType<Awaited<ReturnType<SDKAgent['send']>>['wait']>>): string {
-  const headline = `sdk run failed (runId=${result.id}, status=${result.status})`;
-  if (typeof result.result === 'string' && result.result.trim()) {
-    return `${headline}: ${result.result.trim()}`;
-  }
-  const diagnostic = safeJson({
-    id: result.id,
-    status: result.status,
-    result: result.result,
-  });
-  return `${headline}; Cursor returned no error detail${diagnostic ? ` | result=${diagnostic}` : ''}`;
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value).slice(0, 1200);
-  } catch {
-    return '';
   }
 }
 

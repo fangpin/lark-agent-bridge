@@ -36,4 +36,12 @@ declare module '@cursor/sdk' {
     create(options: unknown): Promise<SDKAgent>;
     resume(agentId: string, options?: unknown): Promise<SDKAgent>;
   };
+
+  export function createAgentPlatform(options: {
+    workspaceRef: string;
+  }): Promise<{
+    store: {
+      getRun(agentId: string, runId: string): Promise<{ errorCode?: string } | null | undefined>;
+    };
+  }>;
 }

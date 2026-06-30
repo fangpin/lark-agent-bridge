@@ -369,6 +369,87 @@ describe('poolKeyFor', () => {
     expect(secondShutdown).not.toHaveBeenCalled();
   });
 
+  test('surfaces that automatic worker recovery already ran when the rebuilt worker also fails', async () => {
+    const firstShutdown = vi.fn(async () => {});
+    const secondShutdown = vi.fn(async () => {});
+    const firstRun = vi.fn(() => {
+      return {
+        events: (async function* () {
+          yield {
+            type: 'error',
+            message:
+              'sdk run failed; Cursor returned no error detail\n\n已自动丢弃当前 SDK worker。bridge 会优先用原 session 创建新 worker 并继续一次；若原 session 不可恢复或仍有 active run，将停止自动继续，保留一键重试/新 session 入口。',
+            fatal: true,
+          } as const;
+        })(),
+        stop: async () => {},
+        waitForExit: async () => true,
+      } satisfies AgentRun;
+    });
+    const secondRun = vi.fn((opts) => {
+      expect(opts.sessionId).toBe('agent-123');
+      expect(opts.allowSessionReplacement).toBe(false);
+      return {
+        events: (async function* () {
+          yield {
+            type: 'error',
+            message:
+              'sdk run failed; Cursor returned no error detail\n\n已自动丢弃当前 SDK worker。bridge 会优先用原 session 创建新 worker 并继续一次；若原 session 不可恢复或仍有 active run，将停止自动继续，保留一键重试/新 session 入口。',
+            fatal: true,
+          } as const;
+        })(),
+        stop: async () => {},
+        waitForExit: async () => true,
+      } satisfies AgentRun;
+    });
+    const workers = [
+      {
+        pid: 123,
+        ensure: async () => 'agent-123',
+        run: firstRun,
+        stopRun: () => {},
+        shutdown: firstShutdown,
+      },
+      {
+        pid: 456,
+        ensure: async () => 'agent-123',
+        run: secondRun,
+        stopRun: () => {},
+        shutdown: secondShutdown,
+      },
+    ];
+    const factory = vi.fn(() => workers.shift()!);
+    const pool = new CursorSdkPool(
+      { command: 'agent', prefixArgs: [], commandLabel: 'agent' },
+      { model: { id: 'gpt-5.5' } },
+      1,
+      factory,
+    );
+
+    const result = pool.run({ prompt: 'hi', cwd: '/tmp/ws', sessionId: 'agent-123' });
+    const seen: AgentEvent[] = [];
+    for await (const event of result.events) {
+      seen.push(event);
+    }
+
+    expect(seen).toEqual([
+      {
+        type: 'error',
+        fatal: true,
+        message: expect.stringContaining('已尝试用原 session 重建 worker 并继续一次，但仍然失败。'),
+      },
+    ]);
+    expect(seen[0]).toMatchObject({
+      type: 'error',
+      fatal: true,
+      message: expect.stringContaining('已停止自动继续。可点击一键重试'),
+    });
+    expect(firstRun).toHaveBeenCalledTimes(1);
+    expect(secondRun).toHaveBeenCalledTimes(1);
+    expect(firstShutdown).toHaveBeenCalledTimes(1);
+    expect(secondShutdown).toHaveBeenCalledTimes(1);
+  });
+
   test('reports running worker snapshots', () => {
     const pool = new CursorSdkPool(
       { command: 'agent', prefixArgs: [], commandLabel: 'agent' },

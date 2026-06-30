@@ -223,15 +223,32 @@ export class CursorSdkPool {
 
     for (;;) {
       let fatalWorkerError: Extract<AgentEvent, { type: 'error' }> | undefined;
+      let exhaustedRecoveryError: Extract<AgentEvent, { type: 'error' }> | undefined;
       for await (const event of attempt.events) {
         if ((event.type === 'system' || event.type === 'done') && event.sessionId) {
           sessionId = event.sessionId;
         }
-        if (!recovered && isRecoverableFatalWorkerEvent(event)) {
-          fatalWorkerError = event;
+        if (isRecoverableFatalWorkerEvent(event)) {
+          if (!recovered) {
+            fatalWorkerError = event;
+            break;
+          }
+          exhaustedRecoveryError = event;
           break;
         }
         yield event;
+      }
+
+      if (exhaustedRecoveryError) {
+        await attempt.released;
+        yield {
+          ...exhaustedRecoveryError,
+          message: withFatalRecoveryFailure(
+            exhaustedRecoveryError.message,
+            '已尝试用原 session 重建 worker 并继续一次，但仍然失败',
+          ),
+        };
+        return;
       }
 
       if (!fatalWorkerError) return;
@@ -802,7 +819,7 @@ function withFatalRecoveryFailure(originalMessage: string, reason: string): stri
   return [
     `SDK worker fatal 后自动恢复失败：${reason}。`,
     '已保留原 session，不会自动创建 replacement session 或无上下文重放。',
-    '可点击一键重试，或发送 `/new` 开新 session 后再试。',
+    '已停止自动继续。可点击一键重试，或发送 `/new` 开新 session 后再试。',
     '',
     `原始错误：${originalMessage}`,
   ].join('\n');

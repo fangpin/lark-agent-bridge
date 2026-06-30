@@ -1423,7 +1423,7 @@ export async function maybeEnqueueAutoRetryForAgentError(opts: {
     }
   }
   let clearedSessionKey: string | undefined;
-  if (sessions && sessionKey === 'cursor:sdk') {
+  if (sessions && shouldClearSessionForAutoRetry(sessionKey, finalState.errorMsg)) {
     sessions.clear(scope, sessionKey);
     clearedSessionKey = sessionKey;
   }
@@ -1451,11 +1451,15 @@ export function shouldAutoRetryAgentError(
   handleInterrupted: boolean,
   queuedPending: number,
 ): boolean {
+  const message = finalState.errorMsg;
   return (
     finalState.terminal === 'error' &&
     !handleInterrupted &&
     queuedPending === 0 &&
-    (isOpaqueCursorSdkRunError(finalState.errorMsg) || isRetryableUpstreamRateLimitError(finalState.errorMsg))
+    (
+      (isOpaqueCursorSdkRunError(message) && !hasStoppedOpaqueCursorSdkRecovery(message)) ||
+      isRetryableUpstreamRateLimitError(message)
+    )
   );
 }
 
@@ -1474,6 +1478,22 @@ function isOpaqueCursorSdkRunError(message: string | undefined): boolean {
     message.includes('status=error') &&
     message.includes('Cursor returned no error detail')
   );
+}
+
+function hasStoppedOpaqueCursorSdkRecovery(message: string | undefined): boolean {
+  if (!message) return false;
+  return (
+    message.includes('SDK worker fatal 后自动恢复失败') ||
+    message.includes('已停止自动继续') ||
+    message.includes('不会自动创建 replacement session 或无上下文重放')
+  );
+}
+
+function shouldClearSessionForAutoRetry(
+  sessionKey: string | undefined,
+  message: string | undefined,
+): sessionKey is string {
+  return sessionKey === 'cursor:sdk' && isOpaqueCursorSdkRunError(message) && !hasStoppedOpaqueCursorSdkRecovery(message);
 }
 
 function autoRetryKey(scope: string, batch: NormalizedMessage[]): string {

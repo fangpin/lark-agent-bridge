@@ -22,3 +22,17 @@ export const Agent = {
     throw new Error('Agent.resume is not implemented in the test stub');
   },
 };
+
+export async function createAgentPlatform(): Promise<{
+  store: {
+    getRun(): Promise<null>;
+  };
+}> {
+  return {
+    store: {
+      async getRun() {
+        return null;
+      },
+    },
+  };
+}

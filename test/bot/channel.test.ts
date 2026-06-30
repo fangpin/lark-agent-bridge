@@ -3028,6 +3028,84 @@ describe('opaque Cursor SDK auto retry', () => {
     expect(flushed).toEqual([]);
   });
 
+  test('preserves the Cursor SDK session when auto retrying a rate limit error', async () => {
+    const flushed: NormalizedMessage[][] = [];
+    const pending = new PendingQueue(1000, (_scope, batch) => {
+      flushed.push(batch);
+    });
+    const persistentQueue = tempPersistentQueue();
+    const batch = [fakeMessage('msg-1')];
+    const state = {
+      ...createInitialState('run-1'),
+      terminal: 'error' as const,
+      errorMsg:
+        'API Error: Request rejected (429) · upstream error: {"error":{"message":"Too Many Requests","code":"-4399"}}',
+    };
+    const clearSession = vi.fn();
+
+    await expect(
+      maybeEnqueueAutoRetryForAgentError({
+        scope: 'chat-1',
+        batch,
+        finalState: state,
+        handleInterrupted: false,
+        pending,
+        autoRetryKeys: new Set<string>(),
+        persistentQueue,
+        sessions: { clear: clearSession } as unknown as SessionStore,
+        sessionKey: 'cursor:sdk',
+      }),
+    ).resolves.toBe(true);
+
+    expect(clearSession).not.toHaveBeenCalled();
+    expect(pending.queuedSize('chat-1')).toBe(1);
+    expect(await persistentQueue.recoverable()).toEqual([
+      expect.objectContaining({ scope: 'chat-1' }),
+    ]);
+    pending.cancel('chat-1');
+    await persistentQueue.cancelScope('chat-1');
+    expect(flushed).toEqual([]);
+  });
+
+  test('does not auto replay an opaque Cursor SDK error after worker recovery already stopped', async () => {
+    const flushed: NormalizedMessage[][] = [];
+    const pending = new PendingQueue(1000, (_scope, batch) => {
+      flushed.push(batch);
+    });
+    const batch = [fakeMessage('msg-1', 'trigger opaque error')];
+    const state = {
+      ...createInitialState('run-1'),
+      terminal: 'error' as const,
+      errorMsg: [
+        'SDK worker fatal 后已尝试用原 session 重建 worker 并继续一次，但仍然失败。',
+        '已停止自动继续。可点击一键重试，或发送 `/new` 开新 session 后再试。',
+        '',
+        '最终错误：sdk run failed (runId=run-1, status=error); Cursor returned no error detail',
+      ].join('\n'),
+    };
+    const persistentQueue = tempPersistentQueue();
+    const clearSession = vi.fn();
+
+    await expect(
+      maybeEnqueueAutoRetryForOpaqueSdkError({
+        scope: 'chat-1',
+        batch,
+        finalState: state,
+        handleInterrupted: false,
+        pending,
+        persistentQueue,
+        autoRetryKeys: new Set<string>(),
+        sessions: { clear: clearSession } as unknown as SessionStore,
+        sessionKey: 'cursor:sdk',
+      }),
+    ).resolves.toBe(false);
+
+    expect(clearSession).not.toHaveBeenCalled();
+    expect(pending.queuedSize('chat-1')).toBe(0);
+    expect(await persistentQueue.recoverable()).toEqual([]);
+    expect(flushed).toEqual([]);
+  });
+
   test('skips auto retry when durable enqueue fails instead of falling back to memory-only', async () => {
     const flushed: NormalizedMessage[][] = [];
     const pending = new PendingQueue(1000, (_scope, batch) => {
